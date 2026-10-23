@@ -1,16 +1,15 @@
 """Train common-history MaxEnt IRL; outputs contain only aggregate statistics."""
 import json
 import sys
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from ecommerce_sim.history_trajectory_irl import ACTIONS, STATE_NAMES, evaluate, fit_maxent
-from src.analysis.masked_embedding_clusters import source_data
+from ecommerce_sim.models.history_trajectory_irl import ACTIONS, STATE_NAMES, evaluate, fit_maxent
+from ecommerce_sim.paths import PROJECT_ROOT, CAPSTONE_ROOT
 
-CAPSTONE = Path('/Users/kimdaewon/Desktop/캡스톤디자인')
-ROOT = Path('/Users/kimdaewon/Desktop/eCommerce-Sim')
+CAPSTONE = CAPSTONE_ROOT
+ROOT = PROJECT_ROOT
 
 
 def windows_for_user(frame, source, include_lags=False):
@@ -48,6 +47,8 @@ def windows_for_user(frame, source, include_lags=False):
 
 
 def run(source):
+    from src.analysis.masked_embedding_clusters import source_data
+
     path = CAPSTONE / ('data/raw/kaggle/cosmetics' if source == 'cosmetics'
                        else f'data/raw/kaggle/{source}/events.csv')
     events, quality, _ = source_data(source, path, sample_modulus=100)

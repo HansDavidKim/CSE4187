@@ -1,7 +1,7 @@
 """Finite-horizon causal-entropy reward fitting with variable-length sessions."""
 import numpy as np
 import torch
-from ecommerce_sim.latent_session_model import LatentSessionUser
+from ecommerce_sim.simulate.latent_session_model import LatentSessionUser
 
 
 def policy_log_probs(weights, latent, n_actions, horizon):

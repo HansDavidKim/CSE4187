@@ -9,12 +9,12 @@ import numpy as np
 import pandas as pd
 import torch
 
-from ecommerce_sim.common_behavior_irl import COEFFICIENT_NAMES, trajectory_windows
-from ecommerce_sim.trajectory_irl import fit_trajectory_reward, policy_numpy
-from src.analysis.masked_embedding_clusters import rows_from_events, source_data
+from ecommerce_sim.models.common_behavior_irl import COEFFICIENT_NAMES, trajectory_windows
+from ecommerce_sim.models.trajectory_irl import fit_trajectory_reward, policy_numpy
+from ecommerce_sim.paths import CAPSTONE_ROOT
 
 
-CAPSTONE = Path('/Users/kimdaewon/Desktop/캡스톤디자인')
+CAPSTONE = CAPSTONE_ROOT
 ROOT = Path('artifacts/three-ecommerce-personas')
 OUT = Path('artifacts/common-behavior-irl')
 HORIZON = 3
@@ -37,6 +37,8 @@ def log_loss(reward, states, actions):
 
 
 def run(source):
+    from src.analysis.masked_embedding_clusters import rows_from_events, source_data
+
     torch.set_num_threads(1)
     path = CAPSTONE / ('data/raw/kaggle/cosmetics' if source == 'cosmetics'
                        else f'data/raw/kaggle/{source}/events.csv')

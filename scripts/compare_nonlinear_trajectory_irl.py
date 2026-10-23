@@ -9,9 +9,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from ecommerce_sim.nts_adapter import load_sequences
-from ecommerce_sim.nonlinear_trajectory_irl import fit_reward, fit_transitions, make_states, policy_numpy
-from ecommerce_sim.user_choice import weekly_choices
+from ecommerce_sim.preprocessing.nts_adapter import load_sequences
+from ecommerce_sim.models.nonlinear_trajectory_irl import fit_reward, fit_transitions, make_states, policy_numpy
+from ecommerce_sim.models.user_choice import weekly_choices
 
 
 def score(policy, groups, states, actions):

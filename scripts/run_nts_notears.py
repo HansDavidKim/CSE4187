@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from ecommerce_sim.nts_training import fit_nts_notears
+from ecommerce_sim.models.nts_training import fit_nts_notears
 
 
 def main() -> None:

@@ -10,10 +10,10 @@ import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
 from threadpoolctl import threadpool_limits
+from ecommerce_sim.paths import CAPSTONE_ROOT
 
-from src.analysis.masked_embedding_clusters import rows_from_events, source_data
 
-CAPSTONE = Path('/Users/kimdaewon/Desktop/캡스톤디자인')
+CAPSTONE = CAPSTONE_ROOT
 OUT = Path('artifacts/persona-delays')
 FIG = Path('research/figures/analysis')
 HOURS = np.array([.5, 1, 6, 24, 72, 168, 336, 720])
@@ -39,6 +39,8 @@ def summarize(frame):
 
 
 def run(source):
+    from src.analysis.masked_embedding_clusters import rows_from_events, source_data
+
     path = CAPSTONE / ('data/raw/kaggle/cosmetics' if source == 'cosmetics'
                        else 'data/raw/kaggle/electronics/events.csv')
     events, quality, actions = source_data(source, path, sample_modulus=100)

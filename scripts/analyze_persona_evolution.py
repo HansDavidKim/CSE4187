@@ -10,17 +10,19 @@ import pandas as pd
 import torch
 from sklearn.model_selection import train_test_split
 
-from ecommerce_sim.persona_evolution import session_tokens, summarize_tokens
-from src.irl.fit import load_events
-from src.irl.masked_sequence_personas import MaskedGRUEncoder, embeddings
-from src.irl.sequence_personas import padded, sequence_rows
+from ecommerce_sim.analysis.persona_evolution import session_tokens, summarize_tokens
+from ecommerce_sim.paths import CAPSTONE_ROOT
 
 
-CAPSTONE = Path('/Users/kimdaewon/Desktop/캡스톤디자인')
+CAPSTONE = CAPSTONE_ROOT
 OUT = Path('artifacts/persona-evolution')
 
 
 def classify(model, checkpoint, sequences):
+    from src.irl.masked_sequence_personas import embeddings
+
+    from src.irl.sequence_personas import padded
+
     tokens, lengths = padded(sequences, max_tokens=64)
     z = embeddings(model, tokens, lengths)
     z = (z - checkpoint['scaler_mean'].numpy()) / checkpoint['scaler_scale'].numpy()
@@ -47,6 +49,12 @@ def profile(frame, label):
 
 
 def run(source):
+    from src.irl.fit import load_events
+
+    from src.irl.masked_sequence_personas import MaskedGRUEncoder
+
+    from src.irl.sequence_personas import sequence_rows
+
     torch.set_num_threads(1)
     checkpoint = torch.load(CAPSTONE / f'data/models/{source}_masked_sequence_personas.pt',
                             map_location='cpu', weights_only=True)

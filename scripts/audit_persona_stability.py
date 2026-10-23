@@ -8,9 +8,10 @@ import pandas as pd
 from scipy.optimize import linear_sum_assignment
 from sklearn.cluster import KMeans
 from sklearn.metrics import adjusted_rand_score
+from ecommerce_sim.paths import CAPSTONE_ROOT
 
 
-ROOT = Path('/Users/kimdaewon/Desktop/캡스톤디자인')
+ROOT = CAPSTONE_ROOT
 OUT = Path('artifacts/three-ecommerce-personas')
 
 

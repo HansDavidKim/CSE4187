@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from ecommerce_sim.campaign_audit import reconstruct
+from ecommerce_sim.analysis.campaign_audit import reconstruct
 
 
 def main():

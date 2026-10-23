@@ -2,15 +2,15 @@
 import json
 import sys
 
-import numpy as np
 import pandas as pd
 
-from ecommerce_sim.recent_history_features import ACTIONS, decision_rows, feature_names, state_features
+from ecommerce_sim.preprocessing.recent_history_features import ACTIONS, decision_rows, feature_names
 from scripts.run_history_trajectory_irl import CAPSTONE, ROOT
-from src.analysis.masked_embedding_clusters import source_data
 
 
 def run(source):
+    from src.analysis.masked_embedding_clusters import source_data
+
     path = CAPSTONE / ('data/raw/kaggle/cosmetics' if source == 'cosmetics'
                        else f'data/raw/kaggle/{source}/events.csv')
     events, quality, _ = source_data(source, path, sample_modulus=100)

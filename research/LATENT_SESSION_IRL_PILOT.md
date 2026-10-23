@@ -62,7 +62,7 @@ Electronics 길이 1/2/3 실제 비중은 73.5/8.8/17.6%, 모형은 70.3/19.4/10
 
 ## 6. 산출물·재현
 
-- 모델: `src/ecommerce_sim/latent_session_model.py`, 학습: `scripts/run_latent_session_pilot.py`.
+- 모델: `src/ecommerce_sim/simulate/latent_session_model.py`, 학습: `scripts/run_latent_session_pilot.py`.
 - 결과: `artifacts/latent-session-pilot/{electronics,cosmetics}.json` 및 로컬 직렬화 모델 `.joblib`. 직렬화 파일은 로컬에서만 사용하고 신뢰할 수 없는 pickle/joblib를 열지 않는다. 원본·모델의 재배포 권리는 별도 확인해야 한다.
 - `LatentSessionUser(model, prefix, rng)`는 두 세션 요약에서 posterior를 만들고 `sample_session()`, `finish_session(events)`로 세션 및 30일 내 간격을 샘플링한다. prefix 컬럼과 스케일은 직렬화 모델의 `prefix_cols` 및 코드의 `session_return.sessions` 정의를 따른다. 시간대·표본 등의 입력 정의를 맞추어야 한다.
 - 실행: `PYTHONPATH='.:src:/Users/kimdaewon/Desktop/캡스톤디자인' OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 /opt/anaconda3/bin/python scripts/run_latent_session_pilot.py electronics cosmetics`.

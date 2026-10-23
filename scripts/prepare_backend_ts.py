@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from ecommerce_sim.backend_ts import METHODS, hourly_history
+from ecommerce_sim.preprocessing.backend_ts import METHODS, hourly_history
 
 PUSH = {
     'GAME_A_APR': '2022-04-16 12:00:00', 'GAME_A_MAY': '2022-05-14 12:00:00',

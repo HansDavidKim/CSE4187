@@ -5,12 +5,13 @@ import sys
 import numpy as np
 import pandas as pd
 
-from ecommerce_sim.history_trajectory_irl import LAG_NAMES, QUADRATIC_NAMES, evaluate, fit_maxent
+from ecommerce_sim.models.history_trajectory_irl import LAG_NAMES, QUADRATIC_NAMES, evaluate, fit_maxent
 from scripts.run_history_trajectory_irl import CAPSTONE, ROOT, windows_for_user
-from src.analysis.masked_embedding_clusters import source_data
 
 
 def run(source, l1_only=False, lags=False):
+    from src.analysis.masked_embedding_clusters import source_data
+
     if lags and not l1_only:
         raise ValueError('lag comparison requires --l1-only')
     path = CAPSTONE / ('data/raw/kaggle/cosmetics' if source == 'cosmetics'

@@ -1,11 +1,11 @@
 """Explore logged activity after a quiet period; not a coupon causal effect."""
-from pathlib import Path
 import json
 
 import numpy as np
 import pandas as pd
+from ecommerce_sim.paths import PROJECT_ROOT
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = PROJECT_ROOT
 OUT = ROOT / "artifacts/coupon-reactivation"
 OUT.mkdir(parents=True, exist_ok=True)
 

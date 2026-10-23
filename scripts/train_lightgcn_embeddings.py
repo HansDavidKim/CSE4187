@@ -1,17 +1,17 @@
 """Train dataset-specific LightGCN on time-split binary user/item interactions."""
 import json
 import sys
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
 from torch.nn import functional as F
 
-from ecommerce_sim.lightgcn import LightGCN, normalized_graph, sample_negatives
+from ecommerce_sim.models.lightgcn import LightGCN, normalized_graph, sample_negatives
+from ecommerce_sim.paths import PROJECT_ROOT, CAPSTONE_ROOT
 
-ROOT = Path('/Users/kimdaewon/Desktop/eCommerce-Sim')
-RAW = Path('/Users/kimdaewon/Desktop/캡스톤디자인/data/raw/kaggle')
+ROOT = PROJECT_ROOT
+RAW = CAPSTONE_ROOT / 'data/raw/kaggle'
 OUT = ROOT / 'artifacts/lightgcn-embeddings'
 SEED = 2026
 

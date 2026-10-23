@@ -5,13 +5,12 @@ import json
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
-from ecommerce_sim.inactivity import inactivity_label
-from src.irl.fit import load_events
+from ecommerce_sim.analysis.inactivity import inactivity_label
+from ecommerce_sim.paths import CAPSTONE_ROOT
 
 
-CAPSTONE = Path('/Users/kimdaewon/Desktop/캡스톤디자인')
+CAPSTONE = CAPSTONE_ROOT
 OUT = Path('artifacts/electronics-inactivity')
 
 
@@ -21,6 +20,8 @@ def category(frame):
 
 
 def main():
+    from src.irl.fit import load_events
+
     events, quality = load_events('electronics', CAPSTONE / 'data/raw/kaggle/electronics/events.csv')
     observation_end = events['at'].max()
     for action, name in enumerate(('views', 'carts', 'purchases')):

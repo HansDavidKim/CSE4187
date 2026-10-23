@@ -1,11 +1,11 @@
 """Six-week observed event patterns, not causal effect durations."""
-from pathlib import Path
 import json
 
 import numpy as np
 import pandas as pd
+from ecommerce_sim.paths import PROJECT_ROOT
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = PROJECT_ROOT
 OUT = ROOT / "artifacts/coupon-persistence"
 OUT.mkdir(parents=True, exist_ok=True)
 

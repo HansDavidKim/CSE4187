@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from .nts_adapter import load_sequences, make_lag_windows
+from ecommerce_sim.preprocessing.nts_adapter import load_sequences, make_lag_windows
 
 
 OUTCOME_FEATURES = {

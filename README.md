@@ -1,177 +1,98 @@
 # eCommerce-Sim
 
-## Role-separated AmExpert features
+Electronics·Cosmetics의 행동 이질성과 세션 간격을 재현하고, Tianchi의 쿠폰 반응을
+참고하여 개입 시나리오를 실험하기 위한 사용자 시뮬레이터 연구 프로젝트다.
+최종 목표는 페르소나별 MaxEnt IRL, 세션 종료 및 확률적 재방문, 쿠폰 개입을
+결합하고 오프라인 합성 데이터와 온라인 에이전트 평가 환경을 제공하는 것이다.
 
-The separate preprocessing pilot in `scripts/prepare_amexpert_temporal_features.py` builds
-pre-week history, offer-record proxies, binary purchase behavior, and post-decision outcomes.
-It preserves unknown offer exposure and first-week missing history; these are not validated causal
-interventions. See [`research/AMEXPERT_TEMPORAL_FEATURES_V2.md`](research/AMEXPERT_TEMPORAL_FEATURES_V2.md).
-This feature panel is not yet an input-ready NTS-NOTEARS archive; graph constraints and missing-data
-handling must be implemented and validated first.
+현재는 분석·모델별 파일럿 단계다. **페르소나별 인과적 쿠폰 효과와 canonical
+type 분포가 식별된 모델, 전체 온라인 RL 환경은 아직 완성되지 않았다.**
+16개 목표별 현재 상태와 주요 결과는 [analysis.md](analysis.md)를 기준으로 읽는다.
 
-## Corrected AmExpert conditional trajectory pilot
+## 구조
 
-`scripts/run_conditional_trajectory_irl.py` separates the user's binary purchase action from the
-current-week recorded-offer proxy. The older `run_group_trajectory_irl.py` and
-`compare_nonlinear_trajectory_irl.py` categorize coupon-discount usage as part of the action and
-do **not** implement the requested current-intervention-conditional model; their results are legacy
-behavioral pilots, not intervention effects. See
-[`research/AMEXPERT_CONDITIONAL_IRL.md`](research/AMEXPERT_CONDITIONAL_IRL.md).
-
-```bash
-PYTHONPATH=src OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python scripts/run_conditional_trajectory_irl.py
+```text
+src/ecommerce_sim/
+  preprocessing/  # 원자료 검증, 시퀀스 및 이력 특징
+  analysis/       # 행동·세션·비활동 분석, 그래프 특징
+  models/         # MaxEnt IRL, 선택모형, 그래프·임베딩 학습
+  simulate/       # 세션·간격 샘플러 및 합성 패널 생성
+  cli.py          # 기존 CLI
+  paths.py        # 저장소·외부 데이터 위치
+scripts/          # 기존 실행 파일명 유지; scripts/README.md에서 역할별 안내
+tests/            # 원자료가 필요 없는 회귀 테스트
+research/         # 실험별 상세 기록과 figures/
+data/raw/         # 로컬 원자료, Git 제외
+artifacts/        # 생성 데이터·모델·통계, Git 제외
+paper/            # 논문 원고
+output/pdf/       # 기존 논문 PDF
 ```
 
-This pilot conditions on an offer *record* rather than a verified randomized or pre-purchase
-intervention. Missing records do not establish no exposure; its outputs are not causal uplift.
+기존 `ecommerce_sim.<module>` import와 공개 함수, CLI, 스크립트 경로는 유지한다.
+새 코드는 역할별 패키지에서 import한다. 예:
+`from ecommerce_sim.simulate.latent_session_model import LatentSessionUser`.
+상세한 역할과 호환성 기준은 [저장소 구조](research/REPOSITORY_LAYOUT.md)를 참고한다.
 
-An intervention-aware e-commerce synthetic panel generator. It turns timestamped user actions into
-a lagged panel, learns a nonlinear DAG, adds conservative intervention evidence, learns user
-segments with a Gaussian mixture, estimates one-step maximum-entropy IRL reward features, and
-rolls out a fitted structural transition model.
+## 설치와 검증
 
-## Included development data
-
-The compact [Starbucks rewards dataset](https://www.kaggle.com/datasets/blacktile/starbucks-app-customer-reward-program-data)
-has been downloaded to `data/raw/starbucks/` for local smoke tests. Its Kaggle metadata does not
-contain a clear reuse license, so it is **not approved as a headline KSC paper dataset**. Raw data
-is ignored by git. The paper plan uses licensed Criteo Uplift v2.1 for randomized intervention
-validation and CC BY 4.0 UCI Online Retail for behavioral trajectories. See
-[`research/DATA_POLICY.md`](research/DATA_POLICY.md) and
-[`research/DATASET_SHORTLIST.md`](research/DATASET_SHORTLIST.md).
-
-## Run
+저장소 루트에서 Python 3.10 이상을 사용한다. 의존성의 기준은 `pyproject.toml`이다.
 
 ```bash
-python -m pip install -e .
-python -m ecommerce_sim.cli run \
-  --data data/raw/starbucks \
-  --output artifacts/starbucks-run \
-  --max-users 2000 \
-  --max-rows 5000 \
-  --max-iter 10
+python -m pip install -e ".[dev]"
+python -m pytest -q
+python -m ecommerce_sim.cli --help
 ```
 
-Fast wiring check:
+분석 그림과 Parquet 입출력까지 사용하려면 분석 의존성도 설치한다.
 
 ```bash
-python -m ecommerce_sim.cli run --method correlation-smoke --max-users 200 --max-rows 1000 \
-  --synthetic-users 50 --periods 14 --output artifacts/smoke
-pytest -q
+python -m pip install -e ".[dev,analysis]"
 ```
 
-Official Udacity promotion-response calibration:
+## 현재 연구 경로
+
+| 작업 | 실행 진입점 | 결과·한계 |
+|---|---|---|
+| Electronics·Cosmetics 행동 군집 | `scripts/compare_masked_gru_clusters.py` | [페르소나 분석](analysis.md#2-행동-시퀀스-기반-페르소나); 외부 인코더·임베딩 필요 |
+| Tianchi 쿠폰 수령 이후 행동 | `scripts/coupon_reactivation.py`, `scripts/coupon_persistence_patterns.py` | 관측 비교이며 인과 uplift가 아님 |
+| Canonical type 조건부 범위 | `scripts/canonical_type_bounds.py` | [가정 기반 시나리오](research/CANONICAL_TYPE_BOUNDS_PILOT.md); 실제 유형 분포 추정이 아님 |
+| 페르소나별 세션 간격 | `scripts/analyze_persona_delays.py` | 사후 기술 분석이며 예측용 분포로 바로 사용할 수 없음 |
+| 잠재 세션 IRL·재방문 | `scripts/run_latent_session_pilot.py` | [파일럿](research/LATENT_SESSION_IRL_PILOT.md); 짧은 세션 및 30일 내 간격 |
+| 분석 요약 그림 | `scripts/plot_analysis_summary.py` | 기존 JSON 산출물이 있어야 실행 가능 |
+
+인자가 있는 스크립트는 [실행 스크립트 목록](scripts/README.md)을 확인한다.
+예를 들어 세션 파일럿은 다음처럼 실행한다.
 
 ```bash
-python scripts/get_starbucks_uplift.py --acknowledge-license-uncertainty
-python -m ecommerce_sim.cli uplift \
-  --data data/raw/starbucks_uplift \
-  --output artifacts/starbucks-uplift \
-  --synthetic-rows 100000
+python -m scripts.run_latent_session_pilot electronics cosmetics
 ```
 
-The downloader pins the Udacity source commit, SHA-256, byte size, row count and schema. It also
-writes `source_manifest.json`. Synthetic outputs contain no original rows; row-level model
-representations remain local-only derived artifacts and must not be redistributed without a rights
-review. This module is a one-step promotion contextual bandit; it does not create multi-step
-recommendation dynamics.
+## 데이터와 외부 코드
 
-Outputs:
+이 체크아웃에는 원자료, 학습 체크포인트, 실험 JSON이 포함되어 있지 않다.
+데이터셋 사이 사용자를 연결하거나 서로 다른 군집 번호를 같은 유형으로 취급하지 않는다.
+논문 사용·재배포 권리는 [데이터 정책](research/DATA_POLICY.md)을 별도로 확인한다.
 
-- `causal_dag.json`: lag-aware DAG and action/outcome evidence
-- `user_features.csv`: GMM responsibilities and IRL reward representation by user
-- `synthetic_panel.csv`: generated trajectories under sampled actions
-- `summary.json`: run size and identification warning
+이전 capstone 프로젝트의 자료를 읽는 스크립트는 그 디렉터리의
+`data/raw/kaggle/`와 `data/models/` 구조를 사용한다. 기본 루트는 현재 저장소이며,
+별도 위치를 쓸 때는 환경변수 `ECOMMERCE_CAPSTONE_ROOT`를 지정한다.
+`src.irl`·`src.analysis`를 사용하는 이전 실험은 해당 외부 프로젝트 코드도 필요하다.
 
-The uplift path writes `uplift_metrics.json`, `test_user_representations.csv`, randomized-policy
-synthetic data and targeted-policy synthetic data.
+PowerShell 예:
 
-## AmExpert sequential path
-
-Place the six user-obtained AmExpert CSV files in a local directory and run:
-
-```bash
-PYTHONPATH=src python scripts/prepare_amexpert.py \
-  --data data/raw/amexpert \
-  --output artifacts/amexpert-panel
+```powershell
+$env:ECOMMERCE_CAPSTONE_ROOT = 'C:\path\to\capstone'
+$env:PYTHONPATH = "$env:ECOMMERCE_CAPSTONE_ROOT;."
+python -m scripts.compare_masked_gru_clusters electronics cosmetics
 ```
 
-This validates the relational archive and builds weekly customer sequences plus explicit offsets,
-so lag windows never cross user boundaries. See
-[`research/AMEXPERT_NTS_PLAN.md`](research/AMEXPERT_NTS_PLAN.md) for the NTS-NOTEARS design,
-identification limits and required baselines.
+Tianchi 스크립트는 기존 `data/raw/tianchi-o2o/` 경로를 사용한다.
+자료 위치를 정리하기 위해 원자료를 자동으로 옮기거나 덮어쓰지 않는다.
 
-Only complete weeks within the transaction observation period are retained; partial boundary
-weeks and unobserved later campaign dates are not treated as zero purchases. The local pilot and
-its data-quality limitations are recorded in [`research/EXPERIMENT_2026-10-20.md`](research/EXPERIMENT_2026-10-20.md).
+## 이전·보조 실험
 
-The `ecommerce_sim.nts_adapter` loader converts that NPZ into `[window, feature, lag+target]`
-arrays and preserves a customer-sequence index for grouped validation and bootstrap stability.
-
-Fetch the official Apache-2.0 implementation at the pinned paper-code commit, then fit the
-multi-sequence adaptation:
-
-```bash
-python scripts/get_nts_notears.py
-PYTHONPATH=src python scripts/run_nts_notears.py --max-lag 2
-```
-
-The runner applies the official CNN and bounded L-BFGS-B components to independent customer
-windows, rather than concatenating customers into a false continuous series. Its default prior
-forbids same-week transaction outcomes from pointing into campaign-start assignment variables.
-The resulting `nts_dag.json` records edge lags, weights, constraints and acyclicity history.
-When `--max-sequences` is set, customers are sampled without replacement using `--seed`.
-Use `--drop-features` for sensitivity analyses of redundant variables.
-
-Extract temporal Markov-boundary hypotheses and a leakage-safe state feature set:
-
-```bash
-PYTHONPATH=src python scripts/extract_causal_features.py
-```
-
-The full boundary is retained for analysis, while the default state set only admits lagged
-parents and explicitly pre-decision contemporaneous variables. Children and spouses are not
-silently fed into IRL because they can be measured after the decision.
-The feature extractor refuses graphs that did not satisfy both the optimization convergence
-criterion and a discrete acyclicity check.
-
-`CalibratedMultinomialLogit` provides the downstream economic choice layer. It fixes centered
-utility variance to one before bounded temperature estimation, avoiding the unidentified
-utility-scale/temperature tradeoff. Diagnostics expose normalized choice entropy and mean top-1
-probability so generated behavior can be checked for both near-random and near-deterministic collapse.
-
-### AmExpert user-specific choice pilot
-
-The local end-to-end pilot uses a training-only NTS graph, per-user regularized one-step
-contextual MaxEnt rewards, validation-calibrated multinomial logit, and a held-out rollout.
-Full details, results, split and caveats: [`research/AMEXPERT_USER_SIM_PILOT.md`](research/AMEXPERT_USER_SIM_PILOT.md).
-
-```bash
-PYTHONPATH=src python scripts/prepare_amexpert_train_sequences.py
-PYTHONPATH=src OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python scripts/run_nts_notears.py \
-  --sequences artifacts/amexpert-train-only/customer_sequences.npz --max-lag 2 \
-  --hidden 4 --lambda1 0.03 --lambda2 0.01 --threshold 0.15 --max-iter 12 \
-  --max-sequences 100 --drop-features unique_coupons_started --seed 2026 \
-  --output artifacts/amexpert-nts-train-2026
-PYTHONPATH=src OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python scripts/run_amexpert_user_sim.py
-```
-
-The output arrays are local user-linked representations and simulated sequences; do not
-redistribute them until the competition data and derivative rights are checked. Only weekly
-purchase-status proxies are modeled: no observed recommendation choice sets are available.
-
-For the masked GRU + GMM + group trajectory MaxEnt IRL pilot, run
-`PYTHONPATH=src OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python scripts/run_group_trajectory_irl.py`.
-See [`research/AMEXPERT_GROUP_TRAJECTORY_IRL.md`](research/AMEXPERT_GROUP_TRAJECTORY_IRL.md)
-for its small finite-state MDP, test results, and limitations.
-
-For the expanded-state linear-versus-neural trajectory reward and greedy sensitivity,
-see [`research/AMEXPERT_NONLINEAR_TRAJECTORY_IRL.md`](research/AMEXPERT_NONLINEAR_TRAJECTORY_IRL.md).
-
-## Interpretation boundary
-
-The Starbucks log records offers but the Kaggle card does not establish randomized assignment or
-a clear reuse license.
-The DAG is a hypothesis generator, not an identified causal truth. The IRL component is explicitly
-one-step contextual MaxEnt IRL; long-horizon reward recovery requires transition-rich trajectories,
-policy support/overlap checks, and preferably randomized or otherwise identified interventions.
+Starbucks 패널·uplift, AmExpert 조건부 IRL, NTS-NOTEARS, TS-BOSS,
+LightGCN과 여러 history IRL 비교는 별도 연구 경로로 유지한다.
+기존 실행 명령과 해석 한계는 [이전 파이프라인 안내](research/LEGACY_PIPELINES.md)와
+[실행 스크립트 목록](scripts/README.md)에 있다. 이를 현재 페르소나별 쿠폰
+인과효과의 검증 근거로 사용하지 않는다.

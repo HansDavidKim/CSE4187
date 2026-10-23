@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from ecommerce_sim.common_behavior_irl import COEFFICIENT_NAMES
+from ecommerce_sim.models.common_behavior_irl import COEFFICIENT_NAMES
 
 
 def main():

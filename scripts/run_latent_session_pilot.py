@@ -9,11 +9,11 @@ import pandas as pd
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import brier_score_loss, log_loss
+from sklearn.metrics import brier_score_loss
 from threadpoolctl import threadpool_limits
 
-from ecommerce_sim.latent_session_model import fit_reward, path_probabilities
-from ecommerce_sim.session_return import sessions
+from ecommerce_sim.simulate.latent_session_model import fit_reward, path_probabilities
+from ecommerce_sim.analysis.session_return import sessions
 from scripts.audit_observed_days import load_events
 
 OUT = Path('artifacts/latent-session-pilot')

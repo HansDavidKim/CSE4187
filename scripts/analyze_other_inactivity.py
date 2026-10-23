@@ -8,11 +8,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from ecommerce_sim.inactivity import inactivity_label
-from src.analysis.masked_embedding_clusters import source_data
+from ecommerce_sim.analysis.inactivity import inactivity_label
+from ecommerce_sim.paths import CAPSTONE_ROOT
 
 
-CAPSTONE = Path('/Users/kimdaewon/Desktop/캡스톤디자인')
+CAPSTONE = CAPSTONE_ROOT
 OUT = Path('artifacts/other-inactivity')
 
 
@@ -22,6 +22,8 @@ def category(frame):
 
 
 def run(source):
+    from src.analysis.masked_embedding_clusters import source_data
+
     path = CAPSTONE / ('data/raw/kaggle/cosmetics' if source == 'cosmetics'
                        else 'data/raw/kaggle/retailrocket/events.csv')
     events, quality, actions = source_data(source, path, sample_modulus=100)

@@ -2,7 +2,6 @@
 import json
 import sys
 
-import pandas as pd
 
 from scripts.audit_observed_days import ROOT, load_events
 

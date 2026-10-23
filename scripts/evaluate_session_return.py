@@ -7,7 +7,7 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
 
-from ecommerce_sim.session_return import EDGES, FEATURES, durations, expand_hazards, horizon_prob, sessions
+from ecommerce_sim.analysis.session_return import EDGES, FEATURES, durations, expand_hazards, horizon_prob, sessions
 from scripts.audit_observed_days import ROOT, load_events
 
 

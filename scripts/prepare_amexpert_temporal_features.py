@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from ecommerce_sim.amexpert_temporal_features import build_temporal_features
+from ecommerce_sim.preprocessing.amexpert_temporal_features import build_temporal_features
 
 
 def main():

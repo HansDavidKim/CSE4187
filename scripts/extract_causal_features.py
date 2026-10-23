@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from ecommerce_sim.causal_features import save_feature_sets
+from ecommerce_sim.analysis.causal_features import save_feature_sets
 
 
 def main() -> None:

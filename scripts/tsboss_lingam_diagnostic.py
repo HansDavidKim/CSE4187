@@ -7,9 +7,16 @@ import json
 from pathlib import Path
 
 import numpy as np
+import torch
 from scipy.stats import kurtosis, normaltest, skew
-from castle.algorithms import DirectLiNGAM
-from ecommerce_sim.nts_adapter import load_sequences, make_lag_windows
+from ecommerce_sim.preprocessing.nts_adapter import load_sequences, make_lag_windows
+
+# gCastle changes the process-wide dtype while importing its unrelated torch models.
+_previous_dtype = torch.get_default_dtype()
+try:
+    from castle.algorithms import DirectLiNGAM
+finally:
+    torch.set_default_dtype(_previous_dtype)
 
 
 def orient_skeleton(edges, order):

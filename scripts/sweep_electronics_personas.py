@@ -9,12 +9,17 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import adjusted_rand_score
 from sklearn.model_selection import train_test_split
 
-from src.irl.fit import load_events
-from src.irl.sequence_personas import sequence_rows
-from run_electronics_personas import OUT, SOURCE
+if __package__:
+    from scripts.run_electronics_personas import OUT, SOURCE
+else:
+    from run_electronics_personas import OUT, SOURCE
 
 
 def main():
+    from src.irl.fit import load_events
+
+    from src.irl.sequence_personas import sequence_rows
+
     embeddings = pd.read_parquet(OUT / 'electronics_embeddings.parquet')
     events, _ = load_events('electronics', SOURCE)
     rows = sequence_rows(events, max_users=12000, max_tokens=64, seed=42)

@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 import numpy as np
-from ecommerce_sim.nts_adapter import load_sequences
+from ecommerce_sim.preprocessing.nts_adapter import load_sequences
 
 
 def main():

@@ -8,15 +8,17 @@ import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
 from sklearn.metrics import adjusted_rand_score
+from ecommerce_sim.paths import CAPSTONE_ROOT
 
-from src.analysis.masked_embedding_clusters import rows_from_events, source_data
 
 
-CAPSTONE = Path('/Users/kimdaewon/Desktop/캡스톤디자인')
+CAPSTONE = CAPSTONE_ROOT
 OUT = Path('artifacts/three-ecommerce-personas')
 
 
 def run(source: str):
+    from src.analysis.masked_embedding_clusters import rows_from_events, source_data
+
     path = CAPSTONE / ('data/raw/kaggle/cosmetics' if source == 'cosmetics'
                        else f'data/raw/kaggle/{source}/events.csv')
     events, quality, actions = source_data(source, path, sample_modulus=100)

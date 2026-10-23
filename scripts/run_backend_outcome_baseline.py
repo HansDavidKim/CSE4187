@@ -10,7 +10,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
-from ecommerce_sim.backend_ts_v2 import history_summaries
+from ecommerce_sim.preprocessing.backend_ts_v2 import history_summaries
 
 
 def main():

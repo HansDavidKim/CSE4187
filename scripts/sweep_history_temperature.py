@@ -6,9 +6,8 @@ import numpy as np
 import pandas as pd
 from scipy.special import logsumexp
 
-from ecommerce_sim.history_trajectory_irl import ACTIONS, PATHS, STATE_NAMES, feature_counts, fit_maxent
+from ecommerce_sim.models.history_trajectory_irl import ACTIONS, PATHS, STATE_NAMES, feature_counts, fit_maxent
 from scripts.run_history_trajectory_irl import CAPSTONE, ROOT, windows_for_user
-from src.analysis.masked_embedding_clusters import source_data
 
 TEMPERATURES = sorted(set([0.5, 0.6, 0.7, 0.8, 1.2, 1.4, 1.6, 2.0] +
                           [round(x / 1000, 3) for x in range(825, 1200, 25)]))
@@ -35,6 +34,8 @@ def measures(scores, observed, temperature):
 
 
 def run(source):
+    from src.analysis.masked_embedding_clusters import source_data
+
     path = CAPSTONE / ('data/raw/kaggle/cosmetics' if source == 'cosmetics'
                        else f'data/raw/kaggle/{source}/events.csv')
     events, quality, _ = source_data(source, path, sample_modulus=100)

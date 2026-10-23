@@ -5,12 +5,13 @@ import sys
 import numpy as np
 import pandas as pd
 
-from ecommerce_sim.history_trajectory_irl import QUADRATIC_NAMES, STATE_NAMES, evaluate, fit_maxent
+from ecommerce_sim.models.history_trajectory_irl import QUADRATIC_NAMES, STATE_NAMES, evaluate, fit_maxent
 from scripts.run_history_trajectory_irl import CAPSTONE, ROOT, windows_for_user
-from src.analysis.masked_embedding_clusters import source_data
 
 
 def run(source):
+    from src.analysis.masked_embedding_clusters import source_data
+
     path = CAPSTONE / ('data/raw/kaggle/cosmetics' if source == 'cosmetics'
                        else f'data/raw/kaggle/{source}/events.csv')
     events, quality, _ = source_data(source, path, sample_modulus=100)

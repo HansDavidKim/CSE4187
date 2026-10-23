@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .pipeline import EcommercePipeline, load_starbucks_panel
+from ecommerce_sim.simulate.pipeline import EcommercePipeline, load_starbucks_panel
 
 
 def main() -> None:
@@ -37,7 +37,7 @@ def main() -> None:
         return
 
     if args.command == "uplift":
-        from .uplift import StarbucksUpliftSimulator, load_uplift_data
+        from ecommerce_sim.simulate.uplift import StarbucksUpliftSimulator, load_uplift_data
 
         train, test = load_uplift_data(args.data)
         simulator = StarbucksUpliftSimulator(segments=args.segments).fit(train)

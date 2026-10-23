@@ -1,13 +1,13 @@
 """Audit observed event-days without inferring user inactivity or training IRL."""
 import json
 import sys
-from pathlib import Path
 
 import pandas as pd
 
-from ecommerce_sim.observed_day_features import build_days, gap_bin, history_rows, user_split
-CAPSTONE = Path('/Users/kimdaewon/Desktop/캡스톤디자인')
-ROOT = Path(__file__).resolve().parents[1]
+from ecommerce_sim.preprocessing.observed_day_features import build_days, gap_bin, history_rows, user_split
+from ecommerce_sim.paths import PROJECT_ROOT, CAPSTONE_ROOT
+CAPSTONE = CAPSTONE_ROOT
+ROOT = PROJECT_ROOT
 
 
 def load_events(source):

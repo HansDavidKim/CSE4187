@@ -7,8 +7,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from ecommerce_sim.backend_ts import METHODS
-from ecommerce_sim.backend_ts_v2 import disjoint_split, select_history
+from ecommerce_sim.preprocessing.backend_ts import METHODS
+from ecommerce_sim.preprocessing.backend_ts_v2 import disjoint_split, select_history
 
 
 def main():

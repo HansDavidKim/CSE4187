@@ -10,18 +10,22 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
-
-from src.irl.fit import load_events
-from src.irl.masked_sequence_personas import fit
-from src.irl.sequence_personas import END, sequence_rows
+from ecommerce_sim.paths import CAPSTONE_ROOT
 
 
-CAPSTONE = Path('/Users/kimdaewon/Desktop/캡스톤디자인')
+
+CAPSTONE = CAPSTONE_ROOT
 SOURCE = CAPSTONE / 'data/raw/kaggle/electronics/events.csv'
 OUT = Path('artifacts/electronics-personas')
 
 
 def main():
+    from src.irl.fit import load_events
+
+    from src.irl.masked_sequence_personas import fit
+
+    from src.irl.sequence_personas import END, sequence_rows
+
     OUT.mkdir(parents=True, exist_ok=True)
     report = fit('electronics', SOURCE, OUT / 'electronics_personas.json')
     events, _ = load_events('electronics', SOURCE)

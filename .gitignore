@@ -8,4 +8,4 @@ data/raw/*
 external/NTS-NOTEARS/
 external/TS-BOSS/
 tmp/
-
+.venv

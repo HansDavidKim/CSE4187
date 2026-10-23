@@ -9,9 +9,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.metrics import f1_score, log_loss
-from ecommerce_sim.choice import CalibratedMultinomialLogit
-from ecommerce_sim.nts_adapter import load_sequences
-from ecommerce_sim.user_choice import UserMaxEnt, make_states, state_spec, weekly_choices
+from ecommerce_sim.models.choice import CalibratedMultinomialLogit
+from ecommerce_sim.preprocessing.nts_adapter import load_sequences
+from ecommerce_sim.models.user_choice import UserMaxEnt, make_states, state_spec, weekly_choices
 
 
 def metrics(prob, actual):

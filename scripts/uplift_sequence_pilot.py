@@ -1,5 +1,4 @@
 """Predict next-day recorded activity; coupon receipt is not randomized treatment."""
-from pathlib import Path
 import json
 import pickle
 
@@ -8,8 +7,9 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import log_loss
 from sklearn.preprocessing import StandardScaler
+from ecommerce_sim.paths import PROJECT_ROOT
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = PROJECT_ROOT
 OUT = ROOT / "artifacts/uplift-sequence-pilot"
 OUT.mkdir(parents=True, exist_ok=True)
 START = pd.Timestamp("2016-04-16")

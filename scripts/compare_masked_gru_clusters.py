@@ -1,7 +1,6 @@
 """Compare clusterers on saved dataset-specific masked-GRU representations."""
 import json
 import sys
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -10,11 +9,11 @@ from sklearn.metrics import adjusted_rand_score
 from sklearn.mixture import GaussianMixture
 from sklearn.neighbors import KNeighborsClassifier, kneighbors_graph
 from threadpoolctl import threadpool_limits
+from ecommerce_sim.paths import PROJECT_ROOT, CAPSTONE_ROOT
 
-from src.analysis.masked_embedding_clusters import rows_from_events, source_data
 
-ROOT = Path('/Users/kimdaewon/Desktop/eCommerce-Sim')
-CAPSTONE = Path('/Users/kimdaewon/Desktop/캡스톤디자인')
+ROOT = PROJECT_ROOT
+CAPSTONE = CAPSTONE_ROOT
 OUT = ROOT / 'artifacts/two-dataset-gru-clusters'
 
 
@@ -47,6 +46,8 @@ def profile(tokens, actions, labels, k):
 
 
 def run(source):
+    from src.analysis.masked_embedding_clusters import rows_from_events, source_data
+
     path = CAPSTONE / ('data/raw/kaggle/cosmetics' if source == 'cosmetics' else 'data/raw/kaggle/electronics/events.csv')
     events, quality, actions = source_data(source, path, sample_modulus=100)
     rows = rows_from_events(events, 12000, 64, len(actions), 42)

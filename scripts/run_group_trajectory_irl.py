@@ -11,9 +11,9 @@ import pandas as pd
 import torch
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
-from ecommerce_sim.nts_adapter import load_sequences
-from ecommerce_sim.trajectory_irl import fit_trajectory_reward, policy_numpy
-from ecommerce_sim.user_choice import state_spec, weekly_choices
+from ecommerce_sim.preprocessing.nts_adapter import load_sequences
+from ecommerce_sim.models.trajectory_irl import fit_trajectory_reward, policy_numpy
+from ecommerce_sim.models.user_choice import state_spec, weekly_choices
 
 
 class MaskedGRU(torch.nn.Module):

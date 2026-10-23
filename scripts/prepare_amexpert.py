@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from ecommerce_sim.amexpert import save_amexpert_panel
+from ecommerce_sim.preprocessing.amexpert import save_amexpert_panel
 
 
 def main() -> None:

@@ -1,13 +1,13 @@
 """Recreate figures in analysis.md from existing aggregate artifacts."""
 import json
-from pathlib import Path
 
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
+from ecommerce_sim.paths import PROJECT_ROOT
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = PROJECT_ROOT
 OUT = ROOT / 'research/figures/analysis'
 OUT.mkdir(parents=True, exist_ok=True)
 plt.rcParams.update({'font.size': 10, 'axes.spines.top': False,

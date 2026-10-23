@@ -1,11 +1,11 @@
 """Compare observed pre/post activity, without assigning cross-domain GRU clusters."""
-from pathlib import Path
 import json
 
 import numpy as np
 import pandas as pd
+from ecommerce_sim.paths import PROJECT_ROOT
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = PROJECT_ROOT
 OUT = ROOT / "artifacts/coupon_persona_patterns"
 OUT.mkdir(parents=True, exist_ok=True)
 ONLINE = ROOT / "data/raw/tianchi-o2o/ccf_online_stage1_train.csv"

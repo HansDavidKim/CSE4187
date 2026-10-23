@@ -1,15 +1,14 @@
 """Compare sessions 1-2 with 3-4 for held-out users, within each user."""
 import json
 import sys
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from ecommerce_sim.paths import PROJECT_ROOT, CAPSTONE_ROOT
 
-from src.analysis.masked_embedding_clusters import rows_from_events, source_data
 
-CAPSTONE = Path('/Users/kimdaewon/Desktop/캡스톤디자인')
-OUT = Path('/Users/kimdaewon/Desktop/eCommerce-Sim/artifacts/early-later-two-datasets')
+CAPSTONE = CAPSTONE_ROOT
+OUT = PROJECT_ROOT / 'artifacts/early-later-two-datasets'
 
 
 def summarize(events, actions):
@@ -48,6 +47,8 @@ def summarize(events, actions):
 
 
 def run(source):
+    from src.analysis.masked_embedding_clusters import rows_from_events, source_data
+
     path = CAPSTONE / ('data/raw/kaggle/cosmetics' if source == 'cosmetics' else 'data/raw/kaggle/electronics/events.csv')
     events, quality, actions = source_data(source, path, sample_modulus=100)
     rows = rows_from_events(events, 12000, 64, len(actions), 42)

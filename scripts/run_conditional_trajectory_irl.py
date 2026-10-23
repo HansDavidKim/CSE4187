@@ -11,9 +11,12 @@ from scipy.optimize import minimize
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
 
-from ecommerce_sim.conditional_trajectory_irl import fit_reward, offer_transition, probabilities, sample_coefficients
-from ecommerce_sim.nts_adapter import load_sequences
-from run_group_trajectory_irl import train_encoder
+from ecommerce_sim.models.conditional_trajectory_irl import fit_reward, offer_transition, probabilities, sample_coefficients
+from ecommerce_sim.preprocessing.nts_adapter import load_sequences
+if __package__:
+    from scripts.run_group_trajectory_irl import train_encoder
+else:
+    from run_group_trajectory_irl import train_encoder
 
 
 def metrics(p, y):

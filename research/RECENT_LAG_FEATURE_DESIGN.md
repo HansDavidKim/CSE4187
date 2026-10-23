@@ -90,7 +90,7 @@ Reward is not identified by observational data and does not establish causal
 effects, personalized utility or uplift. This design does not model item
 exposure, session termination, purchase feasibility, or long-term returns.
 
-Implementation: `src/ecommerce_sim/recent_history_features.py`; audited totals:
+Implementation: `src/ecommerce_sim/preprocessing/recent_history_features.py`; audited totals:
 `artifacts/recent-feature-audit/{dataset}.json`. Reproduce from project root:
 
 ```sh

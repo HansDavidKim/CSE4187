@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ecommerce_sim.nts_training import fit_nts_notears
+from ecommerce_sim.models.nts_training import fit_nts_notears
 
 
 def main() -> None:
