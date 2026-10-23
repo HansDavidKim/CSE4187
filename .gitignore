@@ -1,0 +1,11 @@
+__pycache__/
+.pytest_cache/
+*.egg-info/
+artifacts/*
+!artifacts/.gitkeep
+data/raw/*
+!data/raw/.gitkeep
+external/NTS-NOTEARS/
+external/TS-BOSS/
+tmp/
+
