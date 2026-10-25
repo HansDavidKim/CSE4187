@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from scipy.stats import kurtosis, normaltest, skew
-from ecommerce_sim.preprocessing.nts_adapter import load_sequences, make_lag_windows
+from preprocessing.nts_adapter import load_sequences, make_lag_windows
 
 # gCastle changes the process-wide dtype while importing its unrelated torch models.
 _previous_dtype = torch.get_default_dtype()

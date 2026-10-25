@@ -4,9 +4,9 @@ import pytest
 import importlib.util
 from pathlib import Path
 
-from ecommerce_sim.backend_ts import hourly_history
-from ecommerce_sim.backend_ts_v2 import disjoint_split, select_history
-from ecommerce_sim.nts_training import bootstrap_user_indices
+from preprocessing.backend_ts import hourly_history
+from preprocessing.backend_ts_v2 import disjoint_split, select_history
+from models.nts_training import bootstrap_user_indices
 
 
 def test_hourly_history_excludes_index_and_preserves_method():

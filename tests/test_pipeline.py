@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from ecommerce_sim.pipeline import ACTIONS, EcommercePipeline, add_lags
+from simulate.pipeline import ACTIONS, EcommercePipeline, add_lags
 
 
 def demo_panel(users=40, periods=8, seed=3):

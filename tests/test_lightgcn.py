@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from ecommerce_sim.lightgcn import LightGCN, normalized_graph, sample_negatives
+from models.lightgcn import LightGCN, normalized_graph, sample_negatives
 from scripts.train_lightgcn_embeddings import encode_heldout
 import pandas as pd
 

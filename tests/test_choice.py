@@ -1,6 +1,6 @@
 import numpy as np
 
-from ecommerce_sim.choice import CalibratedMultinomialLogit
+from models.choice import CalibratedMultinomialLogit
 
 
 def test_calibrated_multinomial_logit_is_stochastic_and_normalized():

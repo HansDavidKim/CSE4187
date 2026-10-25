@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import torch
 
-from ecommerce_sim.trajectory_irl import fit_trajectory_reward, policy_numpy, soft_policy
+from models.trajectory_irl import fit_trajectory_reward, policy_numpy, soft_policy
 
 
 def test_soft_bellman_includes_future_value():

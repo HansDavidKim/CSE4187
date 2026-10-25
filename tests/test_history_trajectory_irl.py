@@ -1,8 +1,8 @@
 import numpy as np
 import pandas as pd
 
-from ecommerce_sim.history_trajectory_irl import QUADRATIC_NAMES, feature_counts, fit_maxent, evaluate
-from scripts.run_history_trajectory_irl import windows_for_user
+from models.history_trajectory_irl import QUADRATIC_NAMES, feature_counts, fit_maxent, evaluate
+from analysis.irl.history import windows_for_user
 
 
 def test_history_is_prefix_only_and_remove_breaks_windows():

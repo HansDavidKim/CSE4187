@@ -5,13 +5,18 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
-from ecommerce_sim.paths import PROJECT_ROOT
+import pandas as pd
+from scipy.interpolate import PchipInterpolator
+from sklearn.manifold import TSNE
+from utils.paths import PROJECT_ROOT
 
 ROOT = PROJECT_ROOT
-OUT = ROOT / 'research/figures/analysis'
+OUT = ROOT / 'img/analysis'
 OUT.mkdir(parents=True, exist_ok=True)
-plt.rcParams.update({'font.size': 10, 'axes.spines.top': False,
-                     'axes.spines.right': False, 'figure.dpi': 130})
+plt.rcParams.update({'font.family': 'serif', 'font.serif': ['Times New Roman'],
+                     'mathtext.fontset': 'stix', 'font.size': 10,
+                     'axes.spines.top': False, 'axes.spines.right': False,
+                     'figure.dpi': 130})
 
 
 def load(path):
@@ -139,9 +144,200 @@ def coupon_weeks():
     save('coupon_weekly_purchase.png')
 
 
+def agent_benchmark():
+    data = load('agent-benchmark/summary.json')
+    agent_names = ['UCB', 'TS', 'LinUCB', 'LinTS', 'PPO', 'SAC']
+    baseline_names = ['Never coupon', 'Max allowed']
+    colors = {
+        'UCB': '#54789b', 'TS': '#7896b2', 'LinUCB': '#c99a43',
+        'LinTS': '#e0b765', 'PPO': '#a66a87', 'SAC': '#c65d3e',
+        'Never coupon': '#b7bcc2', 'Max allowed': '#5f666d',
+    }
+
+    labels = agent_names + baseline_names
+    test_rows = [data['agents'][name]['test'] for name in agent_names]
+    test_rows += [data['test_baselines'][name] for name in baseline_names]
+    profit = np.array([row['mean_net_profit'] for row in test_rows])
+    error = np.array([row['standard_error_net_profit'] for row in test_rows])
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.2))
+    x = np.arange(len(labels))
+    axes[0].bar(x, profit, yerr=error, capsize=3,
+                color=[colors[name] for name in labels])
+    axes[0].set_xticks(x, labels, rotation=35, ha='right')
+    axes[0].set_ylabel('Annual net profit per user')
+    axes[0].set_title('Frozen-policy evaluation (5,000 users)')
+    axes[0].set_ylim(0, max(profit + error) * 1.12)
+    axes[0].grid(axis='y', alpha=.2)
+    for idx, value in enumerate(profit):
+        axes[0].text(idx, value + error[idx] + 550, f'{value:,.0f}',
+                     ha='center', va='bottom', fontsize=8, rotation=90)
+
+    positions = {}
+    for name, row in zip(labels, test_rows):
+        axes[1].scatter(row['mean_coupons'], row['mean_purchases'], s=70,
+                        color=colors[name], edgecolor='white', linewidth=.7, zorder=3)
+        position = (row['mean_coupons'], row['mean_purchases'])
+        positions.setdefault(position, []).append(name)
+    for position, names in positions.items():
+        label = ' / '.join(names)
+        single_offsets = {'SAC': (6, 8), 'LinTS': (6, 0), 'LinUCB': (6, -9)}
+        offset = (-105, 8) if len(names) > 1 else single_offsets.get(names[0], (6, 5))
+        axes[1].annotate(label, position, xytext=offset,
+                         textcoords='offset points', fontsize=8)
+    axes[1].set(xlabel='Coupons per user / year', ylabel='Purchases per user / year',
+                title='Coupon use and realized purchases')
+    axes[1].set_xlim(-2, 56)
+    axes[1].set_ylim(0, max(row['mean_purchases'] for row in test_rows) * 1.14)
+    axes[1].grid(alpha=.2)
+    fig.suptitle('Weekly coupon policy benchmark; error bars are standard errors')
+    fig.tight_layout()
+    save('agent_policy_comparison.png')
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.8), sharex=True)
+    for name in agent_names:
+        rows = data['agents'][name]['online_learning_curve']
+        users = [row['users'] for row in rows]
+        axes[0].plot(users, [row['cumulative_net_profit'] / 1e6 for row in rows],
+                     marker='o', color=colors[name], label=name)
+        axes[1].plot(users, [row['learning_cost_vs_canonical_oracle'] / 1e6 for row in rows],
+                     marker='o', color=colors[name], label=name)
+    axes[0].set(title='Cumulative training net profit', ylabel='Million profit units')
+    axes[1].set(title='Learning cost vs canonical oracle', ylabel='Million profit units')
+    for ax in axes:
+        ax.set_xlabel('Training users processed')
+        ax.set_xticks([100, 500, 1000])
+        ax.grid(alpha=.2)
+    axes[1].legend(frameon=False, ncol=2, fontsize=8)
+    fig.suptitle('Online learning over 1,000 users × 13 weeks')
+    fig.tight_layout()
+    save('agent_learning_curve.png')
+
+
+def operational_persona_event_mix():
+    data = load('cosmetics-shop-personas/clusters.json')
+    groups = sorted(data['profiles'], key=lambda row: row['cluster'])
+    actions = ['view', 'cart', 'remove', 'purchase']
+    colors = ['#4C78A8', '#F58518', '#54A24B', '#B279A2']
+    x = np.arange(len(actions), dtype=float)
+    dense_x = np.linspace(x.min(), x.max(), 240)
+    fig, ax = plt.subplots(figsize=(6.4, 4.2))
+    for row, color in zip(groups, colors, strict=True):
+        values = np.array([100 * row['event_share'][action] for action in actions])
+        smooth = PchipInterpolator(x, values)(dense_x)
+        label = f"P{row['cluster']} (n={row['users']:,})"
+        ax.plot(dense_x, smooth, color=color, linewidth=2.2, label=label)
+        ax.scatter(x, values, color=color, edgecolor='white', linewidth=.7,
+                   s=34, zorder=3)
+    ax.set_xticks(x, actions)
+    ax.set(xlabel='Event type', ylabel='Within-cluster event frequency (%)',
+           ylim=(0, 100), title='Cosmetics K=4 clusters: event-frequency profiles')
+    ax.grid(axis='y', alpha=.22)
+    ax.legend(frameon=False, ncol=2, loc='upper right')
+    fig.tight_layout()
+    save('cosmetics_k4_event_frequency.png')
+
+
+def canonical_type_fit():
+    model = load('tianchi-uplift-model/model.json')
+    rows = model['canonical_assignment']['persona_fit']
+    types = model['canonical_assignment']['types']
+    labels = ['Sure thing', 'Persuadable', 'Sleeping dog', 'Lost cause']
+    colors = {0: '#4C78A8', 2: '#54A24B', 3: '#B279A2'}
+    x = np.arange(len(types), dtype=float)
+    fig, ax = plt.subplots(figsize=(6.4, 4.4))
+    width = .24
+    for index, row in enumerate(rows):
+        persona = int(row['persona'])
+        target = 100 * np.array([row['target'][name] for name in types])
+        color = colors[persona]
+        ax.bar(x + (index - 1) * width, target, width=width,
+               color=color, label=f'P{persona}')
+    ax.set_xticks(x, ['ST', 'P', 'SD', 'LC'])
+    ax.set(xlabel='Canonical type', ylabel='Within-persona probability (%)',
+           ylim=(0, 82), title='Canonical-type distributions by persona')
+    ax.grid(axis='y', alpha=.22)
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    save('canonical_type_latent_fit.png')
+
+
+def simulator_latent_tsne():
+    source = ROOT / 'artifacts/tianchi-uplift-model/sampled_user_uplift_profiles.parquet'
+    cache = ROOT / 'artifacts/tianchi-uplift-model/simulator_latent_tsne.parquet'
+    if cache.exists():
+        frame = pd.read_parquet(cache)
+    else:
+        profiles = pd.read_parquet(source)
+        z_columns = sorted(
+            (column for column in profiles if column.startswith('z_')),
+            key=lambda column: int(column[2:]),
+        )
+        coordinates = TSNE(
+            n_components=2, perplexity=50, learning_rate='auto', init='pca',
+            max_iter=1000, random_state=42,
+        ).fit_transform(profiles[z_columns].to_numpy(float))
+        frame = profiles[['user_id', 'home_persona']].copy()
+        frame[['tsne_1', 'tsne_2']] = coordinates
+        frame.to_parquet(cache, index=False)
+    colors = {0: '#4C78A8', 2: '#54A24B', 3: '#B279A2'}
+    fig, ax = plt.subplots(figsize=(6.4, 4.4))
+    for persona, group in frame.groupby('home_persona', sort=True):
+        ax.scatter(group.tsne_1, group.tsne_2, s=8, alpha=.35,
+                   color=colors[int(persona)], edgecolors='none', rasterized=True,
+                   label=f'P{int(persona)} (n={len(group):,})')
+    ax.set(xlabel='t-SNE 1', ylabel='t-SNE 2',
+           title='Simulated user latents by home persona')
+    ax.legend(frameon=False, markerscale=2.2)
+    ax.grid(alpha=.15)
+    fig.tight_layout()
+    save('simulator_latent_tsne.png')
+
+
+def simulator_distribution_figure():
+    model = load('tianchi-uplift-model/model.json')
+    rows = model['canonical_assignment']['persona_fit']
+    types = model['canonical_assignment']['types']
+    frame = pd.read_parquet(
+        ROOT / 'artifacts/tianchi-uplift-model/simulator_latent_tsne.parquet'
+    )
+    colors = {0: '#4C78A8', 2: '#54A24B', 3: '#B279A2'}
+    x = np.arange(len(types), dtype=float)
+    dense_x = np.linspace(x.min(), x.max(), 240)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), constrained_layout=True)
+
+    for row in rows:
+        persona = int(row['persona'])
+        values = 100 * np.array([row['target'][name] for name in types])
+        axes[0].plot(dense_x, PchipInterpolator(x, values)(dense_x),
+                     color=colors[persona], linewidth=2.2, label=f'P{persona}')
+        axes[0].scatter(x, values, color=colors[persona], edgecolor='white',
+                        linewidth=.7, s=34, zorder=3)
+    axes[0].set_xticks(x, ['ST', 'P', 'SD', 'LC'])
+    axes[0].set(xlabel='Canonical type', ylabel='Within-persona probability (%)',
+                ylim=(0, 82), title='(a) Canonical-type distributions')
+    axes[0].grid(axis='y', alpha=.22)
+    axes[0].legend(frameon=False)
+
+    for persona, group in frame.groupby('home_persona', sort=True):
+        axes[1].scatter(group.tsne_1, group.tsne_2, s=8, alpha=.35,
+                        color=colors[int(persona)], edgecolors='none', rasterized=True,
+                        label=f'P{int(persona)} (n={len(group):,})')
+    axes[1].set(xlabel='t-SNE 1', ylabel='t-SNE 2',
+                title='(b) Simulated user latents')
+    axes[1].legend(frameon=False, markerscale=2.2)
+    axes[1].grid(alpha=.15)
+    save('figure3_simulated_user_distribution.png')
+
+
 if __name__ == '__main__':
     personas()
     evolution()
     inactivity()
     coupon_return()
     coupon_weeks()
+    agent_benchmark()
+    operational_persona_event_mix()
+    canonical_type_fit()
+    simulator_latent_tsne()
+    simulator_distribution_figure()

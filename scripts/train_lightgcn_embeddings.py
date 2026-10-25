@@ -7,8 +7,8 @@ import pandas as pd
 import torch
 from torch.nn import functional as F
 
-from ecommerce_sim.models.lightgcn import LightGCN, normalized_graph, sample_negatives
-from ecommerce_sim.paths import PROJECT_ROOT, CAPSTONE_ROOT
+from models.lightgcn import LightGCN, normalized_graph, sample_negatives
+from utils.paths import PROJECT_ROOT, CAPSTONE_ROOT
 
 ROOT = PROJECT_ROOT
 RAW = CAPSTONE_ROOT / 'data/raw/kaggle'

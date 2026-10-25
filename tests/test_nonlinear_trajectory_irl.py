@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from ecommerce_sim.nonlinear_trajectory_irl import fit_reward, fit_transitions, log_policy, make_states, policy_numpy
+from models.nonlinear_trajectory_irl import fit_reward, fit_transitions, log_policy, make_states, policy_numpy
 
 
 def test_state_and_transition_are_temporal_and_action_consistent():

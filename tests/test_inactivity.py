@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from ecommerce_sim.inactivity import inactivity_label
+from analysis.eda import inactivity_label
 
 
 def test_inactivity_censoring_and_boundary():

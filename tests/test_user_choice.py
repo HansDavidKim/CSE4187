@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from ecommerce_sim.user_choice import UserMaxEnt, make_states, state_spec, weekly_choices
+from models.user_choice import UserMaxEnt, make_states, state_spec, weekly_choices
 
 
 def test_weekly_choice_labels_and_impossible_discount():

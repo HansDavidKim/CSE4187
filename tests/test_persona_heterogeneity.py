@@ -1,5 +1,5 @@
 import numpy as np
-from scripts.analyze_persona_heterogeneity import action_bins, delay_bins, qvalues
+from analysis.persona.behavior import action_bins, delay_bins, qvalues
 
 
 def test_action_bin_boundaries():

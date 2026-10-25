@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from ecommerce_sim.uplift import FEATURES, StarbucksUpliftSimulator
+from simulate.uplift import FEATURES, StarbucksUpliftSimulator
 
 
 def sample(rows=1200, seed=5):

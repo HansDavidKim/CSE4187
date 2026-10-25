@@ -1,0 +1,28 @@
+\begin{tikzpicture}[
+  >=Latex,
+  state/.style={circle split, draw, line width=.8pt, minimum size=18mm,
+    align=center, font=\small},
+  flow/.style={->, line width=.8pt},
+  note/.style={font=\scriptsize, inner sep=0pt}
+]
+\node[state] (new) at (-4.4,0) {NEW\nodepart{lower}onboarding};
+\node[state] (home) at (-1.2,1.35) {HOME\nodepart{lower}$P_c$};
+\node[state] (churn) at (-.5,-1.55) {CHURNING\nodepart{lower}at risk};
+\node[state] (mission) at (3.2,1.35) {MISSION\nodepart{lower}EXIT};
+\node[state] (exit) at (3.2,-1.55) {EXIT\nodepart{lower}absorbing};
+
+\draw[flow] (new) to[loop above, looseness=5] node[note, above=2mm] {onboarding} (new);
+\draw[flow] (new) to[bend left=12] node[note, pos=.55, above=2mm] {complete} (home);
+\draw[flow] (new) to[bend right=14] node[note, pos=.62, below=2mm] {no return} (churn);
+\draw[flow] (new) to[bend left=28] node[note, pos=.58, above=4mm] {purchase + no return} (mission);
+
+\draw[flow] (home) to[loop above, looseness=5] node[note, above=2mm] {return} (home);
+\draw[flow] (home) to[bend left=16] node[note, pos=.55, right=2mm] {no return} (churn);
+\draw[flow] (churn) to[bend left=16] node[note, pos=.55, left=2mm] {return} (home);
+\draw[flow] (home) -- node[note, midway, above=2mm] {purchase + no return} (mission);
+\draw[flow] (churn) to[bend left=10] (mission);
+\draw[flow] (churn) -- node[note, midway, above=2mm] {no return} (exit);
+
+\draw[flow] (mission) to[loop above, looseness=5] node[note, above=2mm] {absorbing} (mission);
+\draw[flow] (exit) to[loop below, looseness=5] node[note, below=2mm] {absorbing} (exit);
+\end{tikzpicture}

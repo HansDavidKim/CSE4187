@@ -1,6 +1,6 @@
 import pandas as pd
 
-from ecommerce_sim.campaign_audit import reconstruct, split_intervals
+from analysis.eda import reconstruct, split_intervals
 
 
 def test_overlapping_inclusive_campaigns_split_at_start_and_end_plus_one():

@@ -1,11 +1,6 @@
-import importlib.util
-from pathlib import Path
-
 import numpy as np
 
-spec = importlib.util.spec_from_file_location("sequence", Path(__file__).resolve().parents[1] / "scripts/uplift_sequence_pilot.py")
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
+from analysis.uplift import sequence as module
 
 
 def test_features_exclude_day_before_and_future_behavior():

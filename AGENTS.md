@@ -17,29 +17,52 @@
 15) Determine goal or objective for the task : Reference other simulator papers, and determine one.
 16) Make scripts for running various RL agents : Lin-UCB, Lin-TS, TS, UCB, PPO, SAC.
 
-**Project Tree(Simplified)**
-```md
+**Project Tree (Current, Simplified)**
+```text
 .
 ├── AGENTS.md
 ├── README.md
 ├── analysis.md
-├── .gitignore
-├── requirements.txt
-├── data
-│   ├── raw
-│   │   ├── electronics
-│   │   ├── cosmetics
-│   │   └── tianchi
-│   ├── augmented
-│   │   ├── persona
-│   │   ├── uplift
-│   │   └── delay
-├── src
-│   ├── analysis
-│   ├── agent (This is needed as we need to run various types of bandits and Deep RL agents)
-│   ├── simulate
-│   └── utils
-└── img
+├── pyproject.toml
+├── data/raw/                   # local datasets
+├── artifacts/                  # local experiment outputs
+├── src/
+│   ├── analysis/
+│   │   ├── irl/
+│   │   │   └── history.py      # history-based IRL experiments
+│   │   ├── persona/
+│   │   │   ├── sequence.py     # sequence representation and masked GRU
+│   │   │   ├── cluster.py      # clustering, K-sweep, stability
+│   │   │   └── behavior.py     # behavior, session gaps, heterogeneity
+│   │   ├── uplift/
+│   │   │   ├── canonical.py    # assumption-dependent response bounds
+│   │   │   ├── observed.py     # descriptive coupon analyses
+│   │   │   └── sequence.py     # observational sequence prediction
+│   │   ├── eda.py              # data audits, inactivity, session returns, causal features
+│   │   └── feature_selection.py # past-only feature selection and session structure exploration
+│   ├── preprocessing/
+│   ├── models/
+│   │   └── agents.py           # UCB, TS, LinUCB, LinTS, PPO, discrete SAC
+│   ├── simulate/
+│   │   ├── latent_session_model.py
+│   │   └── campaign.py         # daily capped coupon-policy environment
+│   ├── utils/
+│   └── cli.py
+├── scripts/
+├── tests/
+├── img/
+├── external/
+├── paper/
+└── output/
 ```
 
 As you can see, current repository is messed up. After refactoring, and summarize important analysis, and result of each goal into analysis.md., delete unnecessary python files for testing, and analysis (This must be cleaned up)
+
+**Working Rules**
+
+- Organize code by domain and reusable function, not by dataset or one-off experiment. Keep persona sequence, clustering, and behavior code together under `src/analysis/persona/`; avoid unnecessary nested project-name packages.
+- Keep scripts as necessary entry points. Consolidate redundant analysis scripts and reusable utilities, and update callers, tests, and documentation when refactoring.
+- Keep analysis results, assumptions, and limitations in `analysis.md`; place figures in `img/` rather than creating a separate research documentation tree.
+- Distinguish observed patterns, simulation assumptions, and identified causal effects. Separate interventions from user actions, prevent future-information leakage, and do not treat missing observations as zero outcomes or confirmed inactivity.
+- Persona clusters do not identify canonical response types or individual counterfactuals. State the assumptions and limitations of any uplift or IRL-based model explicitly.
+- Preserve user data and useful reproducibility; verify changes and report what was not tested. Check dataset usage and redistribution rights before publication.

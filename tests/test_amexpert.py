@@ -2,10 +2,10 @@ import pandas as pd
 import numpy as np
 import pytest
 
-from ecommerce_sim.amexpert import SEQUENCE_FEATURES, build_customer_week_panel, save_amexpert_panel
-from ecommerce_sim.nts_adapter import load_sequences, make_lag_windows
-from ecommerce_sim.nts_training import adjacency_to_edges, default_prior_knowledge, instantaneous_is_dag, fit_nts_notears
-from ecommerce_sim.causal_features import extract_markov_boundary, save_feature_sets
+from preprocessing.amexpert import SEQUENCE_FEATURES, build_customer_week_panel, save_amexpert_panel
+from preprocessing.nts_adapter import load_sequences, make_lag_windows
+from models.nts_training import adjacency_to_edges, default_prior_knowledge, instantaneous_is_dag, fit_nts_notears
+from analysis.eda import extract_markov_boundary, save_feature_sets
 
 
 def write_fixture(root):

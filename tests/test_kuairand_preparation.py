@@ -4,7 +4,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
-from ecommerce_sim.nts_training import default_prior_knowledge, normalization_parameters
+from models.nts_training import default_prior_knowledge, normalization_parameters
 
 spec = importlib.util.spec_from_file_location('prepare_kuairand', Path(__file__).parents[1] / 'scripts/prepare_kuairand.py')
 module = importlib.util.module_from_spec(spec)

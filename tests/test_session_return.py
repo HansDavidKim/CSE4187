@@ -1,5 +1,5 @@
 import pandas as pd
-from ecommerce_sim.session_return import durations, expand_hazards, sessions
+from analysis.eda import durations, expand_hazards, sessions
 
 
 def test_session_gap_and_censor_at_training_cutoff():

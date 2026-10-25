@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from ecommerce_sim.conditional_trajectory_irl import fit_reward, offer_transition, probabilities, sample_coefficients
+from models.conditional_trajectory_irl import fit_reward, offer_transition, probabilities, sample_coefficients
 
 
 def test_offer_changes_purchase_probability_not_the_action_space():

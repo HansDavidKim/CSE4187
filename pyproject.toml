@@ -24,7 +24,10 @@ dev = ["pytest>=7", "matplotlib>=3.6"]
 analysis = ["matplotlib>=3.6", "pyarrow>=10"]
 
 [project.scripts]
-ecommerce-sim = "ecommerce_sim.cli:main"
+ecommerce-sim = "cli:main"
+
+[tool.setuptools]
+py-modules = ["cli"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -9,9 +9,9 @@ import numpy as np
 import pandas as pd
 import torch
 
-from ecommerce_sim.models.common_behavior_irl import COEFFICIENT_NAMES, trajectory_windows
-from ecommerce_sim.models.trajectory_irl import fit_trajectory_reward, policy_numpy
-from ecommerce_sim.paths import CAPSTONE_ROOT
+from models.common_behavior_irl import COEFFICIENT_NAMES, trajectory_windows
+from models.trajectory_irl import fit_trajectory_reward, policy_numpy
+from utils.paths import CAPSTONE_ROOT
 
 
 CAPSTONE = CAPSTONE_ROOT
@@ -37,7 +37,7 @@ def log_loss(reward, states, actions):
 
 
 def run(source):
-    from src.analysis.masked_embedding_clusters import rows_from_events, source_data
+    from analysis.persona.sequence import rows_from_events, source_data
 
     torch.set_num_threads(1)
     path = CAPSTONE / ('data/raw/kaggle/cosmetics' if source == 'cosmetics'

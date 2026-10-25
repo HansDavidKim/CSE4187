@@ -1,0 +1,105 @@
+\begin{tikzpicture}[
+  font=\scriptsize,
+  >=Latex,
+  arrow/.style={->, line width=0.75pt},
+  token/.style={draw=black, rounded corners=1pt, minimum width=12mm,
+                minimum height=6mm, align=center, fill=pink!18},
+  embed/.style={draw=black, rounded corners=1pt, minimum width=12mm,
+                minimum height=6mm, align=center, fill=yellow!38},
+  state/.style={draw=black, circle, minimum size=6.5mm, fill=blue!15,
+                inner sep=0pt},
+  output/.style={draw=black, rounded corners=1pt, minimum width=12mm,
+                minimum height=6mm, align=center, fill=green!22},
+  side/.style={draw=black, rounded corners=1.5pt, minimum width=22mm,
+               minimum height=7mm, align=center, fill=green!18},
+  panel/.style={draw=black, rounded corners=2pt, fill=blue!8,
+                line width=0.8pt},
+  paneltitle/.style={font=\bfseries\small, align=center},
+  layerlabel/.style={font=\scriptsize\bfseries, text=black!75}
+]
+
+% (a) Compact encoder architecture in the visual grammar of the BERT schematic.
+\begin{scope}[xshift=0cm]
+  \node[paneltitle] at (3.7,4.55) {(a) Masked bidirectional-GRU encoder};
+  \node[panel, minimum width=72mm, minimum height=34mm, anchor=south west]
+    (encbox) at (0.1,0.65) {};
+  \foreach \x/\id/\tok/\emb/\out in {
+    0.85/a/[USR]/$E_{\rm usr}$/$z_u$,
+    2.25/b/[MASK]/$E_2$/$\hat{x}_2$,
+    3.65/c/cart/$E_3$/$\hat{x}_3$,
+    5.05/d/$\cdots$/$\cdots$/$\cdots$,
+    6.45/e/purchase/$E_T$/$\hat{x}_T$} {
+    \node[token] (tok\id) at (\x,0.20) {\tok};
+    \node[embed] (emb\id) at (\x,1.15) {\emb};
+    \node[state] (hid\id) at (\x,2.45) {$h$};
+    \node[output] (out\id) at (\x,3.45) {\out};
+    \draw[arrow] (tok\id) -- (emb\id);
+    \draw[arrow] (emb\id) -- (hid\id);
+    \draw[arrow] (hid\id) -- (out\id);
+  }
+
+  \draw[arrow] (hida) -- (hidb);
+  \draw[arrow] (hidb) -- (hidc);
+  \draw[arrow] (hidc) -- (hidd);
+  \draw[arrow] (hidd) -- (hide);
+  \draw[arrow] ([yshift=-1.2mm]hide.west) -- ([yshift=-1.2mm]hidd.east);
+  \draw[arrow] ([yshift=-1.2mm]hidd.west) -- ([yshift=-1.2mm]hidc.east);
+  \draw[arrow] ([yshift=-1.2mm]hidc.west) -- ([yshift=-1.2mm]hidb.east);
+  \draw[arrow] ([yshift=-1.2mm]hidb.west) -- ([yshift=-1.2mm]hida.east);
+
+  \node[font=\tiny, text=black!65, align=center] at (3.7,-0.42)
+    {$z_u\in\mathbb{R}^{48}$ from the [USR] state; 15\% masking during training only};
+\end{scope}
+
+% (b) The 78-dimensional quadratic reward map converges to five utilities.
+\begin{scope}[xshift=9.75cm]
+  \node[paneltitle] at (3.72,4.55) {(b) Persona-conditioned MaxEnt IRL policy};
+  \node[font=\tiny\bfseries, text=black!70] at (1.00,4.02)
+    {78-D reward features};
+  \node[font=\tiny\bfseries, text=black!70] at (3.15,4.02)
+    {5 action utilities};
+  \node[font=\tiny\bfseries, text=black!70] at (5.85,4.02)
+    {Action probabilities};
+
+  % Twelve representative nodes; the vertical ellipsis denotes omitted dimensions.
+  \foreach \fy in {3.65,3.42,3.19,2.96,2.73,2.50,
+                    1.70,1.47,1.24,1.01,0.78,0.55} {
+    \foreach \uy in {3.40,2.75,2.10,1.45,0.80} {
+      \draw[black!35, line width=0.28pt] (1.00,\fy) -- (3.15,\uy);
+    }
+  }
+  \foreach \y/\id/\idx in {
+    3.65/f1/1, 3.42/f2/2, 3.19/f3/3,
+    2.96/f4/4, 2.73/f5/5, 2.50/f6/6,
+    1.70/f73/73, 1.47/f74/74, 1.24/f75/75,
+    1.01/f76/76, 0.78/f77/77, 0.55/f78/78} {
+    \node[draw=black, circle, fill=yellow!65, minimum size=2.1mm,
+          inner sep=0pt] (\id) at (1.00,\y) {};
+  }
+  \foreach \y in {2.22,2.10,1.98}
+    \fill[black] (1.00,\y) circle (0.018);
+  \foreach \y/\id/\lab in {
+    3.40/uv/v, 2.75/uc/c, 2.10/ur/r,
+    1.45/up/p, 0.80/ue/e} {
+    \node[draw=black, circle, fill=green!45, minimum size=2.1mm,
+          inner sep=0pt] (\id) at (3.15,\y) {};
+  }
+
+  \draw[arrow, line width=0.7pt] (3.72,2.10)
+    -- node[above, font=\tiny\bfseries] {Softmax} (4.72,2.10);
+
+  % Discrete action probabilities.
+  \draw[line width=0.7pt] (4.84,0.55) -- (4.84,3.65);
+  \foreach \y/\name/\len/\col in {
+    3.43/view/1.35/blue!70,
+    2.77/cart/0.95/orange!80,
+    2.11/remove/0.54/violet!70,
+    1.45/purchase/1.16/green!65!black,
+    0.79/end/0.40/red!70} {
+    \fill[\col, opacity=0.88] (4.92,\y-0.15) rectangle +(\len,0.30);
+    \node[anchor=west, font=\tiny] at (6.40,\y) {\name};
+  }
+  \node[font=\tiny\bfseries] at (3.72,0.08)
+    {Multi-logit user choice model};
+\end{scope}
+\end{tikzpicture}

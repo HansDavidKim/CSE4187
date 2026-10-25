@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from ecommerce_sim.common_behavior_irl import COEFFICIENT_NAMES, trajectory_windows
+from models.common_behavior_irl import COEFFICIENT_NAMES, trajectory_windows
 
 
 def test_windows_respect_boundaries_and_action_mapping():

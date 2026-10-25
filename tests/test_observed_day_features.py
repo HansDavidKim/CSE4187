@@ -1,6 +1,6 @@
 import pandas as pd
 
-from ecommerce_sim.observed_day_features import build_days, gap_bin, history_rows, user_split
+from preprocessing.observed_day_features import build_days, gap_bin, history_rows, user_split
 
 
 def test_ties_duplicates_and_remove_are_not_zero_actions():

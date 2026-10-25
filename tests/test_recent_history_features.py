@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from ecommerce_sim.recent_history_features import decision_rows, feature_names, state_features
+from preprocessing.recent_history_features import decision_rows, feature_names, state_features
 
 
 def test_current_action_is_never_in_its_input_and_lags_shift():

@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from ecommerce_sim.amexpert_temporal_features import PRE, build_temporal_features
+from preprocessing.amexpert_temporal_features import PRE, build_temporal_features
 
 
 def fixture():

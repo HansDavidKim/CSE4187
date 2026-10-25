@@ -2,9 +2,10 @@
 import hashlib
 import json
 
-from scripts.audit_observed_days import ROOT, load_events
-from ecommerce_sim.preprocessing.calendar_day_features import calendar_days
-from ecommerce_sim.preprocessing.observed_day_features import build_days, history_rows, user_split
+from utils.paths import PROJECT_ROOT as ROOT
+from utils.events import load_events
+from preprocessing.calendar_day_features import calendar_days
+from preprocessing.observed_day_features import build_days, history_rows, user_split
 
 
 def run(source):

@@ -1,12 +1,5 @@
-import importlib.util
-from pathlib import Path
-
 import pandas as pd
-
-
-spec = importlib.util.spec_from_file_location('sequential_audit', Path(__file__).parents[1] / 'scripts/audit_sequential_datasets.py')
-audit = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(audit)
+from analysis import eda as audit
 
 
 def test_heartsteps_keeps_no_send_arm_and_missing_outcomes(tmp_path):

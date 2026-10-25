@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from scripts.sweep_history_temperature import measures
+from analysis.irl.history import measures
 
 
 def test_uniform_and_temperature_entropy():

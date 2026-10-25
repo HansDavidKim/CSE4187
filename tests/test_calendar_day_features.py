@@ -1,7 +1,7 @@
 import pandas as pd
 
-from ecommerce_sim.calendar_day_features import calendar_days
-from ecommerce_sim.observed_day_features import build_days, history_rows
+from preprocessing.calendar_day_features import calendar_days
+from preprocessing.observed_day_features import build_days, history_rows
 
 
 def test_fill_only_internal_days_and_keep_remove_boundary():

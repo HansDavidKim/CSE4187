@@ -12,9 +12,9 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import brier_score_loss
 from threadpoolctl import threadpool_limits
 
-from ecommerce_sim.simulate.latent_session_model import fit_reward, path_probabilities
-from ecommerce_sim.analysis.session_return import sessions
-from scripts.audit_observed_days import load_events
+from simulate.latent_session_model import fit_reward, path_probabilities
+from analysis.eda import sessions
+from utils.events import load_events
 
 OUT = Path('artifacts/latent-session-pilot')
 EDGES = np.array([0., 1., 6., 24., 72., 168., 336., 720.])

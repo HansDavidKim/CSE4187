@@ -1,6 +1,6 @@
 import pytest
 
-from ecommerce_sim.persona_evolution import session_tokens, summarize_tokens
+from analysis.persona.behavior import session_tokens, summarize_tokens
 
 
 def test_session_windows_do_not_share_events_and_truncate():

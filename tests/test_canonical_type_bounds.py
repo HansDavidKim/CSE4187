@@ -1,12 +1,7 @@
-import importlib.util
-from pathlib import Path
-
 import pytest
 
 
-spec = importlib.util.spec_from_file_location("canonical_type_bounds", Path(__file__).resolve().parents[1] / "scripts/canonical_type_bounds.py")
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
+from analysis.uplift import canonical as module
 
 
 def test_bounds_against_feasible_joint_endpoints():
