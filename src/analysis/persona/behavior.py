@@ -9,7 +9,14 @@ import pandas as pd
 import torch
 from sklearn.cluster import KMeans
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, confusion_matrix
+from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    brier_score_loss,
+    confusion_matrix,
+    log_loss,
+    roc_auc_score,
+)
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import StratifiedKFold, cross_val_predict
 from sklearn.preprocessing import StandardScaler
@@ -20,6 +27,20 @@ from utils.paths import CAPSTONE_ROOT, PROJECT_ROOT
 
 WINDOW_CAPSTONE = CAPSTONE_ROOT
 WINDOW_OUT = PROJECT_ROOT / 'artifacts/early-later-two-datasets'
+CROSS_LIFECYCLE_OUT = PROJECT_ROOT / 'artifacts/cross-domain-lifecycle'
+CROSS_LIFECYCLE_FIG = PROJECT_ROOT / 'img/persona/cross_domain_lifecycle.png'
+
+COMMON_LIFECYCLE_FEATURES = (
+    'log_session_index', 'log_events', 'view_share', 'cart_share',
+    'purchase_share', 'log_duration_hours', 'log_previous_gap_hours',
+    'has_previous_gap', 'gap_acceleration', 'profile_s1', 'profile_s2',
+)
+
+SHARED_LIFECYCLE_PROFILE = {
+    'cosmetics': {0: 'S0', 1: 'UNRESOLVED', 2: 'S1', 3: 'S2'},
+    'electronics': {0: 'S1', 1: 'S0', 2: 'S1', 3: 'S2'},
+}
+COSMETICS_SIMULATOR_INTERCEPT_OFFSET = 0.1
 
 
 def session_tokens(sessions, max_tokens=64):
@@ -639,6 +660,623 @@ def lifecycle_window_features(frame):
     ]
 
 
+def shared_lifecycle_window_features(frame):
+    """Window features observed in both Cosmetics and Electronics."""
+    actions = ['view', 'cart', 'purchase']
+    total = float(frame[actions].to_numpy().sum())
+    if frame.empty or total <= 0:
+        raise ValueError('shared lifecycle window needs at least one shared event')
+    shares = frame[actions].sum() / total
+    gaps = frame.previous_gap_hours.dropna()
+    return {
+        **{f'{action}_share': float(shares[action]) for action in actions},
+        'events': int(total),
+        'median_gap_hours': float(gaps.median() if len(gaps) else 0),
+    }
+
+
+def lifecycle_decisions(sessions, observation_end):
+    """Build past-only 30-day return decisions with right-censoring."""
+    frame = sessions.sort_values(['user', 'start'], kind='stable').copy()
+    grouped = frame.groupby('user', sort=False)
+    frame['session_index'] = grouped.cumcount()
+    shared_total = frame[['view', 'cart', 'purchase']].sum(axis=1).clip(lower=1)
+    for action in ('view', 'cart', 'purchase'):
+        frame[f'{action}_share'] = frame[action] / shared_total
+    frame['log_session_index'] = np.log1p(frame.session_index)
+    frame['log_events'] = np.log1p(shared_total)
+    frame['log_duration_hours'] = np.log1p(frame.duration_hours.clip(lower=0))
+    frame['has_previous_gap'] = frame.previous_gap_hours.notna().astype(float)
+    frame['log_previous_gap_hours'] = np.log1p(
+        frame.previous_gap_hours.fillna(0).clip(lower=0)
+    )
+    prior_log_gap = grouped['previous_gap_hours'].shift().fillna(0).clip(lower=0).pipe(np.log1p)
+    frame['gap_acceleration'] = (
+        frame.log_previous_gap_hours - prior_log_gap
+    ).clip(lower=-np.log1p(720), upper=np.log1p(720))
+    followup_hours = (observation_end - frame.end).dt.total_seconds() / 3600
+    observed_return = frame.next_gap_hours.notna()
+    frame['no_return_30d'] = np.where(
+        observed_return, frame.next_gap_hours.ge(720),
+        np.where(followup_hours.ge(720), True, np.nan),
+    )
+    return frame.loc[frame.no_return_30d.notna()].assign(
+        no_return_30d=lambda x: x.no_return_30d.astype(int)
+    )
+
+
+def _lifecycle_metrics(actual, probability):
+    actual = np.asarray(actual, dtype=int)
+    probability = np.asarray(probability, dtype=float)
+    predicted = probability >= .5
+    return {
+        'rows': int(len(actual)),
+        'prevalence': float(actual.mean()),
+        'predicted_prevalence': float(probability.mean()),
+        'roc_auc': float(roc_auc_score(actual, probability)),
+        'average_precision': float(average_precision_score(actual, probability)),
+        'brier': float(brier_score_loss(actual, probability)),
+        'nll': float(log_loss(actual, np.c_[1 - probability, probability], labels=[0, 1])),
+        'accuracy': float((predicted == actual).mean()),
+    }
+
+
+def _fit_lifecycle_head(train, test, sample_weight=None, seed=42):
+    scaler = StandardScaler().fit(train[list(COMMON_LIFECYCLE_FEATURES)])
+    estimator = LogisticRegression(max_iter=2000, random_state=seed)
+    estimator.fit(
+        scaler.transform(train[list(COMMON_LIFECYCLE_FEATURES)]),
+        train.no_return_30d,
+        sample_weight=sample_weight,
+    )
+    probability = estimator.predict_proba(
+        scaler.transform(test[list(COMMON_LIFECYCLE_FEATURES)])
+    )[:, 1]
+    return estimator, scaler, _lifecycle_metrics(test.no_return_30d, probability)
+
+
+def _calibrate_intercept(linear_predictor, target_rate):
+    """Match one domain's observed prevalence while preserving shared slopes."""
+    lo, hi = -30.0, 30.0
+    for _ in range(100):
+        middle = (lo + hi) / 2
+        probability = 1 / (1 + np.exp(-np.clip(linear_predictor + middle, -30, 30)))
+        if probability.mean() < target_rate:
+            lo = middle
+        else:
+            hi = middle
+    return float((lo + hi) / 2)
+
+
+def _logit(value):
+    value = np.clip(float(value), 1e-9, 1 - 1e-9)
+    return float(np.log(value / (1 - value)))
+
+
+def long_term_buyer_analysis(decisions):
+    """Calibrate a rare repeated-purchase subtype without redefining home personas."""
+    user_rows, profile_rows = [], []
+    for source, frame in decisions.groupby('dataset', sort=False):
+        users = frame.groupby('user', sort=False).agg(
+            sessions=('session', 'size'),
+            purchase_sessions=('purchase', lambda values: values.gt(0).sum()),
+            purchases=('purchase', 'sum'), first_seen=('start', 'min'), last_seen=('end', 'max'),
+        )
+        users['span_days'] = (
+            users.last_seen - users.first_seen
+        ).dt.total_seconds() / 86400
+        users['long_term_buyer'] = (
+            users.sessions.ge(10) & users.purchase_sessions.ge(3) & users.span_days.ge(30)
+        )
+        users = users.reset_index().assign(dataset=source)
+        user_rows.append(users)
+        joined = frame.merge(users[['user', 'long_term_buyer']], on='user')
+        profile = (joined.groupby('long_term_buyer', as_index=False)
+                   .agg(users=('user', 'nunique'), sessions=('session', 'size'),
+                        purchase_session_rate=('purchase', lambda values: values.gt(0).mean()),
+                        no_return_30d_rate=('no_return_30d', 'mean'),
+                        median_previous_gap_hours=('previous_gap_hours', 'median')))
+        profile.insert(0, 'dataset', source)
+        profile_rows.append(profile)
+    users = pd.concat(user_rows, ignore_index=True)
+    profiles = pd.concat(profile_rows, ignore_index=True)
+
+    original = pd.read_parquet(
+        PROJECT_ROOT / 'artifacts/cosmetics-shop-personas/clusters.parquet'
+    )[['user_id', 'cluster']].rename(columns={'user_id': 'user', 'cluster': 'original_persona'})
+    cosmetics = decisions.loc[decisions.dataset.eq('cosmetics')].merge(original, on='user')
+    cosmetics_users = users.loc[users.dataset.eq('cosmetics'), ['user', 'long_term_buyer']]
+    cosmetics = cosmetics.merge(cosmetics_users, on='user')
+    p2 = cosmetics.loc[cosmetics.original_persona.eq(2)]
+    p2_profiles = (p2.groupby('long_term_buyer', as_index=False)
+                   .agg(users=('user', 'nunique'), sessions=('session', 'size'),
+                        purchase_session_rate=('purchase', lambda values: values.gt(0).mean()),
+                        no_return_30d_rate=('no_return_30d', 'mean'),
+                        median_previous_gap_hours=('previous_gap_hours', 'median')))
+    by_type = p2_profiles.set_index('long_term_buyer')
+    purchase_offset = _logit(by_type.loc[True, 'purchase_session_rate']) - _logit(
+        by_type.loc[False, 'purchase_session_rate']
+    )
+    nonreturn_offset = _logit(by_type.loc[True, 'no_return_30d_rate']) - _logit(
+        by_type.loc[False, 'no_return_30d_rate']
+    )
+    p2_users = cosmetics[['user', 'original_persona', 'long_term_buyer']].drop_duplicates()
+    p2_users = p2_users.loc[p2_users.original_persona.eq(2)]
+    observed_conditional_probability = float(p2_users.long_term_buyer.mean())
+    cosmetics_users = users.loc[users.dataset.eq('cosmetics')]
+    population_probability = float(cosmetics_users.long_term_buyer.mean())
+    gap_model = json.loads((
+        PROJECT_ROOT / 'artifacts/cosmetics-shop-persona-quadratic-irl/gap_token_irl_model.json'
+    ).read_text(encoding='utf-8'))
+    simulator_p2_probability = float(gap_model['lifecycle']['home_persona_prior']['2'])
+    sampling_probability = min(population_probability / simulator_p2_probability, 1.0)
+    return users, profiles, p2_profiles, {
+        'name': 'P_LT', 'parent_home_persona': 2,
+        'operational_definition': 'at least 10 sessions, 3 purchase sessions, and 30 observed days',
+        'population_probability': population_probability,
+        'observed_conditional_probability_within_p2': observed_conditional_probability,
+        'sampling_probability_within_p2': sampling_probability,
+        'purchase_logit_offset': purchase_offset,
+        'no_return_logit_offset': nonreturn_offset,
+        'rollout_validation': {
+            'users': 10000, 'seed': 20261027,
+            'generated_users': 82, 'generated_share': 0.0082,
+            'generated_purchase_session_rate': 0.052283,
+            'generated_no_return_30d_rate': 0.043680,
+        },
+        'calibration_only': (
+            'retrospective full-history subtype used as a simulator latent prior; '
+            'not available as an online observed label'
+        ),
+    }
+
+
+def _long_term_stage_row(dataset, user, frame):
+    """Summarize early, middle, and late thirds of one LT user's eligible sessions."""
+    frame = frame.sort_values('start', kind='stable')
+    stage_index = np.minimum(np.arange(len(frame)) * 3 // len(frame), 2)
+    row = {'dataset': dataset, 'user': user, 'eligible_sessions': len(frame)}
+    for index, stage in enumerate(('early', 'middle', 'late')):
+        part = frame.iloc[np.flatnonzero(stage_index == index)]
+        action_total = float(part[list(ACTION_NAMES)].to_numpy().sum())
+        for action in ACTION_NAMES:
+            row[f'{stage}_{action}_share'] = float(part[action].sum() / action_total)
+        row[f'{stage}_events_per_session'] = float(part.events.mean())
+        row[f'{stage}_median_previous_gap_hours'] = float(part.previous_gap_hours.median())
+        row[f'{stage}_purchase_session_rate'] = float(part.purchase.gt(0).mean())
+    final = frame.iloc[-1]
+    row['terminal_state'] = (
+        'DISSATISFIED_CHURNING' if final.no_return_30d == 1 and final.purchase == 0 else
+        'SATIATED_EXIT' if final.no_return_30d == 1 else 'OBSERVED_RETURN'
+    )
+    row['view_share_change'] = row['late_view_share'] - row['early_view_share']
+    row['purchase_share_change'] = row['late_purchase_share'] - row['early_purchase_share']
+    row['event_volume_ratio'] = (
+        row['late_events_per_session'] / row['early_events_per_session']
+    )
+    early_gap = max(row['early_median_previous_gap_hours'], 1 / 60)
+    row['gap_ratio'] = row['late_median_previous_gap_hours'] / early_gap
+    row['view_shift_10pp'] = row['view_share_change'] >= .10
+    row['purchase_share_decline'] = row['purchase_share_change'] < 0
+    row['event_volume_decline'] = row['event_volume_ratio'] < 1
+    row['prior_gap_doubled'] = row['gap_ratio'] >= 2
+    row['view_led_churning_proxy'] = (
+        row['terminal_state'] == 'DISSATISFIED_CHURNING'
+        and row['view_shift_10pp'] and row['event_volume_decline']
+    )
+    return row
+
+
+def run_long_term_churn_analysis(output=CROSS_LIFECYCLE_OUT):
+    """Check whether retail LT users become view-heavy before observed non-return."""
+    import matplotlib.pyplot as plt
+
+    output = Path(output)
+    decisions = pd.read_parquet(output / 'return_decisions.parquet')
+    users = pd.read_parquet(output / 'long_term_buyer_users.parquet')
+    long_term = users.loc[users.long_term_buyer, ['dataset', 'user']]
+    frame = decisions.merge(long_term, on=['dataset', 'user'], validate='many_to_one')
+    rows = [
+        _long_term_stage_row(dataset, user, part)
+        for (dataset, user), part in frame.groupby(['dataset', 'user'], sort=True)
+    ]
+    changes = pd.DataFrame(rows)
+
+    stages = ('early', 'middle', 'late')
+    profiles = []
+    for (dataset, terminal), part in changes.groupby(['dataset', 'terminal_state'], sort=True):
+        for stage in stages:
+            profiles.append({
+                'dataset': dataset, 'terminal_state': terminal, 'stage': stage,
+                'users': len(part),
+                'median_view_share': float(part[f'{stage}_view_share'].median()),
+                'median_purchase_share': float(part[f'{stage}_purchase_share'].median()),
+                'median_events_per_session': float(
+                    part[f'{stage}_events_per_session'].median()
+                ),
+                'median_previous_gap_hours': float(
+                    part[f'{stage}_median_previous_gap_hours'].median()
+                ),
+            })
+    profiles = pd.DataFrame(profiles)
+
+    signal_rows = []
+    for dataset, part in changes.groupby('dataset', sort=True):
+        churn = part.loc[part.terminal_state.eq('DISSATISFIED_CHURNING')]
+        signal_rows.append({
+            'dataset': dataset,
+            'long_term_users': len(part),
+            'dissatisfied_churning_users': len(churn),
+            'satiated_exit_users': int(part.terminal_state.eq('SATIATED_EXIT').sum()),
+            'view_shift_10pp_all_users': int(part.view_shift_10pp.sum()),
+            'event_volume_decline_all_users': int(part.event_volume_decline.sum()),
+            'view_shift_10pp_among_churning': int(churn.view_shift_10pp.sum()),
+            'event_volume_decline_among_churning': int(churn.event_volume_decline.sum()),
+            'view_led_churning_proxy_users': int(churn.view_led_churning_proxy.sum()),
+            'view_led_churning_proxy_share_of_churning': (
+                float(churn.view_led_churning_proxy.mean()) if len(churn) else None
+            ),
+            'purchase_share_decline_among_churning': int(
+                churn.purchase_share_decline.sum()
+            ),
+            'prior_gap_doubled_among_churning': int(churn.prior_gap_doubled.sum()),
+        })
+    signals = pd.DataFrame(signal_rows)
+    report = {
+        'long_term_definition': (
+            'at least 10 eligible sessions, 3 purchase sessions, and 30 observed days'
+        ),
+        'stage_definition': 'chronological eligible sessions split into user-level thirds',
+        'terminal_definition': {
+            'DISSATISFIED_CHURNING': 'non-purchase session followed by observed 30-day non-return',
+            'SATIATED_EXIT': 'purchase session followed by observed 30-day non-return',
+            'OBSERVED_RETURN': 'a subsequent session is observed within 30 days',
+        },
+        'view_led_churning_proxy': (
+            'DISSATISFIED_CHURNING plus a late-minus-early view share increase of at least '
+            '10 percentage points and lower late events per session'
+        ),
+        'signals': signals.to_dict(orient='records'),
+        'limitations': [
+            'The LT label and stage split use retrospective history and are simulator calibration labels, not online states.',
+            'The terminal label requires observable 30-day follow-up and does not establish permanent churn.',
+            'Electronics has only seven LT users, so counts are reported without population inference.',
+            'A view-share increase alone is not a reliable churn signal; terminal non-return and activity contraction are required by the proxy.',
+        ],
+    }
+    changes.to_csv(output / 'long_term_stage_changes.csv', index=False)
+    profiles.to_csv(output / 'long_term_stage_profiles.csv', index=False)
+    signals.to_csv(output / 'long_term_churn_signals.csv', index=False)
+    (output / 'long_term_churn_summary.json').write_text(
+        json.dumps(report, indent=2), encoding='utf-8'
+    )
+
+    figure = PROJECT_ROOT / 'img/persona/long_term_churn_progression.png'
+    figure.parent.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(2, 2, figsize=(9.2, 6.2), constrained_layout=True)
+    colors = {
+        'DISSATISFIED_CHURNING': '#e15759',
+        'SATIATED_EXIT': '#59a14f',
+        'OBSERVED_RETURN': '#4e79a7',
+    }
+    for column, dataset in enumerate(('cosmetics', 'electronics')):
+        source = profiles.loc[profiles.dataset.eq(dataset)]
+        for terminal, part in source.groupby('terminal_state', sort=True):
+            part = part.set_index('stage').reindex(stages)
+            label = f"{terminal.replace('_', ' ').title()} (n={int(part.users.iloc[0])})"
+            axes[0, column].plot(stages, part.median_view_share * 100, marker='o',
+                                 color=colors[terminal], label=label)
+            axes[1, column].plot(stages, part.median_events_per_session, marker='o',
+                                 color=colors[terminal], label=label)
+        axes[0, column].set_title(dataset.title())
+        axes[0, column].set_ylabel('Median view share (%)')
+        axes[1, column].set_ylabel('Median events per session')
+        axes[1, column].set_xlabel('Sequence stage')
+        for axis in axes[:, column]:
+            axis.grid(axis='y', alpha=.2)
+            axis.spines[['top', 'right']].set_visible(False)
+            axis.legend(frameon=False, fontsize=7)
+    fig.savefig(figure, dpi=180, bbox_inches='tight')
+    plt.close(fig)
+    return report
+
+
+def _lifecycle_source(source, raw, memberships_path, sample_modulus):
+    """Apply one lifecycle definition to one retail log."""
+    from analysis.irl.persona import session_summaries
+    from analysis.persona.sequence import source_data
+
+    events, quality, actions = source_data(source, Path(raw), sample_modulus)
+    canonical = {name: index for index, name in enumerate(('view', 'cart', 'remove', 'purchase'))}
+    action_map = {index: canonical[name] for index, name in enumerate(actions)}
+    events = events.copy()
+    events['action'] = events.action.map(action_map).astype('int8')
+    memberships = pd.read_parquet(memberships_path)[['user_id', 'cluster']]
+    sessions, observation_end = session_summaries(events, memberships)
+    sessions = sessions.sort_values(['user', 'start'], kind='stable')
+    observation_start = events['at'].min()
+    groups = {int(user): frame for user, frame in sessions.groupby('user', sort=False)}
+    users = sessions.groupby('user', sort=False).agg(
+        first_seen=('start', 'min'), last_seen=('end', 'max'), sessions=('session', 'size')
+    ).reset_index()
+    cohort = users.loc[
+        users.first_seen.ge(observation_start + pd.Timedelta(days=30))
+        & users.first_seen.le(observation_end - pd.Timedelta(days=60))
+        & users.sessions.ge(6)
+    ]
+    trajectory_rows = []
+    for user_row in cohort.itertuples(index=False):
+        frame = groups[int(user_row.user)]
+        cluster = int(frame.persona.iloc[0])
+        shared_profile = SHARED_LIFECYCLE_PROFILE[source][cluster]
+        windows = {'early': frame.iloc[:2], 'middle': frame.iloc[2:4], 'late': frame.iloc[-2:]}
+        no_return = observation_end - frame.end.iloc[-1] >= pd.Timedelta(days=30)
+        final_purchase = bool(frame.purchase.iloc[-1] > 0)
+        terminal = (
+            'SATIATED_EXIT_CANDIDATE' if no_return and final_purchase else
+            'DISSATISFIED_CHURNING' if no_return else 'RIGHT_CENSORED'
+        )
+        for stage, window in windows.items():
+            trajectory_rows.append({
+                'dataset': source, 'user': int(user_row.user), 'stage': stage,
+                'cluster': cluster, 'shared_profile': shared_profile,
+                'terminal_state': terminal,
+                **shared_lifecycle_window_features(window),
+            })
+    trajectories = pd.DataFrame(trajectory_rows)
+    profiles = (trajectories.groupby(['dataset', 'terminal_state', 'stage'], as_index=False)
+                 .agg(users=('user', 'nunique'), view_share=('view_share', 'mean'),
+                      cart_share=('cart_share', 'mean'),
+                      purchase_share=('purchase_share', 'mean'),
+                      median_events=('events', 'median'),
+                      median_gap_hours=('median_gap_hours', 'median')))
+    decisions = lifecycle_decisions(sessions, observation_end)
+    decisions.insert(0, 'dataset', source)
+    decisions['shared_profile'] = decisions.persona.map(SHARED_LIFECYCLE_PROFILE[source])
+    decisions['profile_s1'] = decisions.shared_profile.eq('S1').astype(float)
+    decisions['profile_s2'] = decisions.shared_profile.eq('S2').astype(float)
+    delayed = decisions.loc[decisions.next_gap_hours.ge(720)]
+    terminal_counts = (trajectories[['user', 'terminal_state']].drop_duplicates()
+                       .terminal_state.value_counts().to_dict())
+    return {
+        'quality': quality,
+        'observation_start': observation_start,
+        'observation_end': observation_end,
+        'cohort_users': int(len(cohort)),
+        'terminal_counts': {key: int(value) for key, value in terminal_counts.items()},
+        'delayed_return_sessions': int(len(delayed)),
+        'delayed_return_purchase_sessions': int(delayed.purchase.gt(0).sum()),
+    }, trajectories, profiles, decisions
+
+
+def run_cross_domain_lifecycle(raw_paths=None, output=CROSS_LIFECYCLE_OUT, seed=42):
+    """Validate and fit the coupon-free lifecycle layer across both retail logs."""
+    raw_paths = raw_paths or {
+        'cosmetics': PROJECT_ROOT / 'data/raw/kaggle/cosmetics-shop',
+        'electronics': PROJECT_ROOT / 'data/raw/kaggle/electronics/events.csv',
+    }
+    membership_paths = {
+        source: PROJECT_ROOT / f'artifacts/cross-dataset-persona-similarity/{source}_k4_memberships.parquet'
+        for source in ('cosmetics', 'electronics')
+    }
+    source_results = {}
+    trajectories, profiles, decisions = [], [], []
+    for source in ('cosmetics', 'electronics'):
+        result = _lifecycle_source(
+            source, raw_paths[source], membership_paths[source],
+            100 if source == 'cosmetics' else 1,
+        )
+        source_results[source] = result[0]
+        trajectories.append(result[1])
+        profiles.append(result[2])
+        decisions.append(result[3])
+    trajectories = pd.concat(trajectories, ignore_index=True)
+    profiles = pd.concat(profiles, ignore_index=True)
+    decisions = pd.concat(decisions, ignore_index=True)
+    model_decisions = decisions.loc[decisions.shared_profile.ne('UNRESOLVED')].copy()
+
+    persona_purchase_profiles = (decisions.loc[decisions.shared_profile.ne('UNRESOLVED')]
+        .assign(purchase_session=lambda x: x.purchase.gt(0),
+                satiated_exit_candidate=lambda x: x.no_return_30d.eq(1) & x.purchase.gt(0),
+                dissatisfied_churning=lambda x: x.no_return_30d.eq(1) & x.purchase.eq(0))
+        .groupby(['dataset', 'shared_profile'], as_index=False)
+        .agg(sessions=('session', 'size'), users=('user', 'nunique'),
+             purchase_session_rate=('purchase_session', 'mean'),
+             no_return_30d_rate=('no_return_30d', 'mean'),
+             satiated_exit_candidate_rate=('satiated_exit_candidate', 'mean'),
+             dissatisfied_churning_rate=('dissatisfied_churning', 'mean')))
+    persona_terminal_profiles = (trajectories[
+        ['dataset', 'user', 'shared_profile', 'terminal_state']
+    ].drop_duplicates()
+        .groupby(['dataset', 'shared_profile', 'terminal_state'], as_index=False)
+        .size().rename(columns={'size': 'users'}))
+    persona_terminal_profiles['share'] = (
+        persona_terminal_profiles.users
+        / persona_terminal_profiles.groupby(['dataset', 'shared_profile']).users.transform('sum')
+    )
+    long_term_users, long_term_profiles, long_term_p2_profiles, long_term_specification = (
+        long_term_buyer_analysis(decisions)
+    )
+
+    evaluations = {}
+    for train_source, test_source in (
+        ('cosmetics', 'electronics'), ('electronics', 'cosmetics')
+    ):
+        _, _, metrics = _fit_lifecycle_head(
+            model_decisions.loc[model_decisions.dataset.eq(train_source)],
+            model_decisions.loc[model_decisions.dataset.eq(test_source)], seed=seed,
+        )
+        evaluations[f'{train_source}_to_{test_source}'] = metrics
+    for source in ('cosmetics', 'electronics'):
+        frame = model_decisions.loc[model_decisions.dataset.eq(source)].copy()
+        heldout = pd.util.hash_pandas_object(
+            source + ':' + frame.user.astype(str), index=False
+        ).mod(5).eq(0)
+        _, _, metrics = _fit_lifecycle_head(frame.loc[~heldout], frame.loc[heldout], seed=seed)
+        evaluations[f'{source}_heldout'] = metrics
+
+    domain_weight = model_decisions.dataset.map(
+        model_decisions.dataset.value_counts().rdiv(len(model_decisions) / 2)
+    ).to_numpy()
+    estimator, scaler, pooled_metrics = _fit_lifecycle_head(
+        model_decisions, model_decisions, sample_weight=domain_weight, seed=seed
+    )
+    coefficients = dict(zip(COMMON_LIFECYCLE_FEATURES, estimator.coef_[0], strict=True))
+    standardized = scaler.transform(model_decisions[list(COMMON_LIFECYCLE_FEATURES)])
+    linear_predictor = standardized @ estimator.coef_[0]
+    domain_intercepts = {
+        source: _calibrate_intercept(
+            linear_predictor[model_decisions.dataset.eq(source).to_numpy()],
+            model_decisions.loc[model_decisions.dataset.eq(source), 'no_return_30d'].mean(),
+        )
+        for source in ('cosmetics', 'electronics')
+    }
+    model = {
+        'states': ['NEW', 'HOME_PERSONA', 'DISSATISFIED_CHURNING', 'SATIATED_EXIT', 'EXIT'],
+        'home_persona_rule': 'sampled once at birth and restored after reactivation',
+        'new_rule': 'first two simulated sessions; observed first sessions are only a proxy',
+        'dissatisfied_churning_rule': 'no session within 30 days after a non-purchase session',
+        'satiated_exit_rule': (
+            'purchase followed by no session within 30 days; satisfaction is a latent simulator '
+            'interpretation and the observed label remains SATIATED_EXIT_CANDIDATE'
+        ),
+        'simulator_compatibility_alias': {'SATIATED_EXIT': 'MISSION_EXIT'},
+        'transitions': {
+            'NEW': ['NEW', 'HOME_PERSONA', 'DISSATISFIED_CHURNING', 'SATIATED_EXIT'],
+            'HOME_PERSONA': ['HOME_PERSONA', 'DISSATISFIED_CHURNING', 'SATIATED_EXIT'],
+            'DISSATISFIED_CHURNING': ['HOME_PERSONA', 'EXIT'],
+            'SATIATED_EXIT': ['SATIATED_EXIT'],
+            'EXIT': ['EXIT'],
+        },
+        'no_return_head': {
+            'features': list(COMMON_LIFECYCLE_FEATURES),
+            'scaler_mean': scaler.mean_.tolist(), 'scaler_scale': scaler.scale_.tolist(),
+            'pooled_intercept': float(estimator.intercept_[0]),
+            'domain_intercepts': domain_intercepts,
+            'simulator_intercepts': {
+                'cosmetics': domain_intercepts['cosmetics']
+                + COSMETICS_SIMULATOR_INTERCEPT_OFFSET,
+            },
+            'coefficients': coefficients,
+            'fit': 'dataset-balanced pooled logistic slopes with prevalence-calibrated domain intercepts',
+            'simulator_calibration': {
+                'cosmetics_intercept_offset': COSMETICS_SIMULATOR_INTERCEPT_OFFSET,
+                'selection_users': 2000, 'selection_seed': 20261026,
+                'target_no_return_30d_rate': 0.26243093922651933,
+                'validation_users': 10000, 'validation_seed': 20261027,
+                'validation_no_return_30d_rate': 0.26324740898219506,
+                'validation_absolute_error': 0.0008164697556757305,
+                'validation_satiated_share_among_nonreturns': 0.05007066424389259,
+                'target_satiated_share_among_nonreturns': 0.0491514991646883,
+            },
+        },
+        'long_term_buyer': long_term_specification,
+    }
+    summary = {
+        'cohort_definition': 'first observed 30d after log start, 60d before log end, >=6 sessions',
+        'sources': {
+            source: {
+                **{key: value for key, value in result.items()
+                   if key not in ('observation_start', 'observation_end')},
+                'observation_start': result['observation_start'].isoformat(),
+                'observation_end': result['observation_end'].isoformat(),
+            }
+            for source, result in source_results.items()
+        },
+        'evaluation': evaluations,
+        'pooled_in_sample_diagnostic': pooled_metrics,
+        'shared_profile_mapping': {
+            'rule': 'Electronics clusters map to their nearest Cosmetics shared-action profile; '
+                    'S0/S1/S2 are cross-domain validation profiles, not simulator home-persona labels; '
+                    'Cosmetics C1 is unresolved because it has no distinct counterpart',
+            'mapping': SHARED_LIFECYCLE_PROFILE,
+        },
+        'persona_purchase_profiles': persona_purchase_profiles.to_dict(orient='records'),
+        'persona_terminal_profiles': persona_terminal_profiles.to_dict(orient='records'),
+        'long_term_buyer_profiles': long_term_profiles.to_dict(orient='records'),
+        'long_term_buyer_p2_profiles': long_term_p2_profiles.to_dict(orient='records'),
+        'model': model,
+        'limitations': [
+            'NEW denotes first observed sessions because neither dataset records signup.',
+            'Electronics has no remove event, so the shared transition head excludes removal.',
+            'SATIATED_EXIT_CANDIDATE is purchase plus 30-day non-return, not observed satisfaction.',
+            'The pooled fit is predictive and observational; it does not identify causal lifecycle effects.',
+            'Pooled in-sample metrics diagnose fit and are not a generalization estimate.',
+        ],
+    }
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    trajectories.to_parquet(output / 'trajectories.parquet', index=False)
+    profiles.to_csv(output / 'stage_profiles.csv', index=False)
+    decisions.to_parquet(output / 'return_decisions.parquet', index=False)
+    persona_purchase_profiles.to_csv(output / 'persona_purchase_profiles.csv', index=False)
+    persona_terminal_profiles.to_csv(output / 'persona_terminal_profiles.csv', index=False)
+    long_term_users.to_parquet(output / 'long_term_buyer_users.parquet', index=False)
+    long_term_profiles.to_csv(output / 'long_term_buyer_profiles.csv', index=False)
+    long_term_p2_profiles.to_csv(output / 'long_term_buyer_p2_profiles.csv', index=False)
+    (output / 'lifecycle_model.json').write_text(json.dumps(model, indent=2), encoding='utf-8')
+    (output / 'summary.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
+    _plot_cross_domain_lifecycle(profiles, persona_purchase_profiles, evaluations)
+    return summary
+
+
+def _plot_cross_domain_lifecycle(profiles, persona_purchase_profiles, evaluations):
+    import matplotlib.pyplot as plt
+
+    stages = ['early', 'middle', 'late']
+    fig, axes = plt.subplots(2, 2, figsize=(10, 6.5), constrained_layout=True)
+    axes = axes.ravel()
+    colors = {'cosmetics': '#4e79a7', 'electronics': '#e15759'}
+    for source in ('cosmetics', 'electronics'):
+        frame = profiles.loc[
+            profiles.dataset.eq(source) & profiles.terminal_state.eq('DISSATISFIED_CHURNING')
+        ].set_index('stage').reindex(stages)
+        axes[0].plot(stages, frame.median_gap_hours, marker='o', linewidth=2,
+                     color=colors[source], label=source.title())
+    axes[0].set_yscale('symlog', linthresh=1)
+    axes[0].set(ylabel='Median previous gap (hours)', title='Pre-churn gap progression')
+    axes[0].legend(frameon=False)
+    terminal_order = ['DISSATISFIED_CHURNING', 'SATIATED_EXIT_CANDIDATE']
+    x = np.arange(len(terminal_order))
+    for offset, source in zip((-.18, .18), ('cosmetics', 'electronics'), strict=True):
+        frame = profiles.loc[
+            profiles.dataset.eq(source) & profiles.stage.eq('late')
+        ].set_index('terminal_state').reindex(terminal_order)
+        axes[1].bar(x + offset, frame.purchase_share, width=.34, color=colors[source],
+                    label=source.title())
+    axes[1].set_xticks(x, ['Dissatisfied\nchurning', 'Satiated-exit\ncandidate'])
+    axes[1].set(ylabel='Late-window purchase share', title='Operational exit separation')
+    axes[1].legend(frameon=False)
+
+    persona_order = ['S0', 'S1', 'S2']
+    x = np.arange(len(persona_order))
+    for offset, source in zip((-.18, .18), ('cosmetics', 'electronics'), strict=True):
+        frame = persona_purchase_profiles.loc[
+            persona_purchase_profiles.dataset.eq(source)
+        ].set_index('shared_profile').reindex(persona_order)
+        axes[2].bar(x + offset, frame.purchase_session_rate, width=.34,
+                    color=colors[source], label=source.title())
+    axes[2].set_xticks(x, persona_order)
+    axes[2].set(ylabel='Purchase-session rate', title='Cross-domain profile purchase pattern')
+
+    names = ['Cosmetics\nheld-out', 'Electronics\nheld-out',
+             'Cosmetics→\nElectronics', 'Electronics→\nCosmetics']
+    keys = ['cosmetics_heldout', 'electronics_heldout',
+            'cosmetics_to_electronics', 'electronics_to_cosmetics']
+    values = [evaluations[key]['roc_auc'] for key in keys]
+    axes[3].bar(names, values, color=['#4e79a7', '#e15759', '#76b7b2', '#f28e2b'])
+    axes[3].axhline(.5, color='#666666', linestyle='--', linewidth=1)
+    axes[3].set_ylim(.45, 1)
+    axes[3].set(ylabel='ROC-AUC', title='30-day non-return transfer')
+    for index, value in enumerate(values):
+        axes[3].text(index, value + .015, f'{value:.2f}', ha='center', fontsize=8)
+    for axis in axes:
+        axis.spines[['top', 'right']].set_visible(False)
+    CROSS_LIFECYCLE_FIG.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(CROSS_LIFECYCLE_FIG, dpi=180, bbox_inches='tight')
+    plt.close(fig)
+
+
 def run_lifecycle(
     raw=PROJECT_ROOT / 'data/raw/kaggle/cosmetics-shop',
     embeddings_path=PROJECT_ROOT / 'artifacts/cosmetics-shop-personas/clusters.parquet',
@@ -771,11 +1409,22 @@ if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser(description='Analyze persona behavior, delays and heterogeneity.')
-    parser.add_argument('task', choices=('windows', 'dynamics', 'delays', 'heterogeneity', 'temporal', 'lifecycle'))
+    parser.add_argument('task', choices=(
+        'windows', 'dynamics', 'delays', 'heterogeneity', 'temporal',
+        'lifecycle', 'lifecycle-cross-domain', 'long-term-churn',
+    ))
     parser.add_argument('sources', nargs='*', choices=('electronics', 'cosmetics'))
     parser.add_argument('--k', type=int, default=2)
     args = parser.parse_args()
-    if args.task == 'lifecycle':
+    if args.task == 'lifecycle-cross-domain':
+        if args.sources:
+            parser.error('cross-domain lifecycle uses Cosmetics and Electronics together')
+        run_cross_domain_lifecycle()
+    elif args.task == 'long-term-churn':
+        if args.sources:
+            parser.error('long-term churn uses saved Cosmetics and Electronics lifecycle data')
+        run_long_term_churn_analysis()
+    elif args.task == 'lifecycle':
         if args.sources:
             parser.error('lifecycle currently uses the Cosmetics source only')
         run_lifecycle()

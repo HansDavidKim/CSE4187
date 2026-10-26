@@ -41,7 +41,8 @@ def _softmax(values: np.ndarray) -> np.ndarray:
 
 
 def fit_latent_canonical_assignment(
-    model: dict, embeddings: pd.DataFrame, seed: int = 42
+    model: dict, embeddings: pd.DataFrame, seed: int = 42,
+    subgroup_users: dict[str, set[int]] | None = None,
 ) -> dict:
     """Fit one regularized latent-to-canonical matrix from persona-level targets."""
     z_columns = sorted(
@@ -164,6 +165,62 @@ def fit_latent_canonical_assignment(
             "labels are unavailable and within-persona latent gradients are regularized assumptions"
         ),
     }
+    subgroup_users = subgroup_users or {}
+    subgroup_offsets, subgroup_distributions, subgroup_fit = {}, {}, []
+    base_logits = x @ matrix
+    for name, users in subgroup_users.items():
+        index = frame.user_id.astype(int).isin(users).to_numpy()
+        if index.sum() < 10:
+            raise ValueError(f"canonical subgroup {name} needs at least ten embedded users")
+        target = np.asarray([
+            model["canonical_subgroups"][name]["canonical_type_probabilities"][kind]
+            for kind in CANONICAL_TYPES
+        ])
+
+        def subgroup_objective(free):
+            offset = np.r_[free, -np.sum(free)]
+            probability = _softmax(base_logits[index] + offset)
+            average = probability.mean(axis=0)
+            loss = -np.sum(target * np.log(average + 1e-15))
+            derivative = -target / (average + 1e-15)
+            logits_gradient = probability * (
+                derivative - (probability * derivative).sum(axis=1, keepdims=True)
+            ) / len(probability)
+            gradient = logits_gradient.sum(axis=0)
+            penalty = selected["l1"] * np.sqrt(np.square(offset) + 1e-8).sum()
+            penalty += .5 * selected["l2"] * np.square(offset).sum()
+            gradient += (
+                selected["l1"] * offset / np.sqrt(np.square(offset) + 1e-8)
+                + selected["l2"] * offset
+            )
+            return float(loss + penalty), gradient[:-1] - gradient[-1]
+
+        fitted = minimize(
+            subgroup_objective, np.zeros(len(CANONICAL_TYPES) - 1),
+            method="L-BFGS-B", jac=True, options={"maxiter": 1000, "ftol": 1e-11},
+        )
+        if not fitted.success:
+            raise RuntimeError(f"canonical subgroup calibration failed: {fitted.message}")
+        offset = np.r_[fitted.x, -fitted.x.sum()]
+        predicted = _softmax(base_logits[index] + offset).mean(axis=0)
+        values = latent[index]
+        covariance = np.cov(values, rowvar=False) + np.eye(values.shape[1]) * 1e-4
+        subgroup_offsets[name] = offset.tolist()
+        subgroup_distributions[name] = {
+            "mean": values.mean(axis=0).tolist(),
+            "covariance": covariance.tolist(),
+            "cholesky": np.linalg.cholesky(covariance).tolist(),
+        }
+        subgroup_fit.append({
+            "group": name,
+            "users": int(index.sum()),
+            "predicted": dict(zip(CANONICAL_TYPES, predicted.tolist())),
+            "target": dict(zip(CANONICAL_TYPES, target.tolist())),
+            "rmse": float(np.sqrt(np.mean(np.square(predicted - target)))),
+        })
+    model["canonical_assignment"]["group_logit_offsets"] = subgroup_offsets
+    model["canonical_assignment"]["group_latent_gaussians"] = subgroup_distributions
+    model["canonical_assignment"]["subgroup_fit"] = subgroup_fit
     return model
 
 
@@ -316,10 +373,52 @@ def run(output: Path) -> dict:
     persona = json.loads((PROJECT_ROOT / "artifacts/tianchi-persona-uplift/summary.json").read_text())
     reactivation = json.loads((PROJECT_ROOT / "artifacts/coupon-reactivation/summary.json").read_text())
     model = calibrate(persona, reactivation)
+    canonical = pd.read_csv(
+        PROJECT_ROOT / "artifacts/tianchi-canonical-proxies/canonical_type_proxies.csv"
+    ).set_index("persona")
+    for label, row in canonical.loc[["P0", "P2", "P3"]].iterrows():
+        specification = model["personas"][label[1:]]
+        p0, p1 = float(row.p0), float(row.p1)
+        specification.update({
+            "tianchi_proxy": f"matched_cross_domain_{label}",
+            "purchase_14d_control": p0,
+            "purchase_14d_receipt": p1,
+            "purchase_logit_shift": _logit(p1) - _logit(p0),
+            "canonical_type_probabilities": {
+                name: float(row[name]) for name in CANONICAL_TYPES
+            },
+        })
+    p_lt = canonical.loc["P_LT"]
+    model["canonical_subgroups"] = {
+        "P_LT": {
+            "parent_persona": 2,
+            "purchase_14d_control": float(p_lt.p0),
+            "purchase_14d_receipt": float(p_lt.p1),
+            "canonical_type_probabilities": {
+                name: float(p_lt[name]) for name in CANONICAL_TYPES
+            },
+        }
+    }
+    for specification in model["personas"].values():
+        for canonical_type, multiplier in model["type_multipliers"].items():
+            specification["initial_offset_by_type"][canonical_type] = {
+                "purchase": multiplier * model["default_strength"]
+                * specification["purchase_logit_shift"],
+                "return": multiplier * model["default_strength"]
+                * specification["return_logit_shift"],
+            }
     embeddings = pd.read_parquet(
         PROJECT_ROOT / "artifacts/cosmetics-shop-personas/clusters.parquet"
     )
-    model = fit_latent_canonical_assignment(model, embeddings)
+    long_term = pd.read_parquet(
+        PROJECT_ROOT / "artifacts/cross-domain-lifecycle/long_term_buyer_users.parquet"
+    )
+    p_lt_users = set(long_term.loc[
+        long_term.dataset.eq("cosmetics") & long_term.long_term_buyer, "user"
+    ].astype(int))
+    model = fit_latent_canonical_assignment(
+        model, embeddings, subgroup_users={"P_LT": p_lt_users}
+    )
     model = fit_persona_strengths(model)
     output.mkdir(parents=True, exist_ok=True)
     (output / "model.json").write_text(

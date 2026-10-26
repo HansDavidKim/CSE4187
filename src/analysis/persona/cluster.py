@@ -22,6 +22,1041 @@ CLUSTER_ROOT = PROJECT_ROOT
 CLUSTER_CAPSTONE = CAPSTONE_ROOT
 CLUSTER_OUT = CLUSTER_ROOT / 'artifacts/two-dataset-gru-clusters'
 FOUR_MODE_OUT = CLUSTER_ROOT / 'artifacts/four-behavior-modes'
+SIMILARITY_OUT = CLUSTER_ROOT / 'artifacts/cross-dataset-persona-similarity'
+ELECTRONICS_DROP_OUT = CLUSTER_ROOT / 'artifacts/electronics-drop-alignment'
+RETAIL_COMBINED_OUT = CLUSTER_ROOT / 'artifacts/retail-combined-personas'
+THREE_DOMAIN_ALIGNMENT_OUT = CLUSTER_ROOT / 'artifacts/three-domain-cluster-alignment'
+
+
+SIMILARITY_FEATURES = (
+    'view_share', 'cart_share', 'remove_share', 'purchase_share',
+    'buyer_share', 'log_activity_depth', 'log_sessions',
+)
+
+ALIGNMENT_FEATURES = (
+    'purchase_share', 'log_total_events', 'log_active_days', 'log_events_per_day',
+    'purchase_day_share', 'log_median_gap', 'first_day_purchase', 'last_day_purchase',
+    'explore_to_purchase', 'purchase_to_explore', 'explore_persistence',
+    'purchase_persistence', 'has_transition',
+)
+
+RETAIL_ALIGNMENT_FEATURES = (
+    'cart_share', 'purchase_share', 'log_total_events', 'log_sessions',
+    'log_events_per_session', 'log_median_session_gap', 'has_cart', 'has_purchase',
+    'first_cart', 'first_purchase', 'last_cart', 'last_purchase',
+    'view_to_cart', 'cart_to_purchase', 'view_persistence', 'cart_persistence',
+    'purchase_persistence',
+)
+
+
+def behavioral_profile_similarity(reference: dict, target: dict, scales: dict) -> tuple[float, float, float]:
+    """Return shape similarity, feature coverage, and the underlying scaled distance."""
+    shared = [name for name in SIMILARITY_FEATURES if name in reference and name in target]
+    if not shared:
+        raise ValueError('behavior profiles have no shared features')
+    distance = float(np.sqrt(np.mean([
+        ((reference[name] - target[name]) / scales[name]) ** 2 for name in shared
+    ])))
+    return float(np.exp(-distance)), len(shared) / len(SIMILARITY_FEATURES), distance
+
+
+def _shared_behavior_features(events: pd.DataFrame, membership: pd.DataFrame) -> pd.DataFrame:
+    """Build coupon/cart-free user features shared by all three domains."""
+    events = events.sort_values(['user', 'at'], kind='stable').copy()
+    counts = (pd.crosstab(events.user, events.action)
+                .reindex(columns=['explore', 'purchase'], fill_value=0))
+    daily = (events.assign(day=events['at'].dt.floor('D'), present=1)
+                   .pivot_table(index=['user', 'day'], columns='action', values='present',
+                                aggfunc='max', fill_value=0)
+                   .reindex(columns=['explore', 'purchase'], fill_value=0).reset_index()
+                   .sort_values(['user', 'day'], kind='stable'))
+    grouped = daily.groupby('user', sort=False)
+    active_days = grouped.size()
+    purchase_days = grouped.purchase.sum()
+    gaps = grouped.day.diff().dt.days.groupby(daily.user).median().fillna(0)
+    first = grouped.head(1).set_index('user')
+    last = grouped.tail(1).set_index('user')
+    daily['next_explore'] = grouped.explore.shift(-1)
+    daily['next_purchase'] = grouped.purchase.shift(-1)
+    valid = daily.next_explore.notna()
+    transitions = daily.loc[valid].copy()
+    transitions['explore_to_purchase'] = (
+        transitions.explore.eq(1) & transitions.purchase.eq(0) & transitions.next_purchase.eq(1)
+    )
+    transitions['purchase_to_explore'] = (
+        transitions.purchase.eq(1) & transitions.next_explore.eq(1) & transitions.next_purchase.eq(0)
+    )
+    transitions['explore_persistence'] = (
+        transitions.explore.eq(1) & transitions.purchase.eq(0) & transitions.next_explore.eq(1)
+    )
+    transitions['purchase_persistence'] = transitions.purchase.eq(1) & transitions.next_purchase.eq(1)
+    transition_rates = transitions.groupby('user')[list(ALIGNMENT_FEATURES[8:12])].mean()
+
+    total = counts.sum(axis=1)
+    features = pd.DataFrame(index=counts.index)
+    features['purchase_share'] = counts.purchase.div(total)
+    features['log_total_events'] = np.log1p(total)
+    features['log_active_days'] = np.log1p(active_days)
+    features['log_events_per_day'] = np.log1p(total.div(active_days))
+    features['purchase_day_share'] = purchase_days.div(active_days)
+    features['log_median_gap'] = np.log1p(gaps)
+    features['first_day_purchase'] = first.purchase
+    features['last_day_purchase'] = last.purchase
+    features = features.join(transition_rates).fillna(0)
+    features['has_transition'] = active_days.gt(1).astype(float)
+    features = membership[['user_id', 'cluster']].merge(
+        features.reset_index().rename(columns={'user': 'user_id'}), on='user_id', how='inner'
+    )
+    if features[list(ALIGNMENT_FEATURES)].isna().any().any():
+        raise ValueError('shared behavior features contain missing values')
+    return features
+
+
+def _retail_behavior_features(events: pd.DataFrame, membership: pd.DataFrame) -> pd.DataFrame:
+    """Build user features after both retail domains share view/cart/purchase actions."""
+    events = events.loc[events.action.isin(['view', 'cart', 'purchase'])].copy()
+    events = events.sort_values(['user_id', 'at'], kind='stable')
+    counts = (pd.crosstab(events.user_id, events.action)
+                .reindex(columns=['view', 'cart', 'purchase'], fill_value=0))
+    total = counts.sum(axis=1)
+    sessions = events.groupby('user_id').session.nunique()
+    starts = (events.groupby(['user_id', 'session'], as_index=False).at.min()
+                    .sort_values(['user_id', 'at'], kind='stable'))
+    gaps = starts.groupby('user_id').at.diff().dt.total_seconds().div(86400)
+    median_gap = gaps.groupby(starts.user_id).median().fillna(0)
+    first = events.groupby('user_id', sort=False).head(1).set_index('user_id').action
+    last = events.groupby('user_id', sort=False).tail(1).set_index('user_id').action
+
+    events['next_action'] = events.groupby(['user_id', 'session'], sort=False).action.shift(-1)
+    pairs = events.loc[events.next_action.notna(), ['user_id', 'action', 'next_action']].copy()
+    transitions = {}
+    for name, origin, destination in (
+        ('view_to_cart', 'view', 'cart'),
+        ('cart_to_purchase', 'cart', 'purchase'),
+        ('view_persistence', 'view', 'view'),
+        ('cart_persistence', 'cart', 'cart'),
+        ('purchase_persistence', 'purchase', 'purchase'),
+    ):
+        origin_pairs = pairs.loc[pairs.action.eq(origin)]
+        transitions[name] = origin_pairs.next_action.eq(destination).groupby(origin_pairs.user_id).mean()
+
+    features = pd.DataFrame(index=counts.index)
+    features['cart_share'] = counts.cart.div(total)
+    features['purchase_share'] = counts.purchase.div(total)
+    features['log_total_events'] = np.log1p(total)
+    features['log_sessions'] = np.log1p(sessions)
+    features['log_events_per_session'] = np.log1p(total.div(sessions))
+    features['log_median_session_gap'] = np.log1p(median_gap)
+    features['has_cart'] = counts.cart.gt(0).astype(float)
+    features['has_purchase'] = counts.purchase.gt(0).astype(float)
+    features['first_cart'] = first.eq('cart').astype(float)
+    features['first_purchase'] = first.eq('purchase').astype(float)
+    features['last_cart'] = last.eq('cart').astype(float)
+    features['last_purchase'] = last.eq('purchase').astype(float)
+    for name, values in transitions.items():
+        features[name] = values
+    features = features.fillna(0)
+    features = membership[['user_id', 'cluster']].merge(
+        features.reset_index(), on='user_id', how='inner'
+    )
+    if features[list(RETAIL_ALIGNMENT_FEATURES)].isna().any().any():
+        raise ValueError('retail behavior features contain missing values')
+    return features
+
+
+def _fixed_k4_membership(source: str) -> tuple[pd.DataFrame, dict]:
+    """Create once and reuse a deterministic K=4 mapping on the stored GRU embedding."""
+    membership_path = SIMILARITY_OUT / f'{source}_k4_memberships.parquet'
+    report_path = SIMILARITY_OUT / f'{source}_k4_selection.json'
+    if membership_path.exists() and report_path.exists():
+        return pd.read_parquet(membership_path), json.loads(report_path.read_text())
+
+    embeddings = pd.read_parquet(
+        _capstone_models() / f'{source}_masked_embedding_embeddings.parquet'
+    )
+    z = embeddings[[f'z_{index}' for index in range(48)]].to_numpy()
+    mature = np.flatnonzero(embeddings.sessions.to_numpy() >= 2)
+    permutation = np.random.default_rng(2026).permutation(mature)
+    train = permutation[:int(.8 * len(permutation))]
+    test = permutation[int(.8 * len(permutation)):]
+    first = KMeans(n_clusters=4, n_init=50, random_state=42).fit(z[train])
+    alternate = KMeans(n_clusters=4, n_init=50, random_state=43).fit(z[train])
+    labels = first.predict(z)
+    train_sample = np.random.default_rng(1).choice(len(train), min(3000, len(train)), False)
+    test_sample = np.random.default_rng(2).choice(len(test), min(3000, len(test)), False)
+    report = {
+        'cluster_count_mode': 'fixed_operational_k4',
+        'selected_k': 4,
+        'train_silhouette': float(
+            silhouette_score(z[train][train_sample], labels[train][train_sample])
+        ),
+        'heldout_silhouette': float(
+            silhouette_score(z[test][test_sample], labels[test][test_sample])
+        ),
+        'seed_ari': float(adjusted_rand_score(labels[train], alternate.predict(z[train]))),
+        'cluster_sizes': np.bincount(labels, minlength=4).tolist(),
+        'mature_cluster_sizes': np.bincount(labels[mature], minlength=4).tolist(),
+    }
+    membership = embeddings[['user_id', 'sessions']].assign(cluster=labels)
+    SIMILARITY_OUT.mkdir(parents=True, exist_ok=True)
+    membership.to_parquet(membership_path, index=False)
+    report_path.write_text(json.dumps(report, indent=2) + '\n')
+    return membership, report
+
+
+def _tianchi_shared_features() -> tuple[pd.DataFrame, dict]:
+    membership = pd.read_parquet(PROJECT_ROOT / 'artifacts/tianchi-online-personas/clusters.parquet')
+    user_ids = set(membership.user_id.astype('int64'))
+    parts = []
+    source = PROJECT_ROOT / 'data/raw/tianchi-o2o/ccf_online_stage1_train.csv'
+    for chunk in pd.read_csv(source, usecols=['User_id', 'Action', 'Date'],
+                             dtype={'User_id': 'Int64', 'Action': 'Int8', 'Date': 'string'},
+                             chunksize=500_000):
+        chunk = chunk.loc[chunk.User_id.isin(user_ids) & chunk.Action.isin([0, 1])]
+        if chunk.empty:
+            continue
+        parts.append(pd.DataFrame({
+            'user': chunk.User_id.astype('int64'),
+            'at': pd.to_datetime(chunk.Date, format='%Y%m%d', utc=True, errors='coerce'),
+            'action': chunk.Action.map({0: 'explore', 1: 'purchase'}),
+        }).dropna())
+    features = _shared_behavior_features(pd.concat(parts, ignore_index=True), membership)
+    report = json.loads(
+        (PROJECT_ROOT / 'artifacts/tianchi-online-personas/clusters.json').read_text()
+    )
+    return features, report
+
+
+def _alignment_inputs() -> tuple[dict[str, pd.DataFrame], dict[str, dict]]:
+    inputs, selection_reports = {}, {}
+    for source in ('cosmetics', 'electronics'):
+        membership, selection_reports[source] = _fixed_k4_membership(source)
+        events = _selected_events(source, set(membership.user_id.astype('int64')))
+        events = (events.loc[events.action.isin(['view', 'purchase']), ['user_id', 'at', 'action']]
+                        .rename(columns={'user_id': 'user'}))
+        events['action'] = events.action.replace({'view': 'explore'})
+        inputs[source] = _shared_behavior_features(events, membership)
+
+    inputs['tianchi'], selection_reports['tianchi'] = _tianchi_shared_features()
+    return inputs, selection_reports
+
+
+def _profile_similarity(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    distance = np.sqrt(np.mean((left[:, None, :] - right[None, :, :]) ** 2, axis=2))
+    return np.exp(-distance)
+
+
+def _nearest_profile_mapping(scores: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Map each source profile independently; duplicate targets are intentional."""
+    order = np.argsort(-scores, axis=1)
+    nearest = order[:, 0]
+    margin = scores[np.arange(len(scores)), order[:, 0]] - scores[np.arange(len(scores)), order[:, 1]]
+    return nearest, margin
+
+
+def cross_dataset_similarity(bootstrap_repeats: int = 200) -> dict:
+    """Map Tianchi clusters onto independently selected target-domain profiles."""
+    import matplotlib.pyplot as plt
+    from sklearn.preprocessing import RobustScaler
+
+    inputs, selection_reports = _alignment_inputs()
+    combined = pd.concat([frame.assign(dataset=source) for source, frame in inputs.items()],
+                         ignore_index=True)
+    scaler = RobustScaler().fit(combined[list(ALIGNMENT_FEATURES)])
+    combined[list(ALIGNMENT_FEATURES)] = scaler.transform(combined[list(ALIGNMENT_FEATURES)])
+    profiles = (combined.groupby(['dataset', 'cluster'])[list(ALIGNMENT_FEATURES)]
+                         .median().sort_index())
+    profile_arrays = {source: profiles.loc[source].to_numpy() for source in inputs}
+    cluster_ids = {source: profiles.loc[source].index.to_numpy() for source in inputs}
+    cluster_counts = {source: len(ids) for source, ids in cluster_ids.items()}
+    targets = ('cosmetics', 'electronics')
+    matrices = {target: _profile_similarity(profile_arrays['tianchi'], profile_arrays[target])
+                for target in targets}
+    direct_scores = _profile_similarity(profile_arrays['cosmetics'], profile_arrays['electronics'])
+
+    rng = np.random.default_rng(2026)
+    boot_counts = {
+        target: np.zeros((cluster_counts['tianchi'], cluster_counts[target]), dtype=int)
+        for target in targets
+    }
+    direct_boot_counts = {
+        'cosmetics_to_electronics': np.zeros(
+            (cluster_counts['cosmetics'], cluster_counts['electronics']), dtype=int
+        ),
+        'electronics_to_cosmetics': np.zeros(
+            (cluster_counts['electronics'], cluster_counts['cosmetics']), dtype=int
+        ),
+    }
+    grouped = {(source, cluster): group[list(ALIGNMENT_FEATURES)].to_numpy()
+               for (source, cluster), group in combined.groupby(['dataset', 'cluster'])}
+    for _ in range(bootstrap_repeats):
+        boot = {}
+        for source in inputs:
+            boot[source] = np.vstack([
+                np.median(values[rng.integers(0, len(values), len(values))], axis=0)
+                for cluster in cluster_ids[source] for values in [grouped[(source, cluster)]]
+            ])
+        for target in targets:
+            score = _profile_similarity(boot['tianchi'], boot[target])
+            nearest, _ = _nearest_profile_mapping(score)
+            boot_counts[target][np.arange(cluster_counts['tianchi']), nearest] += 1
+        score = _profile_similarity(boot['cosmetics'], boot['electronics'])
+        nearest, _ = _nearest_profile_mapping(score)
+        direct_boot_counts['cosmetics_to_electronics'][
+            np.arange(cluster_counts['cosmetics']), nearest
+        ] += 1
+        nearest, _ = _nearest_profile_mapping(score.T)
+        direct_boot_counts['electronics_to_cosmetics'][
+            np.arange(cluster_counts['electronics']), nearest
+        ] += 1
+
+    comparisons, assignments, margins = {}, {}, {}
+    for target, scores in matrices.items():
+        nearest, margin = _nearest_profile_mapping(scores)
+        assignments[target] = nearest
+        margins[target] = margin
+        matches = []
+        for i, tianchi_cluster in enumerate(cluster_ids['tianchi']):
+            j = int(nearest[i])
+            matches.append({
+                'tianchi_cluster': int(tianchi_cluster),
+                f'{target}_cluster': int(cluster_ids[target][j]),
+                'similarity': float(scores[i, j]),
+                'nearest_margin': float(margin[i]),
+                'bootstrap_nearest_probability': float(boot_counts[target][i, j] / bootstrap_repeats),
+            })
+        comparisons[target] = {'similarity_matrix': scores.tolist(), 'matches': matches}
+
+    mapping = []
+    for i, cluster in enumerate(cluster_ids['tianchi']):
+        c = int(assignments['cosmetics'][i])
+        e = int(assignments['electronics'][i])
+        mapping.append({
+            'tianchi_cluster': int(cluster),
+            'cosmetics_cluster': int(cluster_ids['cosmetics'][c]),
+            'cosmetics_similarity': float(matrices['cosmetics'][i, c]),
+            'cosmetics_margin': float(margins['cosmetics'][i]),
+            'cosmetics_bootstrap_nearest_probability': float(
+                boot_counts['cosmetics'][i, c] / bootstrap_repeats
+            ),
+            'electronics_cluster': int(cluster_ids['electronics'][e]),
+            'electronics_similarity': float(matrices['electronics'][i, e]),
+            'electronics_margin': float(margins['electronics'][i]),
+            'electronics_bootstrap_nearest_probability': float(
+                boot_counts['electronics'][i, e] / bootstrap_repeats
+            ),
+        })
+    collapsed_counts = {
+        target: len(set(assignments[target].tolist())) for target in targets
+    }
+    direct_mapping = {}
+    for name, scores, source, target in (
+        ('cosmetics_to_electronics', direct_scores, 'cosmetics', 'electronics'),
+        ('electronics_to_cosmetics', direct_scores.T, 'electronics', 'cosmetics'),
+    ):
+        nearest, margin = _nearest_profile_mapping(scores)
+        direct_mapping[name] = [
+            {
+                f'{source}_cluster': int(cluster_ids[source][i]),
+                f'{target}_cluster': int(cluster_ids[target][j]),
+                'similarity': float(scores[i, j]),
+                'nearest_margin': float(margin[i]),
+                'bootstrap_nearest_probability': float(
+                    direct_boot_counts[name][i, j] / bootstrap_repeats
+                ),
+            }
+            for i, j in enumerate(nearest)
+        ]
+    result = {
+        'method': 'each Tianchi K=6 cluster independently maps to its nearest pooled-robust-scaled '
+                  'shared behavioral-profile median in each coupon-unobserved domain; many-to-one '
+                  'targets are allowed',
+        'features': list(ALIGNMENT_FEATURES),
+        'similarity': 'exp(-RMS distance); descriptive score, not a probability',
+        'bootstrap_repeats': bootstrap_repeats,
+        'cluster_counts': cluster_counts,
+        'cluster_selection': {
+            source: {
+                'method': report.get('cluster_count_mode') or 'silhouette_with_min_size',
+                'selected_k': int(report['selected_k']),
+                'train_silhouette': float(report['train_silhouette']),
+                'heldout_silhouette': float(report['heldout_silhouette']),
+                'seed_ari': report.get('seed_ari'),
+                'cluster_sizes': report.get('cluster_sizes'),
+            }
+            for source, report in selection_reports.items()
+        },
+        'comparisons': comparisons,
+        'mapping': mapping,
+        'distinct_target_clusters': collapsed_counts,
+        'direct_cosmetics_electronics': {
+            'similarity_matrix': direct_scores.tolist(),
+            **direct_mapping,
+        },
+        'limitations': [
+            'Cart, removal and coupon receipt are excluded from alignment features.',
+            'Cluster similarity is descriptive and does not identify shared latent users or causal effects.',
+            'Cosmetics and Electronics do not record coupon exposure; treating them as coupon-free is a '
+            'simulation assumption rather than an observed treatment condition.',
+            'Many-to-one nearest mapping can show profile collapse but cannot attribute that collapse '
+            'causally to coupons.',
+        ],
+    }
+
+    SIMILARITY_OUT.mkdir(parents=True, exist_ok=True)
+    combined.to_parquet(SIMILARITY_OUT / 'shared_user_features.parquet', index=False)
+    profiles.reset_index().to_parquet(SIMILARITY_OUT / 'cluster_profiles.parquet', index=False)
+    (SIMILARITY_OUT / 'summary.json').write_text(json.dumps(result, indent=2) + '\n')
+
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4.2), constrained_layout=True)
+    for ax, target in zip(axes[:2], targets, strict=True):
+        scores = matrices[target]
+        image = ax.imshow(scores, vmin=0, vmax=1, cmap='YlGnBu')
+        ax.set_xticks(range(cluster_counts[target]),
+                      [f'{target[0].upper()}{i}' for i in cluster_ids[target]])
+        ax.set_yticks(range(cluster_counts['tianchi']),
+                      [f'T{i}' for i in cluster_ids['tianchi']])
+        ax.set(xlabel=target.title(), ylabel='Tianchi',
+               title=f'Tianchi $\\rightarrow$ {target.title()}')
+        for i in range(cluster_counts['tianchi']):
+            for j in range(cluster_counts[target]):
+                ax.text(j, i, f'{scores[i, j]:.2f}', ha='center', va='center',
+                        color='white' if scores[i, j] > .62 else 'black', fontsize=8)
+    colors = plt.cm.tab10(np.arange(cluster_counts['tianchi']))
+    source_y_positions = np.linspace(5, 0, cluster_counts['tianchi'])
+    target_y_positions = {
+        target: np.linspace(5, 0, cluster_counts[target]) for target in targets
+    }
+    for i, cluster in enumerate(cluster_ids['tianchi']):
+        source_y = source_y_positions[i]
+        axes[2].scatter(0, source_y, color=colors[cluster], s=55, zorder=3)
+        axes[2].text(-.08, source_y, f'T{cluster}', ha='right', va='center', fontsize=8)
+        for x, source in enumerate(targets, start=1):
+            target_index = int(assignments[source][i])
+            target_y = target_y_positions[source][target_index]
+            axes[2].plot([0.05, x - .05], [source_y, target_y], color=colors[cluster],
+                         alpha=.55, linewidth=1.2, zorder=1)
+    for x, source in enumerate(targets, start=1):
+        used = set(assignments[source].tolist())
+        for index, cluster in enumerate(cluster_ids[source]):
+            target_y = target_y_positions[source][index]
+            axes[2].scatter(x, target_y, facecolor='white',
+                            edgecolor='#333333' if index in used else '#BBBBBB',
+                            linewidth=1.2, s=55, zorder=3)
+            axes[2].text(x + .08, target_y, f'{source[0].upper()}{cluster}',
+                         ha='left', va='center', fontsize=8,
+                         color='#222222' if index in used else '#AAAAAA')
+    axes[2].set_xlim(-.35, 2.35)
+    axes[2].set_ylim(-.6, 5.6)
+    axes[2].set_xticks([0, 1, 2], ['Tianchi', 'Cosmetics', 'Electronics'])
+    axes[2].set_yticks([])
+    axes[2].spines[['top', 'right', 'left', 'bottom']].set_visible(False)
+    axes[2].tick_params(axis='x', length=0)
+    axes[2].set_title('Many-to-one nearest-profile mapping')
+    fig.colorbar(image, ax=axes[:2], label='Shared-profile similarity', shrink=.78)
+    figure_dir = PROJECT_ROOT / 'img/persona'
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(figure_dir / 'cross_domain_cluster_alignment.png', dpi=180, bbox_inches='tight')
+    plt.close(fig)
+
+    fig, axes = plt.subplots(1, 2, figsize=(9, 4.2), constrained_layout=True)
+    image = axes[0].imshow(direct_scores, vmin=0, vmax=1, cmap='YlGnBu')
+    axes[0].set_xticks(range(cluster_counts['electronics']),
+                       [f'E{i}' for i in cluster_ids['electronics']])
+    axes[0].set_yticks(range(cluster_counts['cosmetics']),
+                       [f'C{i}' for i in cluster_ids['cosmetics']])
+    axes[0].set(xlabel='Electronics', ylabel='Cosmetics',
+                title='Cosmetics--Electronics similarity')
+    for i in range(cluster_counts['cosmetics']):
+        for j in range(cluster_counts['electronics']):
+            axes[0].text(j, i, f'{direct_scores[i, j]:.2f}', ha='center', va='center',
+                         color='white' if direct_scores[i, j] > .62 else 'black', fontsize=9)
+    fig.colorbar(image, ax=axes[0], label='Shared-profile similarity', shrink=.8)
+
+    c_y = np.linspace(3, 0, cluster_counts['cosmetics'])
+    e_y = np.linspace(3, 0, cluster_counts['electronics'])
+    for index, cluster in enumerate(cluster_ids['cosmetics']):
+        axes[1].scatter(0, c_y[index], color=plt.cm.tab10(index), s=60, zorder=3)
+        axes[1].text(-.08, c_y[index], f'C{cluster}', ha='right', va='center')
+    for index, cluster in enumerate(cluster_ids['electronics']):
+        axes[1].scatter(1, e_y[index], facecolor='white', edgecolor='#333333', s=60, zorder=3)
+        axes[1].text(1.08, e_y[index], f'E{cluster}', ha='left', va='center')
+    c_to_e, _ = _nearest_profile_mapping(direct_scores)
+    e_to_c, _ = _nearest_profile_mapping(direct_scores.T)
+    for c_index, e_index in enumerate(c_to_e):
+        axes[1].annotate('', xy=(.95, e_y[e_index]), xytext=(.05, c_y[c_index]),
+                         arrowprops={'arrowstyle': '->', 'color': plt.cm.tab10(c_index),
+                                     'alpha': .7, 'linewidth': 1.4})
+    for e_index, c_index in enumerate(e_to_c):
+        axes[1].annotate('', xy=(.05, c_y[c_index]), xytext=(.95, e_y[e_index]),
+                         arrowprops={'arrowstyle': '->', 'color': '#777777',
+                                     'linestyle': '--', 'alpha': .55, 'linewidth': 1})
+    axes[1].plot([], [], color='#333333', label='C→E nearest')
+    axes[1].plot([], [], color='#777777', linestyle='--', label='E→C nearest')
+    axes[1].set_xlim(-.3, 1.3)
+    axes[1].set_ylim(-.5, 3.5)
+    axes[1].set_xticks([0, 1], ['Cosmetics', 'Electronics'])
+    axes[1].set_yticks([])
+    axes[1].spines[['top', 'right', 'left', 'bottom']].set_visible(False)
+    axes[1].tick_params(axis='x', length=0)
+    axes[1].set_title('Bidirectional nearest-profile mapping')
+    axes[1].legend(frameon=False, loc='lower center', fontsize=8)
+    fig.savefig(figure_dir / 'cosmetics_electronics_k4_alignment.png',
+                dpi=180, bbox_inches='tight')
+    plt.close(fig)
+    return result
+
+
+def electronics_drop_similarity(bootstrap_repeats: int = 200) -> dict:
+    """Compare Electronics with Cosmetics retrained after dropping remove events."""
+    import matplotlib.pyplot as plt
+    from sklearn.preprocessing import RobustScaler
+
+    drop_membership = pd.read_parquet(
+        PROJECT_ROOT / 'artifacts/electronics-drop-personas/electronics_drop_embeddings_k4.parquet'
+    )
+    electronics_membership, electronics_selection = _fixed_k4_membership('electronics')
+    original_membership, original_selection = _fixed_k4_membership('cosmetics')
+    memberships = {
+        'cosmetics_original': original_membership,
+        'electronics_drop': drop_membership[['user_id', 'cluster', 'sessions']],
+        'electronics': electronics_membership,
+    }
+    cosmetics_events = _selected_events(
+        'cosmetics', set(drop_membership.user_id.astype('int64'))
+    )
+    cosmetics_events = cosmetics_events.loc[cosmetics_events.action.ne('remove')]
+    events = {
+        'cosmetics_original': cosmetics_events,
+        'electronics_drop': cosmetics_events,
+        'electronics': _selected_events(
+            'electronics', set(electronics_membership.user_id.astype('int64'))
+        ),
+    }
+    inputs = {
+        source: _retail_behavior_features(events[source], memberships[source])
+        for source in memberships
+    }
+    combined = pd.concat(
+        [frame.assign(dataset=source) for source, frame in inputs.items()], ignore_index=True
+    )
+    baseline = combined.dataset.isin(['cosmetics_original', 'electronics'])
+    scaler = RobustScaler().fit(combined.loc[baseline, list(RETAIL_ALIGNMENT_FEATURES)])
+    combined[list(RETAIL_ALIGNMENT_FEATURES)] = scaler.transform(
+        combined[list(RETAIL_ALIGNMENT_FEATURES)]
+    )
+    profiles = (combined.groupby(['dataset', 'cluster'])[list(RETAIL_ALIGNMENT_FEATURES)]
+                         .median().sort_index())
+    drop_profile = profiles.loc['electronics_drop'].to_numpy()
+    original_profile = profiles.loc['cosmetics_original'].to_numpy()
+    electronics_profile = profiles.loc['electronics'].to_numpy()
+    score_matrices = {
+        'cosmetics_original': _profile_similarity(original_profile, electronics_profile),
+        'electronics_drop': _profile_similarity(drop_profile, electronics_profile),
+    }
+    scores = score_matrices['electronics_drop']
+
+    rng = np.random.default_rng(2026)
+    grouped = {(source, cluster): group[list(RETAIL_ALIGNMENT_FEATURES)].to_numpy()
+               for (source, cluster), group in combined.groupby(['dataset', 'cluster'])}
+    forward_counts = {name: np.zeros(matrix.shape, dtype=int)
+                      for name, matrix in score_matrices.items()}
+    reverse_counts = {name: np.zeros(matrix.T.shape, dtype=int)
+                      for name, matrix in score_matrices.items()}
+    for _ in range(bootstrap_repeats):
+        boot = {}
+        for source in memberships:
+            boot[source] = np.vstack([
+                np.median(values[rng.integers(0, len(values), len(values))], axis=0)
+                for cluster in range(4) for values in [grouped[(source, cluster)]]
+            ])
+        for name in score_matrices:
+            boot_scores = _profile_similarity(boot[name], boot['electronics'])
+            nearest, _ = _nearest_profile_mapping(boot_scores)
+            forward_counts[name][np.arange(4), nearest] += 1
+            nearest, _ = _nearest_profile_mapping(boot_scores.T)
+            reverse_counts[name][np.arange(4), nearest] += 1
+
+    comparisons = {}
+    for name, matrix in score_matrices.items():
+        forward, forward_margin = _nearest_profile_mapping(matrix)
+        reverse, reverse_margin = _nearest_profile_mapping(matrix.T)
+        mutual = [(int(i), int(j)) for i, j in enumerate(forward) if reverse[j] == i]
+        hungarian_left, hungarian_right = linear_sum_assignment(-matrix)
+        comparisons[name] = {
+            'similarity_matrix': matrix.tolist(),
+            'to_electronics': [
+                {
+                    'source_cluster': i,
+                    'electronics_cluster': int(j),
+                    'similarity': float(matrix[i, j]),
+                    'nearest_margin': float(forward_margin[i]),
+                    'bootstrap_nearest_probability': float(
+                        forward_counts[name][i, j] / bootstrap_repeats
+                    ),
+                }
+                for i, j in enumerate(forward)
+            ],
+            'electronics_to_source': [
+                {
+                    'electronics_cluster': i,
+                    'source_cluster': int(j),
+                    'similarity': float(matrix[j, i]),
+                    'nearest_margin': float(reverse_margin[i]),
+                    'bootstrap_nearest_probability': float(
+                        reverse_counts[name][i, j] / bootstrap_repeats
+                    ),
+                }
+                for i, j in enumerate(reverse)
+            ],
+            'mutual_nearest_pairs': mutual,
+            'forward_is_one_to_one': bool(len(set(forward.tolist())) == 4),
+            'is_bijective_nearest_mapping': bool(
+                len(set(forward.tolist())) == 4
+                and len(set(reverse.tolist())) == 4
+                and len(mutual) == 4
+            ),
+            'hungarian_mapping': [
+                {'source_cluster': int(i), 'electronics_cluster': int(j),
+                 'similarity': float(matrix[i, j])}
+                for i, j in zip(hungarian_left, hungarian_right, strict=True)
+            ],
+            'hungarian_mean_similarity': float(
+                matrix[hungarian_left, hungarian_right].mean()
+            ),
+        }
+    drop_comparison = comparisons['electronics_drop']
+    forward = np.array([
+        row['electronics_cluster'] for row in drop_comparison['to_electronics']
+    ])
+    action_profiles = {}
+    for source in memberships:
+        joined = events[source].merge(memberships[source][['user_id', 'cluster']], on='user_id')
+        rows = []
+        for cluster, frame in joined.groupby('cluster'):
+            shares = (frame.action.value_counts(normalize=True)
+                           .reindex(['view', 'cart', 'purchase'], fill_value=0))
+            rows.append({
+                'cluster': int(cluster),
+                'users': int(memberships[source].cluster.eq(cluster).sum()),
+                'event_share': {name: float(shares[name]) for name in shares.index},
+                'buyer_share': float(
+                    frame.loc[frame.action.eq('purchase'), 'user_id'].nunique()
+                    / memberships[source].cluster.eq(cluster).sum()
+                ),
+            })
+        action_profiles[source] = rows
+
+    drop_selection = json.loads(
+        (PROJECT_ROOT / 'artifacts/electronics-drop-personas/electronics_drop_clusters_k4.json')
+        .read_text()
+    )
+    result = {
+        'experiment': 'electronics_drop: Cosmetics remove_from_cart events are deleted before '
+                      'masked-GRU retraining; both domains use view/cart/purchase and K=4',
+        'features': list(RETAIL_ALIGNMENT_FEATURES),
+        'similarity': 'exp(-RMS distance) on robust-scaled cluster-median profiles; '
+                      'the scaler is fitted on original Cosmetics and Electronics only, '
+                      'then applied to electronics_drop out of sample',
+        'selection': {
+            'cosmetics_original': original_selection,
+            'electronics_drop': {
+                'train_silhouette': drop_selection['train_silhouette'],
+                'heldout_silhouette': drop_selection['heldout_silhouette'],
+                'seed_ari': next(
+                    row['seed_ari'] for row in drop_selection['cluster_search'] if row['k'] == 4
+                ),
+            },
+            'electronics': electronics_selection,
+        },
+        'baseline_cosmetics_original': comparisons['cosmetics_original'],
+        'ablation_effect': {
+            'original_hungarian_mean_similarity': comparisons['cosmetics_original'][
+                'hungarian_mean_similarity'
+            ],
+            'drop_hungarian_mean_similarity': drop_comparison['hungarian_mean_similarity'],
+            'hungarian_mean_similarity_delta': (
+                drop_comparison['hungarian_mean_similarity']
+                - comparisons['cosmetics_original']['hungarian_mean_similarity']
+            ),
+            'original_forward_is_one_to_one': comparisons['cosmetics_original'][
+                'forward_is_one_to_one'
+            ],
+            'drop_forward_is_one_to_one': drop_comparison['forward_is_one_to_one'],
+        },
+        'similarity_matrix': drop_comparison['similarity_matrix'],
+        'electronics_drop_to_electronics': [
+            {
+                'electronics_drop_cluster': row['source_cluster'],
+                **{key: value for key, value in row.items() if key != 'source_cluster'},
+            }
+            for row in drop_comparison['to_electronics']
+        ],
+        'electronics_to_electronics_drop': [
+            {
+                'electronics_drop_cluster': row['source_cluster'],
+                **{key: value for key, value in row.items() if key != 'source_cluster'},
+            }
+            for row in drop_comparison['electronics_to_source']
+        ],
+        'mutual_nearest_pairs': drop_comparison['mutual_nearest_pairs'],
+        'forward_is_one_to_one': drop_comparison['forward_is_one_to_one'],
+        'hungarian_mapping': [
+            {
+                'electronics_drop_cluster': row['source_cluster'],
+                **{key: value for key, value in row.items() if key != 'source_cluster'},
+            }
+            for row in drop_comparison['hungarian_mapping']
+        ],
+        'hungarian_mean_similarity': drop_comparison['hungarian_mean_similarity'],
+        'is_bijective_nearest_mapping': drop_comparison['is_bijective_nearest_mapping'],
+        'action_profiles': action_profiles,
+        'limitations': [
+            'Dropping remove_from_cart changes the observed sequence rather than recovering '
+            'the counterfactual Cosmetics behavior under Electronics logging.',
+            'The encoders are trained independently, so comparison uses observable behavioral '
+            'profiles rather than embedding coordinates.',
+            'A scaler refitted on electronics_drop and Electronics makes the nearest mapping '
+            'appear one-to-one; that result is normalization-sensitive and is not used. The '
+            'reported ablation keeps the original Cosmetics--Electronics metric fixed.',
+        ],
+    }
+    ELECTRONICS_DROP_OUT.mkdir(parents=True, exist_ok=True)
+    combined.to_parquet(ELECTRONICS_DROP_OUT / 'shared_user_features.parquet', index=False)
+    profiles.reset_index().to_parquet(ELECTRONICS_DROP_OUT / 'cluster_profiles.parquet', index=False)
+    (ELECTRONICS_DROP_OUT / 'summary.json').write_text(json.dumps(result, indent=2) + '\n')
+
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4.2), constrained_layout=True)
+    for ax, name, prefix, title in (
+        (axes[0], 'cosmetics_original', 'C', 'Original Cosmetics'),
+        (axes[1], 'electronics_drop', 'D', 'Electronics-drop'),
+    ):
+        matrix = score_matrices[name]
+        image = ax.imshow(matrix, vmin=0, vmax=1, cmap='YlGnBu')
+        ax.set_xticks(range(4), [f'E{i}' for i in range(4)])
+        ax.set_yticks(range(4), [f'{prefix}{i}' for i in range(4)])
+        ax.set(xlabel='Electronics', ylabel=title, title=f'{title} similarity')
+        for i in range(4):
+            for j in range(4):
+                ax.text(j, i, f'{matrix[i, j]:.2f}', ha='center', va='center',
+                        color='white' if matrix[i, j] > .62 else 'black', fontsize=8)
+    fig.colorbar(image, ax=axes[:2], label='Similarity', shrink=.8)
+    y = np.arange(3, -1, -1)
+    for i in range(4):
+        axes[2].scatter(0, y[i], color=plt.cm.tab10(i), s=60, zorder=3)
+        axes[2].text(-.08, y[i], f'D{i}', ha='right', va='center')
+        axes[2].scatter(1, y[i], facecolor='white', edgecolor='#333333', s=60, zorder=3)
+        axes[2].text(1.08, y[i], f'E{i}', ha='left', va='center')
+    for i, j in enumerate(forward):
+        axes[2].annotate('', xy=(.95, y[j]), xytext=(.05, y[i]),
+                         arrowprops={'arrowstyle': '->', 'color': plt.cm.tab10(i),
+                                     'alpha': .75, 'linewidth': 1.5})
+    axes[2].set_xlim(-.3, 1.3)
+    axes[2].set_ylim(-.5, 3.5)
+    axes[2].set_xticks([0, 1], ['Electronics-drop', 'Electronics'])
+    axes[2].set_yticks([])
+    axes[2].spines[['top', 'right', 'left', 'bottom']].set_visible(False)
+    axes[2].tick_params(axis='x', length=0)
+    axes[2].set_title('Drop-variant nearest mapping')
+    figure_dir = PROJECT_ROOT / 'img/persona'
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(figure_dir / 'electronics_drop_alignment.png', dpi=180, bbox_inches='tight')
+    plt.close(fig)
+    return result
+
+
+def retail_combined_summary() -> dict:
+    """Summarize the shared K=4 space jointly fitted to Electronics and Cosmetics-drop."""
+    import matplotlib.pyplot as plt
+
+    report = json.loads(
+        (RETAIL_COMBINED_OUT / 'retail_combined_clusters_k4.json').read_text()
+    )
+    profiles = pd.DataFrame(report['domain_cluster_profiles'])
+    clusters = sorted(profiles.cluster.unique())
+    domains = ['cosmetics_drop', 'electronics']
+    domain_totals = profiles.groupby('domain').users.sum()
+    distributions = {
+        domain: (profiles.loc[profiles.domain.eq(domain)].set_index('cluster').users
+                         .reindex(clusters, fill_value=0) / domain_totals[domain]).to_numpy()
+        for domain in domains
+    }
+    p, q = distributions['cosmetics_drop'], distributions['electronics']
+    midpoint = (p + q) / 2
+
+    def kl(left: np.ndarray, right: np.ndarray) -> float:
+        return float(np.sum(np.where(
+            left > 0, left * np.log(left / np.clip(right, 1e-12, None)), 0
+        )))
+
+    rows = []
+    for cluster in clusters:
+        pair = profiles.loc[profiles.cluster.eq(cluster)].set_index('domain')
+        left = np.array(list(pair.loc['cosmetics_drop', 'event_share'].values()), dtype=float)
+        right = np.array(list(pair.loc['electronics', 'event_share'].values()), dtype=object)
+        supported = pair.loc['electronics', 'users'] >= 30
+        similarity = None
+        if supported and all(value is not None for value in right):
+            similarity = float(np.exp(-np.sqrt(
+                np.mean((left - right.astype(float)) ** 2)
+            )))
+        rows.append({
+            'cluster': int(cluster),
+            'cosmetics_drop_users': int(pair.loc['cosmetics_drop', 'users']),
+            'electronics_users': int(pair.loc['electronics', 'users']),
+            'cosmetics_drop_cluster_probability': float(p[cluster]),
+            'electronics_cluster_probability': float(q[cluster]),
+            'event_profile_similarity': similarity,
+            'cross_domain_supported': bool(supported),
+        })
+    result = {
+        'experiment': 'one masked-GRU and one K=4 KMeans jointly fitted after removing '
+                      'Cosmetics remove_from_cart events',
+        'selected_users': report['domain_selected_users'],
+        'mature_users': report['domain_mature_users'],
+        'balanced_mature_train_users_per_domain': report[
+            'balanced_mature_train_users_per_domain'
+        ],
+        'balanced_mature_test_users_per_domain': report[
+            'balanced_mature_test_users_per_domain'
+        ],
+        'train_silhouette': report['train_silhouette'],
+        'heldout_silhouette': report['heldout_silhouette'],
+        'domain_cluster_nmi': report['domain_cluster_nmi'],
+        'cluster_distribution_total_variation': float(np.abs(p - q).sum() / 2),
+        'cluster_distribution_jensen_shannon_divergence': float(
+            .5 * kl(p, midpoint) + .5 * kl(q, midpoint)
+        ),
+        'clusters': rows,
+        'interpretation': (
+            'Clusters 0--2 have at least 30 mature users from both domains. Cluster 3 has only '
+            'three mature Electronics users and is not accepted as a cross-domain match.'
+        ),
+    }
+    (RETAIL_COMBINED_OUT / 'summary.json').write_text(json.dumps(result, indent=2) + '\n')
+
+    fig, axes = plt.subplots(1, 2, figsize=(9.2, 3.5), constrained_layout=True)
+    x = np.arange(len(clusters))
+    width = .36
+    axes[0].bar(x - width / 2, 100 * p, width, label='Cosmetics-drop', color='#4C78A8')
+    axes[0].bar(x + width / 2, 100 * q, width, label='Electronics', color='#F28E2B')
+    axes[0].set(xticks=x, xticklabels=[f'J{i}' for i in clusters],
+                ylabel='Users within domain (%)', xlabel='Joint cluster',
+                title='Domain-normalized cluster distribution')
+    axes[0].legend(frameon=False, fontsize=8)
+    axes[0].grid(axis='y', alpha=.2)
+
+    similarities = [row['event_profile_similarity'] for row in rows]
+    plotted = [value if value is not None else 0 for value in similarities]
+    colors = ['#59A14F' if value is not None else '#BAB0AC' for value in similarities]
+    axes[1].bar(x, plotted, color=colors)
+    for i, row in enumerate(rows):
+        label = f"C={row['cosmetics_drop_users']}, E={row['electronics_users']}"
+        axes[1].text(i, plotted[i] + .025, label, ha='center', va='bottom', fontsize=7)
+        if similarities[i] is None:
+            axes[1].text(i, .05, 'insufficient', ha='center', va='bottom', fontsize=7,
+                         rotation=90)
+    axes[1].set(xticks=x, xticklabels=[f'J{i}' for i in clusters], ylim=(0, 1.12),
+                ylabel='Event-profile similarity', xlabel='Joint cluster',
+                title='Within-cluster cross-domain agreement')
+    axes[1].grid(axis='y', alpha=.2)
+    figure_dir = PROJECT_ROOT / 'img/persona'
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(figure_dir / 'retail_combined_k4.png', dpi=180, bbox_inches='tight')
+    plt.close(fig)
+    return result
+
+
+def joint_three_domain_alignment(bootstrap_repeats: int = 200) -> dict:
+    """Align Tianchi K=6 to the joint Cosmetics-drop/Electronics K=4 profiles."""
+    from sklearn.preprocessing import RobustScaler
+
+    membership = pd.read_parquet(
+        RETAIL_COMBINED_OUT / 'retail_combined_embeddings_k4.parquet'
+    )
+    inputs = {}
+    for domain, source in (('cosmetics_drop', 'cosmetics'), ('electronics', 'electronics')):
+        members = (membership.loc[membership.domain.eq(domain),
+                                  ['original_user_id', 'cluster']]
+                             .rename(columns={'original_user_id': 'user_id'}))
+        events = _selected_events(source, set(members.user_id.astype('int64')))
+        events = (events.loc[events.action.isin(['view', 'purchase']),
+                             ['user_id', 'at', 'action']]
+                        .rename(columns={'user_id': 'user'}))
+        events['action'] = events.action.replace({'view': 'explore'})
+        inputs[domain] = _shared_behavior_features(events, members)
+
+    inputs['tianchi'], tianchi_report = _tianchi_shared_features()
+    combined = pd.concat([
+        frame.assign(dataset=source) for source, frame in inputs.items()
+    ], ignore_index=True)
+    scaler = RobustScaler().fit(combined[list(ALIGNMENT_FEATURES)])
+    combined[list(ALIGNMENT_FEATURES)] = scaler.transform(
+        combined[list(ALIGNMENT_FEATURES)]
+    )
+
+    baseline = combined.loc[combined.dataset.isin(['cosmetics_drop', 'electronics'])]
+    baseline_profiles = (baseline.groupby('cluster')[list(ALIGNMENT_FEATURES)]
+                                  .median().sort_index())
+    tianchi = combined.loc[combined.dataset.eq('tianchi')]
+    tianchi_profiles = (tianchi.groupby('cluster')[list(ALIGNMENT_FEATURES)]
+                                .median().sort_index())
+    scores = _profile_similarity(tianchi_profiles.to_numpy(), baseline_profiles.to_numpy())
+    nearest, margin = _nearest_profile_mapping(scores)
+
+    rng = np.random.default_rng(2026)
+    counts = np.zeros_like(scores, dtype=int)
+    baseline_groups = {
+        int(cluster): group[list(ALIGNMENT_FEATURES)].to_numpy()
+        for cluster, group in baseline.groupby('cluster')
+    }
+    tianchi_groups = {
+        int(cluster): group[list(ALIGNMENT_FEATURES)].to_numpy()
+        for cluster, group in tianchi.groupby('cluster')
+    }
+    for _ in range(bootstrap_repeats):
+        boot_baseline = np.vstack([
+            np.median(values[rng.integers(0, len(values), len(values))], axis=0)
+            for cluster in baseline_profiles.index
+            for values in [baseline_groups[int(cluster)]]
+        ])
+        boot_tianchi = np.vstack([
+            np.median(values[rng.integers(0, len(values), len(values))], axis=0)
+            for cluster in tianchi_profiles.index
+            for values in [tianchi_groups[int(cluster)]]
+        ])
+        boot_nearest, _ = _nearest_profile_mapping(
+            _profile_similarity(boot_tianchi, boot_baseline)
+        )
+        counts[np.arange(len(boot_nearest)), boot_nearest] += 1
+
+    retail_summary = json.loads((RETAIL_COMBINED_OUT / 'summary.json').read_text())
+    cross_domain = {
+        int(row['cluster']): {
+            'cosmetics_drop_users': int(row['cosmetics_drop_users']),
+            'electronics_users': int(row['electronics_users']),
+            'event_profile_similarity': row['event_profile_similarity'],
+            'supported': bool(row['cross_domain_supported']),
+        }
+        for row in retail_summary['clusters']
+    }
+    mappings = []
+    for row_index, tianchi_cluster in enumerate(tianchi_profiles.index):
+        target_index = int(nearest[row_index])
+        target_cluster = int(baseline_profiles.index[target_index])
+        mappings.append({
+            'tianchi_cluster': int(tianchi_cluster),
+            'joint_cluster': target_cluster,
+            'similarity': float(scores[row_index, target_index]),
+            'nearest_margin': float(margin[row_index]),
+            'bootstrap_nearest_probability': float(
+                counts[row_index, target_index] / bootstrap_repeats
+            ),
+        })
+
+    result = {
+        'method': (
+            'Cosmetics remove_from_cart is dropped before one joint masked-GRU/K=4 fit with '
+            'Electronics; Tianchi K=6 profiles then map many-to-one to pooled joint-cluster '
+            'medians in the 13-feature explore/purchase space'
+        ),
+        'features': list(ALIGNMENT_FEATURES),
+        'similarity': 'exp(-RMS distance) after pooled robust scaling',
+        'bootstrap_repeats': bootstrap_repeats,
+        'cluster_counts': {'cosmetics_drop': 4, 'electronics': 4,
+                           'tianchi': int(tianchi_report['selected_k'])},
+        'joint_retail_clusters': cross_domain,
+        'tianchi_similarity_matrix': scores.tolist(),
+        'tianchi_mapping': mappings,
+        'distinct_joint_targets': len(set(nearest.tolist())),
+        'limitations': [
+            'The Cosmetics-drop/Electronics one-to-one labels arise from joint clustering.',
+            'Tianchi mapping is descriptive and does not show that coupon receipt caused K=6.',
+            'Joint cluster J3 has only three mature Electronics users and is shown as sparse.',
+        ],
+    }
+    THREE_DOMAIN_ALIGNMENT_OUT.mkdir(parents=True, exist_ok=True)
+    (THREE_DOMAIN_ALIGNMENT_OUT / 'summary.json').write_text(
+        json.dumps(result, indent=2) + '\n', encoding='utf-8'
+    )
+    return result
+
+
+def tianchi_centroid_action_histograms(top_n: int = 20) -> dict:
+    """Plot raw Action=0/1/2 frequencies for users nearest each Tianchi centroid."""
+    import matplotlib.pyplot as plt
+
+    output = PROJECT_ROOT / 'artifacts/tianchi-online-personas'
+    report = json.loads((output / 'clusters.json').read_text())
+    k = int(report['selected_k'])
+    embeddings = pd.read_parquet(output / 'clusters.parquet')
+    z_columns = [f'z_{index}' for index in range(48)]
+    mature = embeddings.sessions.ge(2)
+    centers = np.asarray([row['centroid'] for row in sorted(report['profiles'], key=lambda row: row['cluster'])])
+    members = embeddings.loc[mature, ['user_id', 'sessions', 'cluster']].copy()
+    z = embeddings.loc[mature, z_columns].to_numpy()
+    members['centroid_distance'] = np.linalg.norm(z - centers[members.cluster.to_numpy()], axis=1)
+    members.to_parquet(output / f'mature_k{k}_memberships.parquet', index=False)
+    representatives = (members.sort_values(['cluster', 'centroid_distance'])
+                               .groupby('cluster', sort=True).head(top_n).copy())
+
+    user_ids = set(representatives.user_id.astype('int64'))
+    raw_counts = []
+    for chunk in pd.read_csv(PROJECT_ROOT / 'data/raw/tianchi-o2o/ccf_online_stage1_train.csv',
+                             usecols=['User_id', 'Action'], dtype={'User_id': 'Int64', 'Action': 'Int8'},
+                             chunksize=500_000):
+        chunk = chunk.loc[chunk.User_id.isin(user_ids) & chunk.Action.isin([0, 1, 2])]
+        if not chunk.empty:
+            raw_counts.append(chunk.groupby(['User_id', 'Action']).size())
+    counts = (pd.concat(raw_counts).groupby(level=[0, 1]).sum().unstack(fill_value=0)
+                .reindex(index=representatives.user_id, columns=range(3), fill_value=0))
+    shares = counts.div(counts.sum(axis=1), axis=0)
+    action_names = ['click', 'purchase', 'coupon_receive']
+    for action, name in enumerate(action_names):
+        representatives[f'{name}_count'] = counts[action].to_numpy()
+        representatives[f'{name}_share'] = shares[action].to_numpy()
+    representatives.to_parquet(output / 'centroid_representatives.parquet', index=False)
+
+    colors = ['#4C78A8', '#F2CF5B', '#59A14F']
+    bins = {action: np.linspace(0, max(1, counts[action].max()), 11) for action in range(3)}
+    fig, axes = plt.subplots(k, 3, figsize=(10.5, 2.1 * k + .5), sharex='col', sharey=True,
+                             constrained_layout=True)
+    summary = []
+    for cluster in range(k):
+        group = representatives.loc[representatives.cluster.eq(cluster)]
+        row = {'cluster': cluster, 'users': len(group),
+               'max_centroid_distance': float(group.centroid_distance.max()), 'actions': {}}
+        for action, name in enumerate(action_names):
+            values = group[f'{name}_count'].to_numpy()
+            ax = axes[cluster, action]
+            ax.hist(values, bins=bins[action], color=colors[action], edgecolor='white')
+            ax.axvline(np.median(values), color='#333333', linestyle='--', linewidth=1)
+            ax.set_title(name.replace('_', ' '))
+            row['actions'][name] = {
+                'mean_count': float(values.mean()), 'median_count': float(np.median(values)),
+                'min_count': int(values.min()), 'max_count': int(values.max()),
+                'mean_share': float(group[f'{name}_share'].mean()),
+            }
+            if action == 0:
+                ax.set_ylabel(f'C{cluster}\nUsers')
+            if cluster == k - 1:
+                ax.set_xlabel('Raw event count per user')
+        summary.append(row)
+    fig.suptitle(f'Tianchi online: action distributions of {top_n} centroid-nearest users per cluster')
+    figure = PROJECT_ROOT / 'img/persona/tianchi_centroid_action_histograms.png'
+    figure.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(figure, dpi=180, bbox_inches='tight')
+    plt.close(fig)
+    result = {
+        'selection': f'{top_n} repeat users with minimum Euclidean distance to each K={k} centroid',
+        'distance_space': 'standardized 48-D masked-GRU embedding',
+        'actions': action_names,
+        'clusters': summary,
+    }
+    (output / 'centroid_action_summary.json').write_text(
+        json.dumps(result, indent=2) + '\n', encoding='utf-8'
+    )
+    return result
 
 
 def _capstone_models() -> Path:
@@ -686,9 +1721,38 @@ if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser(description='Compare, sweep or audit persona clusters.')
-    parser.add_argument('task', choices=('compare', 'sweep', 'stability', 'representatives'))
-    parser.add_argument('sources', nargs='+', choices=('electronics', 'cosmetics'))
+    parser.add_argument('task', choices=('compare', 'sweep', 'stability', 'representatives',
+                                         'similarity', 'electronics-drop', 'retail-combined',
+                                         'joint-three-domain', 'tianchi-centroids'))
+    parser.add_argument('sources', nargs='*', choices=('electronics', 'cosmetics'))
     args = parser.parse_args()
+    if args.task == 'similarity':
+        if args.sources:
+            parser.error('similarity uses the saved Cosmetics, Electronics, and Tianchi profiles')
+        cross_dataset_similarity()
+        raise SystemExit(0)
+    if args.task == 'electronics-drop':
+        if args.sources:
+            parser.error('electronics-drop uses the saved K=4 Electronics and retrained variant')
+        electronics_drop_similarity()
+        raise SystemExit(0)
+    if args.task == 'retail-combined':
+        if args.sources:
+            parser.error('retail-combined uses the saved jointly trained K=4 artifacts')
+        retail_combined_summary()
+        raise SystemExit(0)
+    if args.task == 'joint-three-domain':
+        if args.sources:
+            parser.error('joint-three-domain uses the saved joint K=4 and Tianchi K=6 artifacts')
+        joint_three_domain_alignment()
+        raise SystemExit(0)
+    if args.task == 'tianchi-centroids':
+        if args.sources:
+            parser.error('tianchi-centroids uses the saved Tianchi online embeddings')
+        tianchi_centroid_action_histograms()
+        raise SystemExit(0)
+    if not args.sources:
+        parser.error(f'{args.task} requires at least one source')
     if args.task == 'representatives':
         if args.sources and args.sources != ['electronics', 'cosmetics']:
             parser.error('representative profiles require electronics and cosmetics in that order')

@@ -3,8 +3,9 @@ from simulate.latent_session_model import (LatentSessionUser, candidate_paths, c
     path_features, path_probabilities, persona_gap_features, sample_persona_gap, sequential_choice)
 from simulate.latent_session_model import (
     canonical_type_probabilities, churn_sequence_features, coupon_action_probabilities, coupon_offsets,
-    lifecycle_action_probabilities, sample_internal_gap, sample_home_persona,
-    sample_lifecycle_step, sample_new_user, sample_reward_coefficients,
+    action_probability_offset, lifecycle_action_probabilities, lifecycle_nonreturn_probability,
+    sample_internal_gap, sample_home_persona,
+    sample_lifecycle_step, sample_long_term_buyer, sample_new_user, sample_reward_coefficients,
     simulate_no_uplift_users,
     update_gap_internal_state,
 )
@@ -159,6 +160,59 @@ def test_purchase_then_fitted_nonreturn_creates_mission_exit():
         np.random.default_rng(2),
     )
     assert result[0] is None and result[2:] == ('NO_RETURN_30D', 'MISSION_EXIT')
+
+
+def test_cross_domain_head_creates_explicit_satiated_exit():
+    specification = {
+        'memory': 0., 'features': 'internal_state',
+        'mean': [0] * 6, 'scale': [1] * 6,
+        'coefficient': [[0] * 6 for _ in range(7)], 'intercept': [0] * 7,
+        'churn_features': 'internal_state',
+        'churn_mean': [0] * 6, 'churn_scale': [1] * 6,
+        'churn_coefficient': [0] * 6, 'churn_intercept': -30,
+    }
+    gap_model = {
+        'initial_gap_hours': 0, 'edges_hours': [0, 1, 6, 24, 72, 168, 336, 720],
+        'gap_tokens': ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'NO_RETURN_30D'],
+        'personas': {'2': specification},
+        'lifecycle': {'mature_personas': [2], 'home_persona_prior': {'2': 1.}},
+    }
+    transition_model = {'no_return_head': {
+        'features': ['profile_s2'], 'scaler_mean': [0.], 'scaler_scale': [1.],
+        'coefficients': {'profile_s2': 0.}, 'pooled_intercept': -30.,
+        'domain_intercepts': {'cosmetics': 30.},
+    }}
+    summary = {'events': 1, 'purchase': 1, 'view': 0, 'cart': 0,
+               'duration_hours': 0, 'previous_gap_hours': None}
+    assert lifecycle_nonreturn_probability(
+        transition_model, 2, summary, 1, 'cosmetics'
+    ) > .999
+    result = sample_lifecycle_step(
+        gap_model, 2, 'P2', np.zeros(6), summary, np.random.default_rng(2),
+        transition_model=transition_model,
+    )
+    assert result[0] is None and result[2:] == ('NO_RETURN_30D', 'SATIATED_EXIT')
+    summary['purchase'] = 0
+    result = sample_lifecycle_step(
+        gap_model, 2, 'P2', np.zeros(6), summary, np.random.default_rng(2),
+        transition_model=transition_model,
+    )
+    assert result[0] is None and result[2:] == (
+        'NO_RETURN_30D', 'DISSATISFIED_CHURNING'
+    )
+
+
+def test_long_term_buyer_is_rare_parent_persona_subtype():
+    model = {'long_term_buyer': {
+        'parent_home_persona': 2, 'sampling_probability_within_p2': 1.,
+        'purchase_logit_offset': .5, 'no_return_logit_offset': -.5,
+    }}
+    rng = np.random.default_rng(3)
+    assert sample_long_term_buyer(model, 2, rng)
+    assert not sample_long_term_buyer(model, 0, rng)
+    base = np.full(5, .2)
+    shifted = action_probability_offset(base, 3, .5)
+    assert shifted[3] > base[3] and np.isclose(shifted.sum(), 1)
 
 
 def test_reward_coefficient_sampler_reconstructs_identification_constraint():

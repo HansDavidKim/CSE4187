@@ -50,19 +50,24 @@ class ThompsonSampling(UCB):
 class LinUCB:
     def __init__(self, dimension, seed=0, exploration=1.0):
         self.a = np.repeat(np.eye(dimension)[None], 2, axis=0)
+        self.a_inverse = self.a.copy()
         self.b = np.zeros((2, dimension))
         self.exploration = exploration
 
     def act(self, state, training=True):
         values = []
         for action in range(2):
-            inverse = np.linalg.inv(self.a[action])
+            inverse = self.a_inverse[action]
             mean = inverse @ self.b[action]
             bonus = self.exploration * np.sqrt(state @ inverse @ state) if training else 0
             values.append(state @ mean + bonus)
         return int(np.argmax(values))
 
     def update(self, state, action, reward, next_state, done):
+        inverse_state = self.a_inverse[action] @ state
+        self.a_inverse[action] -= np.outer(inverse_state, inverse_state) / (
+            1. + state @ inverse_state
+        )
         self.a[action] += np.outer(state, state)
         self.b[action] += state * (reward / 1000)
 
@@ -75,7 +80,7 @@ class LinTS(LinUCB):
     def act(self, state, training=True):
         values = []
         for action in range(2):
-            inverse = np.linalg.inv(self.a[action])
+            inverse = self.a_inverse[action]
             mean = inverse @ self.b[action]
             theta = self.rng.multivariate_normal(mean, self.exploration ** 2 * inverse) if training else mean
             values.append(state @ theta)

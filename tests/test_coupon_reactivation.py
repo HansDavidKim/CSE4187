@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 
 from analysis.uplift import observed as module
 
@@ -23,3 +24,14 @@ def test_tianchi_persona_proxy_rules_are_disjoint():
 
 def test_coupon_overlap_bands_cap_at_two_or_more():
     assert module.coupon_overlap_band([0, 1, 2, 7]).tolist() == [0, 1, 2, 2]
+
+
+def test_nearest_cluster_matches_returns_similarity_and_margin():
+    values = np.array([[0.1, 0.0], [9.9, 10.0]])
+    profiles = np.array([[0.0, 0.0], [10.0, 10.0]])
+    clusters, similarity, margin = module.nearest_cluster_matches(
+        values, profiles, np.array([3, 7])
+    )
+    assert clusters.tolist() == [3, 7]
+    assert np.all(similarity > .9)
+    assert np.all(margin > .8)

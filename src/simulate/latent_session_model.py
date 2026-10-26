@@ -70,7 +70,16 @@ def lifecycle_action_probabilities(
     return np.exp(logits - logsumexp(logits))
 
 
-def canonical_type_probabilities(model, persona, normalized_latent=None):
+def action_probability_offset(probability, action, offset):
+    """Apply one additive utility offset to an already normalized action policy."""
+    probability = np.asarray(probability, dtype=float).copy()
+    if not 0 <= action < len(probability):
+        raise ValueError('invalid action offset index')
+    probability[action] *= np.exp(np.clip(float(offset), -30, 30))
+    return probability / probability.sum()
+
+
+def canonical_type_probabilities(model, persona, normalized_latent=None, group=None):
     assignment = model.get('canonical_assignment')
     if assignment is None:
         probabilities = model['personas'][str(persona)]['canonical_type_probabilities']
@@ -82,19 +91,26 @@ def canonical_type_probabilities(model, persona, normalized_latent=None):
     if latent.shape != (matrix.shape[0] - 1,):
         raise ValueError('invalid canonical latent dimension')
     logits = np.r_[1., latent] @ matrix
+    if group is not None:
+        logits += np.asarray(
+            assignment.get('group_logit_offsets', {}).get(group, np.zeros(len(logits))),
+            dtype=float,
+        )
     return assignment['types'], np.exp(logits - logsumexp(logits))
 
 
-def sample_uplift_profile(model, persona, rng):
+def sample_uplift_profile(model, persona, rng, group=None):
     assignment = model.get('canonical_assignment')
     latent = None
     if assignment is not None:
-        distribution = assignment['persona_latent_gaussians'][str(persona)]
+        distribution = assignment.get('group_latent_gaussians', {}).get(group)
+        if distribution is None:
+            distribution = assignment['persona_latent_gaussians'][str(persona)]
         latent = (
             np.asarray(distribution['mean'])
             + np.asarray(distribution['cholesky']) @ rng.normal(size=len(distribution['mean']))
         )
-    names, values = canonical_type_probabilities(model, persona, latent)
+    names, values = canonical_type_probabilities(model, persona, latent, group)
     if np.any(values < 0) or not np.isclose(values.sum(), 1):
         raise ValueError('invalid canonical-type probabilities')
     choice = int(rng.choice(len(names), p=values))
@@ -102,6 +118,7 @@ def sample_uplift_profile(model, persona, rng):
         'canonical_type': names[choice],
         'canonical_probabilities': values,
         'normalized_latent': latent,
+        'canonical_group': group or f'P{persona}',
     }
 
 
@@ -333,7 +350,68 @@ def sample_new_user(model, rng):
     }
 
 
-def sample_internal_gap(model, persona, state, summary, rng, return_logit_offset=0.0):
+def lifecycle_nonreturn_probability(
+    transition_model, persona, summary, completed_sessions, domain='cosmetics'
+):
+    """Evaluate the cross-domain 30-day non-return head from past/current state."""
+    head = transition_model['no_return_head']
+    events = max(float(summary.get('events', 0)), 1.0)
+    previous_gap = summary.get('previous_gap_hours')
+    previous_previous_gap = summary.get('previous_previous_gap_hours')
+    previous_gap = 0.0 if previous_gap is None else max(float(previous_gap), 0.0)
+    previous_previous_gap = (
+        0.0 if previous_previous_gap is None else max(float(previous_previous_gap), 0.0)
+    )
+    values = {
+        'log_session_index': np.log1p(max(int(completed_sessions) - 1, 0)),
+        'log_events': np.log1p(events),
+        'view_share': float(summary.get('view', 0)) / events,
+        'cart_share': float(summary.get('cart', 0)) / events,
+        'purchase_share': float(summary.get('purchase', 0)) / events,
+        'log_duration_hours': np.log1p(max(float(summary.get('duration_hours', 0)), 0.0)),
+        'log_previous_gap_hours': np.log1p(previous_gap),
+        'has_previous_gap': float(summary.get('previous_gap_hours') is not None),
+        'gap_acceleration': float(np.clip(
+            np.log1p(previous_gap) - np.log1p(previous_previous_gap),
+            -np.log1p(720), np.log1p(720),
+        )),
+        # The shared Cosmetics/Electronics profiles are only a validation layer.
+        # Existing Cosmetics P0/P3 project to S1 and P2 projects to S2.
+        'profile_s1': float(int(persona) in (0, 3)),
+        'profile_s2': float(int(persona) == 2),
+    }
+    features = np.asarray([values[name] for name in head['features']], dtype=float)
+    standardized = (
+        features - np.asarray(head['scaler_mean'], dtype=float)
+    ) / np.asarray(head['scaler_scale'], dtype=float)
+    intercepts = head.get('simulator_intercepts', head.get('domain_intercepts', {}))
+    intercept = float(intercepts.get(domain, head.get('pooled_intercept', 0.0)))
+    coefficient = np.asarray([
+        head['coefficients'][name] for name in head['features']
+    ], dtype=float)
+    logit = intercept + coefficient @ standardized
+    if summary.get('long_term_buyer', False):
+        logit += float(transition_model['long_term_buyer']['no_return_logit_offset'])
+    return float(1 / (1 + np.exp(-np.clip(logit, -30, 30))))
+
+
+def sample_long_term_buyer(transition_model, persona, rng):
+    """Draw the rare repeated-purchase subtype conditional on its parent persona."""
+    if transition_model is None or 'long_term_buyer' not in transition_model:
+        return False
+    specification = transition_model['long_term_buyer']
+    if int(persona) != int(specification['parent_home_persona']):
+        return False
+    probability = float(specification['sampling_probability_within_p2'])
+    if not 0 <= probability <= 1:
+        raise ValueError('invalid long-term-buyer probability')
+    return bool(rng.random() < probability)
+
+
+def sample_internal_gap(
+    model, persona, state, summary, rng, return_logit_offset=0.0,
+    nonreturn_probability=None,
+):
     """Choose a MaxEnt gap token and update latent state; None means no return in 30d."""
     specification = model['personas'][str(persona)]
     signal, updated = update_gap_internal_state(
@@ -359,8 +437,15 @@ def sample_internal_gap(model, persona, state, summary, rng, return_logit_offset
     churn_inputs = (
         churn_inputs - np.asarray(specification['churn_mean'])
     ) / np.asarray(specification['churn_scale'])
-    churn_logit = float(np.asarray(specification['churn_coefficient']) @ churn_inputs)
-    churn_logit += specification['churn_intercept'] - return_logit_offset
+    if nonreturn_probability is None:
+        churn_logit = float(np.asarray(specification['churn_coefficient']) @ churn_inputs)
+        churn_logit += specification['churn_intercept']
+    else:
+        if not 0 <= nonreturn_probability <= 1:
+            raise ValueError('nonreturn probability must be within [0, 1]')
+        probability = np.clip(float(nonreturn_probability), 1e-12, 1 - 1e-12)
+        churn_logit = np.log(probability / (1 - probability))
+    churn_logit -= return_logit_offset
     if rng.random() < 1 / (1 + np.exp(-np.clip(churn_logit, -30, 30))):
         return None, updated, model['gap_tokens'][-1]
     logits = np.asarray(specification['coefficient']) @ features
@@ -374,24 +459,34 @@ def sample_internal_gap(model, persona, state, summary, rng, return_logit_offset
 def sample_lifecycle_step(
     model, home_persona, lifecycle_state, state, summary, rng,
     completed_sessions=1, return_logit_offset=0.0,
+    transition_model=None, transition_domain='cosmetics',
 ):
     """Advance the no-coupon lifecycle while keeping the birth persona fixed."""
     mature = set(model['lifecycle']['mature_personas'])
     if home_persona not in mature:
         raise ValueError('invalid fixed home persona')
-    if lifecycle_state in ('EXIT', 'MISSION_EXIT'):
+    if lifecycle_state in ('EXIT', 'MISSION_EXIT', 'SATIATED_EXIT'):
         return None, np.asarray(state, dtype=float), 'NO_RETURN_30D', lifecycle_state
-    allowed = {'NEW', 'CHURNING', *(f'P{x}' for x in mature)}
+    allowed = {'NEW', 'CHURNING', 'DISSATISFIED_CHURNING', *(f'P{x}' for x in mature)}
     if lifecycle_state not in allowed:
         raise ValueError('invalid lifecycle state')
+    nonreturn_probability = (
+        lifecycle_nonreturn_probability(
+            transition_model, home_persona, summary, completed_sessions, transition_domain
+        ) if transition_model is not None else None
+    )
     gap, updated, token = sample_internal_gap(
-        model, home_persona, state, summary, rng, return_logit_offset
+        model, home_persona, state, summary, rng, return_logit_offset,
+        nonreturn_probability,
     )
     if gap is None:
         if float(summary.get('purchase', 0)) > 0:
-            destination = 'MISSION_EXIT'
+            destination = 'SATIATED_EXIT' if transition_model is not None else 'MISSION_EXIT'
         else:
-            destination = 'EXIT' if lifecycle_state == 'CHURNING' else 'CHURNING'
+            churning_states = {'CHURNING', 'DISSATISFIED_CHURNING'}
+            destination = ('EXIT' if lifecycle_state in churning_states else
+                           'DISSATISFIED_CHURNING' if transition_model is not None else
+                           'CHURNING')
     elif lifecycle_state == 'NEW':
         onboarding_sessions = int(model['lifecycle'].get('onboarding_sessions', 2))
         destination = f'P{home_persona}' if completed_sessions >= onboarding_sessions else 'NEW'
@@ -404,6 +499,7 @@ def _simulate_users(
     coefficient_model, action_model, gap_model, users=1000, seed=42,
     max_sessions=50, max_events=100, uplift_model=None,
     coupon_receipt_days=(), coupon_strength=1.0,
+    lifecycle_transition_model=None, lifecycle_domain='cosmetics',
 ):
     """Roll out the fitted model without replaying observed contexts."""
     if users < 1 or max_sessions < 1 or max_events < 1:
@@ -422,8 +518,12 @@ def _simulate_users(
         user = sample_new_user(gap_model, rng)
         persona = user['home_persona']
         lifecycle = user['lifecycle_state']
+        long_term_buyer = sample_long_term_buyer(
+            lifecycle_transition_model, persona, rng
+        )
+        canonical_group = 'P_LT' if long_term_buyer else None
         uplift_profile = (
-            sample_uplift_profile(uplift_model, persona, canonical_rng)
+            sample_uplift_profile(uplift_model, persona, canonical_rng, canonical_group)
             if uplift_model is not None else None
         )
         canonical_type = None if uplift_profile is None else uplift_profile['canonical_type']
@@ -431,6 +531,7 @@ def _simulate_users(
             profiles.append({
                 'user_id': user_id, 'home_persona': persona,
                 'canonical_type': canonical_type,
+                'canonical_group': uplift_profile['canonical_group'],
                 'canonical_probabilities': uplift_profile['canonical_probabilities'].tolist(),
                 'normalized_latent': uplift_profile['normalized_latent'].tolist(),
             })
@@ -442,6 +543,7 @@ def _simulate_users(
         )
         state = np.array([0., 0., 0., initial_inactivity, 0., 0.])
         previous_gap = None
+        previous_previous_gap = None
         elapsed_days = 0.
         signal_history = []
         for session_index in range(max_sessions):
@@ -468,6 +570,11 @@ def _simulate_users(
                     action_model, persona, end_features, state,
                     lifecycle == 'NEW', coefficients,
                 )
+                if long_term_buyer:
+                    probability = action_probability_offset(
+                        probability, 3,
+                        lifecycle_transition_model['long_term_buyer']['purchase_logit_offset'],
+                    )
                 if uplift_model is not None:
                     probability = coupon_action_probabilities(
                         probability, uplift_model, persona, canonical_type,
@@ -487,6 +594,11 @@ def _simulate_users(
                     action_model, persona, features, state,
                     lifecycle == 'NEW', coefficients,
                 )
+                if long_term_buyer:
+                    event_probability = action_probability_offset(
+                        event_probability, 3,
+                        lifecycle_transition_model['long_term_buyer']['purchase_logit_offset'],
+                    )
                 if uplift_model is not None:
                     event_probability = coupon_action_probabilities(
                         event_probability, uplift_model, persona, canonical_type,
@@ -504,6 +616,8 @@ def _simulate_users(
                 'purchase': counts[3], 'events': counts.sum(),
                 'duration_hours': elapsed / 60,
                 'previous_gap_hours': previous_gap,
+                'previous_previous_gap_hours': previous_previous_gap,
+                'long_term_buyer': long_term_buyer,
                 'churn_signal_history': signal_history[-2:],
             }
             origin = lifecycle
@@ -511,6 +625,8 @@ def _simulate_users(
                 gap_model, persona, lifecycle, state, summary, rng,
                 completed_sessions=session_index + 1,
                 return_logit_offset=offsets['return'],
+                transition_model=lifecycle_transition_model,
+                transition_domain=lifecycle_domain,
             )
             signal, _ = update_gap_internal_state(
                 state, summary, gap_model['personas'][str(persona)]['memory'],
@@ -528,7 +644,7 @@ def _simulate_users(
                 'gap_token': token, 'next_lifecycle_state': lifecycle,
             })
             transitions.append((origin, lifecycle))
-            state, previous_gap = updated, gap
+            state, previous_previous_gap, previous_gap = updated, previous_gap, gap
             if gap is None:
                 break
             elapsed_days += gap / 24
@@ -547,23 +663,26 @@ def _simulate_users(
 
 def simulate_no_uplift_users(
     coefficient_model, action_model, gap_model, users=1000, seed=42,
-    max_sessions=50, max_events=100,
+    max_sessions=50, max_events=100, lifecycle_transition_model=None,
+    lifecycle_domain='cosmetics',
 ):
     return _simulate_users(
         coefficient_model, action_model, gap_model, users, seed,
-        max_sessions, max_events,
+        max_sessions, max_events, lifecycle_transition_model=lifecycle_transition_model,
+        lifecycle_domain=lifecycle_domain,
     )
 
 
 def simulate_uplift_users(
     coefficient_model, action_model, gap_model, uplift_model,
     coupon_receipt_days=(0.,), coupon_strength=None, users=1000, seed=42,
-    max_sessions=50, max_events=100,
+    max_sessions=50, max_events=100, lifecycle_transition_model=None,
+    lifecycle_domain='cosmetics',
 ):
     return _simulate_users(
         coefficient_model, action_model, gap_model, users, seed,
         max_sessions, max_events, uplift_model, coupon_receipt_days,
-        coupon_strength,
+        coupon_strength, lifecycle_transition_model, lifecycle_domain,
     )
 
 

@@ -1,6 +1,6 @@
 import numpy as np
 
-from models.agents import AGENTS
+from models.agents import AGENTS, LinUCB
 from scripts.run_agent_benchmark import episode, load_environment
 
 
@@ -31,3 +31,15 @@ def test_weekly_episode_updates_only_after_each_seven_day_feedback_window():
     assert len(policy.updates) == 2
     assert policy.updates[-1][-1]
     assert result["coupons"] == 2
+
+
+def test_linucb_rank_one_inverse_matches_direct_openblas_solution():
+    rng = np.random.default_rng(42)
+    agent = LinUCB(19)
+    for _ in range(100):
+        state = rng.normal(size=19)
+        action = int(rng.integers(2))
+        agent.update(state, action, rng.normal(), state, False)
+    for action in range(2):
+        expected = np.linalg.solve(agent.a[action], np.eye(19))
+        np.testing.assert_allclose(agent.a_inverse[action], expected, atol=1e-10)

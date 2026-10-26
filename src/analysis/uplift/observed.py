@@ -181,6 +181,702 @@ TIANCHI_UPLIFT_OUT = ROOT / "artifacts/tianchi-persona-uplift"
 TIANCHI_SINGLE_RECEIPT_OUT = ROOT / "artifacts/tianchi-single-receipt-duration"
 TIANCHI_OVERLAP_OUT = ROOT / "artifacts/tianchi-coupon-overlap"
 TIANCHI_CUMULATIVE_OUT = ROOT / "artifacts/tianchi-cumulative-coupon-history"
+TIANCHI_FIRST_RECEIPT_OUT = ROOT / "artifacts/tianchi-first-receipt-alignment"
+TIANCHI_PERSONA_COUPON_OUT = ROOT / "artifacts/tianchi-persona-coupon-matching"
+TIANCHI_LONG_TERM_OUT = ROOT / "artifacts/tianchi-long-term-lifecycle"
+TIANCHI_CANONICAL_PROXY_OUT = ROOT / "artifacts/tianchi-canonical-proxies"
+
+
+def nearest_cluster_matches(values, profiles, cluster_ids):
+    """Return nearest profile, similarity, and first-versus-second margin."""
+    distance = np.sqrt(np.mean((values[:, None, :] - profiles[None, :, :]) ** 2, axis=2))
+    similarity = np.exp(-distance)
+    order = np.argsort(-similarity, axis=1)
+    nearest = order[:, 0]
+    return (np.asarray(cluster_ids)[nearest], similarity[np.arange(len(values)), nearest],
+            similarity[np.arange(len(values)), nearest] - similarity[np.arange(len(values)), order[:, 1]])
+
+
+def _propensity_pairs(frame, covariates, caliper_scale=.2):
+    """One-to-one nearest propensity-score pairs without replacement."""
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+
+    treated = frame.treated.to_numpy(dtype=bool)
+    if treated.sum() < 2 or (~treated).sum() < 2:
+        return np.empty((0, 2), dtype=int), None
+    x = StandardScaler().fit_transform(frame[list(covariates)].to_numpy(float))
+    propensity = LogisticRegression(max_iter=1000).fit(x, treated).predict_proba(x)[:, 1]
+    propensity = np.clip(propensity, 1e-6, 1 - 1e-6)
+    logits = np.log(propensity / (1 - propensity))
+    caliper = caliper_scale * logits.std(ddof=1)
+    pairs = []
+    for purchase_history in (0, 1):
+        exact = frame.pre_purchase_any.to_numpy() == purchase_history
+        treated_index = np.flatnonzero(treated & exact)
+        control_index = np.flatnonzero(~treated & exact)
+        if not len(treated_index) or not len(control_index):
+            continue
+        order = np.argsort(logits[control_index])
+        control_index = control_index[order]
+        control_logits = logits[control_index]
+        for row in treated_index[np.argsort(logits[treated_index])]:
+            position = np.searchsorted(control_logits, logits[row])
+            candidates = []
+            if position < len(control_index):
+                candidates.append(control_index[position])
+            if position:
+                candidates.append(control_index[position - 1])
+            if not candidates:
+                break
+            match = min(candidates, key=lambda index: abs(logits[index] - logits[row]))
+            if abs(logits[match] - logits[row]) <= caliper:
+                pairs.append((row, match))
+                keep = control_index != match
+                control_index = control_index[keep]
+                control_logits = control_logits[keep]
+    return np.asarray(pairs, dtype=int).reshape(-1, 2), x
+
+
+def _paired_binary_summary(frame, pairs, outcome):
+    if not len(pairs):
+        return None
+    treated = frame.iloc[pairs[:, 0]][outcome].to_numpy(float)
+    control = frame.iloc[pairs[:, 1]][outcome].to_numpy(float)
+    difference = treated - control
+    standard_error = float(difference.std(ddof=1) / np.sqrt(len(difference))) if len(difference) > 1 else 0.
+    estimate = float(difference.mean())
+    return {
+        "treated_rate": float(treated.mean()),
+        "matched_control_rate": float(control.mean()),
+        "difference": estimate,
+        "standard_error": standard_error,
+        "ci95": [estimate - 1.96 * standard_error, estimate + 1.96 * standard_error],
+    }
+
+
+def _matched_outcomes(frame, pairs, outcome, group):
+    """Keep pair-level outcomes so uncertainty is computed at the matching unit."""
+    return pd.DataFrame({
+        "group": group,
+        "pair": np.arange(len(pairs), dtype=int),
+        "control": frame.iloc[pairs[:, 1]][outcome].to_numpy(float),
+        "treated": frame.iloc[pairs[:, 0]][outcome].to_numpy(float),
+    })
+
+
+def _bootstrap_pair_rates(pair_frame, draws, rng):
+    values = pair_frame[["control", "treated"]].to_numpy(float)
+    indices = rng.integers(0, len(values), size=(draws, len(values)))
+    sampled = values[indices].mean(axis=1)
+    return sampled[:, 0], sampled[:, 1]
+
+
+def _canonical_proxy_row(persona, components, weights, draws=5_000, seed=20261026):
+    """Transport matched marginals and form one maximum-entropy joint proxy."""
+    from analysis.uplift.model import maximum_entropy_types
+
+    rng = np.random.default_rng(seed)
+    p0_draws = np.zeros(draws)
+    p1_draws = np.zeros(draws)
+    p0 = p1 = 0.
+    pairs = 0
+    for group, weight in weights.items():
+        part = components[group]
+        control_draws, treated_draws = _bootstrap_pair_rates(part, draws, rng)
+        p0_draws += weight * control_draws
+        p1_draws += weight * treated_draws
+        p0 += weight * part.control.mean()
+        p1 += weight * part.treated.mean()
+        pairs += len(part)
+    canonical = maximum_entropy_types(p0, p1)
+    canonical_draws = {
+        "sure_thing": p0_draws * p1_draws,
+        "persuadable": (1 - p0_draws) * p1_draws,
+        "sleeping_dog": p0_draws * (1 - p1_draws),
+        "lost_cause": (1 - p0_draws) * (1 - p1_draws),
+    }
+    row = {
+        "persona": persona,
+        "matched_pairs_available": pairs,
+        "p0": p0,
+        "p0_ci_low": float(np.quantile(p0_draws, .025)),
+        "p0_ci_high": float(np.quantile(p0_draws, .975)),
+        "p1": p1,
+        "p1_ci_low": float(np.quantile(p1_draws, .025)),
+        "p1_ci_high": float(np.quantile(p1_draws, .975)),
+        "difference": p1 - p0,
+        "difference_ci_low": float(np.quantile(p1_draws - p0_draws, .025)),
+        "difference_ci_high": float(np.quantile(p1_draws - p0_draws, .975)),
+    }
+    for name, estimate in canonical.items():
+        row[name] = estimate
+        row[f"{name}_ci_low"] = float(np.quantile(canonical_draws[name], .025))
+        row[f"{name}_ci_high"] = float(np.quantile(canonical_draws[name], .975))
+    return row
+
+
+def run_tianchi_canonical_proxy_estimation():
+    """Estimate persona-level synthetic canonical proportions from saved matched cohorts."""
+    TIANCHI_CANONICAL_PROXY_OUT.mkdir(parents=True, exist_ok=True)
+
+    persona_cohort = pd.read_parquet(TIANCHI_PERSONA_COUPON_OUT / "cohort.parquet")
+    profile_covariates = [
+        "purchase_share", "log_total_events", "log_active_days", "log_events_per_day",
+        "purchase_day_share", "log_median_gap", "first_day_purchase",
+        "last_day_purchase", "explore_to_purchase", "purchase_to_explore",
+        "explore_persistence", "purchase_persistence", "has_transition",
+        "log_pre_receipts",
+    ]
+    profile_components = {}
+    pair_frames = []
+    for profile, part in persona_cohort.groupby("shared_profile", sort=True):
+        part = part.reset_index(drop=True)
+        pairs, _ = _propensity_pairs(part, profile_covariates)
+        if len(pairs):
+            matched = _matched_outcomes(part, pairs, "post_purchase_any", profile)
+            profile_components[profile] = matched
+            pair_frames.append(matched.assign(cohort="shared_profile"))
+
+    weights = pd.read_csv(TIANCHI_PERSONA_COUPON_OUT / "persona_transport_weights.csv")
+    rows = []
+    for persona, group in weights.groupby("persona", sort=True):
+        group = group.loc[group.shared_profile.isin(profile_components)].copy()
+        group["weight"] /= group.weight.sum()
+        rows.append(_canonical_proxy_row(
+            persona,
+            profile_components,
+            dict(zip(group.shared_profile, group.weight, strict=True)),
+            seed=20261026 + len(rows),
+        ))
+
+    p_lt = pd.read_parquet(TIANCHI_LONG_TERM_OUT / "anchor_p_lt_cohort.parquet")
+    p_lt_covariates = [
+        "log_active_days", "log_purchase_days", "log_purchases", "log_events",
+        "log_span_days", "purchase_day_share", "log_prior_receipts",
+    ]
+    p_lt_pairs, _ = _propensity_pairs(p_lt, p_lt_covariates)
+    p_lt_matched = _matched_outcomes(p_lt, p_lt_pairs, "post_purchase_any", "P_LT")
+    pair_frames.append(p_lt_matched.assign(cohort="long_term_buyer"))
+    rows.append(_canonical_proxy_row(
+        "P_LT", {"P_LT": p_lt_matched}, {"P_LT": 1.}, seed=20261030,
+    ))
+
+    result = pd.DataFrame(rows)
+    result.to_csv(TIANCHI_CANONICAL_PROXY_OUT / "canonical_type_proxies.csv", index=False)
+    pd.concat(pair_frames, ignore_index=True).to_parquet(
+        TIANCHI_CANONICAL_PROXY_OUT / "matched_pair_outcomes.parquet", index=False
+    )
+    rules = {
+        "estimand": "14-day purchase after the 2016-05-15 anchor",
+        "treatment_proxy": "at least one Tianchi Action=2 coupon receipt on the anchor day",
+        "outcome": "at least one Tianchi Action=1 purchase during anchor days 1 through 14",
+        "shared_proxy_assignment": {
+            "window": "click and purchase records in anchor days -28 through -1",
+            "features": profile_covariates[:-1],
+            "rule": (
+                "robust-scale against Cosmetics and Electronics shared behavior features, then "
+                "assign the nearest Cosmetics K=4 centroid; C0/C2/C3 map to S0/S1/S2 and "
+                "unresolved C1 is excluded"
+            ),
+        },
+        "persona_transport": (
+            "estimate p0 and p1 within S0/S1/S2, then average them with the empirical "
+            "Cosmetics P0/P2/P3-to-shared-profile overlap weights"
+        ),
+        "long_term_proxy": (
+            "P_LT is assigned before the anchor when a user has at least 10 active days, "
+            "3 purchase days, and a 30-day observed span"
+        ),
+        "matching": (
+            "within proxy group, 1:1 logistic propensity matching without replacement, "
+            "exact on prior purchase and within a 0.2-SD propensity-logit caliper"
+        ),
+        "canonical_joint": (
+            "maximum-entropy independent coupling of matched marginals p0 and p1; "
+            "pair bootstrap intervals do not identify individual potential outcomes"
+        ),
+        "bootstrap_draws": 5000,
+        "bootstrap_seed": 20261026,
+    }
+    report = {"rules": rules, "results": result.to_dict(orient="records")}
+    (TIANCHI_CANONICAL_PROXY_OUT / "summary.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return report
+
+
+def run_tianchi_persona_coupon_matching():
+    """Match anchor-day receipt proxies inside cross-domain behavioral profiles."""
+    import matplotlib.pyplot as plt
+    from sklearn.preprocessing import RobustScaler
+
+    from analysis.persona.behavior import SHARED_LIFECYCLE_PROFILE
+    from analysis.persona.cluster import (
+        ALIGNMENT_FEATURES, _fixed_k4_membership, _selected_events,
+        _shared_behavior_features,
+    )
+    from analysis.uplift.model import maximum_entropy_types
+
+    TIANCHI_PERSONA_COUPON_OUT.mkdir(parents=True, exist_ok=True)
+    anchor = pd.Timestamp("2016-05-15")
+    base = pd.read_csv(ROOT / "artifacts/canonical-type-bounds/tianchi_cohort.csv")
+    base["pre_total"] = base.pre_0 + base.pre_1
+    base = base.loc[base.pre_total.ge(2)].copy()
+    treated = base.loc[base.treated.eq(1)]
+    controls = base.loc[base.treated.eq(0)].copy()
+    controls["selection_hash"] = pd.util.hash_pandas_object(
+        "coupon-control:" + controls.User_id.astype(str), index=False
+    ).to_numpy()
+    controls = controls.nsmallest(min(50_000, len(controls)), "selection_hash")
+    selected = pd.concat([treated, controls], ignore_index=True)
+    users = set(selected.User_id.astype("int64"))
+
+    pre_parts = []
+    for chunk in pd.read_csv(
+        ONLINE, usecols=["User_id", "Action", "Date"],
+        dtype={"User_id": "Int64", "Action": "Int8", "Date": "string"},
+        chunksize=1_000_000,
+    ):
+        chunk = chunk.loc[chunk.User_id.isin(users) & chunk.Action.isin([0, 1])].copy()
+        if chunk.empty:
+            continue
+        day = pd.to_datetime(chunk.Date, format="%Y%m%d", errors="coerce")
+        keep = (day - anchor).dt.days.between(-28, -1)
+        if keep.any():
+            pre_parts.append(pd.DataFrame({
+                "user": chunk.loc[keep, "User_id"].astype("int64"),
+                "at": day[keep],
+                "action": chunk.loc[keep, "Action"].map({0: "explore", 1: "purchase"}),
+            }).dropna())
+    pre_events = pd.concat(pre_parts, ignore_index=True)
+    membership = pd.DataFrame({"user_id": sorted(pre_events.user.unique()), "cluster": 0})
+    pre_features = _shared_behavior_features(pre_events, membership)
+
+    reference_frames = []
+    for source in ("cosmetics", "electronics"):
+        source_membership, _ = _fixed_k4_membership(source)
+        events = _selected_events(source, set(source_membership.user_id.astype("int64")))
+        events = events.loc[events.action.isin(["view", "purchase"]), ["user_id", "at", "action"]]
+        events = events.rename(columns={"user_id": "user"})
+        events["action"] = events.action.replace({"view": "explore"})
+        end = events.groupby("user")["at"].transform("max")
+        events = events.loc[events["at"].gt(end - pd.Timedelta(days=28))]
+        reference_frames.append(_shared_behavior_features(events, source_membership).assign(dataset=source))
+    reference = pd.concat(reference_frames, ignore_index=True)
+    scaler = RobustScaler().fit(reference[list(ALIGNMENT_FEATURES)])
+    reference[list(ALIGNMENT_FEATURES)] = scaler.transform(reference[list(ALIGNMENT_FEATURES)])
+    tianchi_scaled = scaler.transform(pre_features[list(ALIGNMENT_FEATURES)])
+    cosmetics_profiles = (reference.loc[reference.dataset.eq("cosmetics")]
+                           .groupby("cluster")[list(ALIGNMENT_FEATURES)].median().sort_index())
+    cluster, similarity, margin = nearest_cluster_matches(
+        tianchi_scaled, cosmetics_profiles.to_numpy(), cosmetics_profiles.index.to_numpy()
+    )
+    assigned = pre_features[["user_id", *ALIGNMENT_FEATURES]].copy()
+    assigned["cosmetics_cluster"] = cluster
+    assigned["shared_profile"] = assigned.cosmetics_cluster.map(SHARED_LIFECYCLE_PROFILE["cosmetics"])
+    assigned["profile_similarity"] = similarity
+    assigned["profile_margin"] = margin
+
+    frame = selected.merge(assigned, left_on="User_id", right_on="user_id", validate="one_to_one")
+    frame["pre_purchase_any"] = frame.pre_1.gt(0).astype(int)
+    frame["post_purchase_any"] = frame.post_1.gt(0).astype(int)
+    frame["post_activity_any"] = (frame.post_0 + frame.post_1).gt(0).astype(int)
+    frame["later_receipt_any"] = frame.post_2.gt(0).astype(int)
+    frame["log_pre_receipts"] = np.log1p(frame.pre_2)
+    assignment_counts = (frame.loc[frame.treated.eq(1), "shared_profile"]
+                          .value_counts(dropna=False).sort_index().to_dict())
+    frame = frame.loc[frame.shared_profile.ne("UNRESOLVED")].reset_index(drop=True)
+
+    covariates = [*ALIGNMENT_FEATURES, "log_pre_receipts"]
+    shared_rows = []
+    for profile, part in frame.groupby("shared_profile", sort=True):
+        part = part.reset_index(drop=True)
+        pairs, standardized = _propensity_pairs(part, covariates)
+        if not len(pairs):
+            continue
+        treated_x = standardized[pairs[:, 0]]
+        control_x = standardized[pairs[:, 1]]
+        raw_treated = standardized[part.treated.to_numpy(dtype=bool)]
+        raw_control = standardized[~part.treated.to_numpy(dtype=bool)]
+        raw_pooled = np.sqrt((raw_treated.var(axis=0, ddof=1) + raw_control.var(axis=0, ddof=1)) / 2)
+        raw_smd = np.divide(raw_treated.mean(axis=0) - raw_control.mean(axis=0), raw_pooled,
+                            out=np.zeros_like(raw_pooled), where=raw_pooled > 0)
+        pooled = np.sqrt((treated_x.var(axis=0, ddof=1) + control_x.var(axis=0, ddof=1)) / 2)
+        smd = np.divide(treated_x.mean(axis=0) - control_x.mean(axis=0), pooled,
+                        out=np.zeros_like(pooled), where=pooled > 0)
+        purchase = _paired_binary_summary(part, pairs, "post_purchase_any")
+        activity = _paired_binary_summary(part, pairs, "post_activity_any")
+        later_receipt = _paired_binary_summary(part, pairs, "later_receipt_any")
+        shared_rows.append({
+            "shared_profile": profile,
+            "eligible_treated": int(part.treated.sum()),
+            "eligible_controls": int(part.treated.eq(0).sum()),
+            "matched_pairs": int(len(pairs)),
+            "matched_fraction": float(len(pairs) / part.treated.sum()),
+            "median_profile_similarity": float(part.loc[part.treated.eq(1), "profile_similarity"].median()),
+            "max_abs_unmatched_smd": float(np.abs(raw_smd).max()),
+            "max_abs_matched_smd": float(np.abs(smd).max()),
+            "purchase": purchase,
+            "activity": activity,
+            "later_receipt_diagnostic": later_receipt,
+        })
+    shared = pd.DataFrame([{
+        "shared_profile": row["shared_profile"],
+        "eligible_treated": row["eligible_treated"],
+        "eligible_controls": row["eligible_controls"],
+        "matched_pairs": row["matched_pairs"],
+        "matched_fraction": row["matched_fraction"],
+        "median_profile_similarity": row["median_profile_similarity"],
+        "max_abs_unmatched_smd": row["max_abs_unmatched_smd"],
+        "max_abs_matched_smd": row["max_abs_matched_smd"],
+        **{f"purchase_{key}": value for key, value in row["purchase"].items() if key != "ci95"},
+        "purchase_ci95_low": row["purchase"]["ci95"][0],
+        "purchase_ci95_high": row["purchase"]["ci95"][1],
+        "activity_difference": row["activity"]["difference"],
+        "later_receipt_difference": row["later_receipt_diagnostic"]["difference"],
+    } for row in shared_rows])
+
+    old = pd.read_parquet(ROOT / "artifacts/four-behavior-modes/cosmetics_embedding_memberships.parquet")
+    fixed, _ = _fixed_k4_membership("cosmetics")
+    overlap = old[["user_id", "mode"]].merge(fixed[["user_id", "cluster"]], on="user_id")
+    overlap["shared_profile"] = overlap.cluster.map(SHARED_LIFECYCLE_PROFILE["cosmetics"])
+    persona_modes = {"P0": "P4_purchase_path", "P2": "P2_deep_consideration", "P3": "P3_cart_revision"}
+    weights = []
+    for persona, mode in persona_modes.items():
+        values = overlap.loc[(overlap["mode"].eq(mode)) & overlap.shared_profile.ne("UNRESOLVED"), "shared_profile"]
+        for profile, weight in values.value_counts(normalize=True).sort_index().items():
+            weights.append({"persona": persona, "shared_profile": profile, "weight": float(weight),
+                            "overlap_users": int(values.eq(profile).sum())})
+    weights = pd.DataFrame(weights)
+    effects = shared.set_index("shared_profile")
+    persona_rows = []
+    for persona, group in weights.groupby("persona", sort=True):
+        group = group.loc[group.shared_profile.isin(effects.index)].copy()
+        group["weight"] /= group.weight.sum()
+        w = group.weight.to_numpy()
+        rows = effects.loc[group.shared_profile]
+        p0 = float(w @ rows.purchase_matched_control_rate.to_numpy())
+        p1 = float(w @ rows.purchase_treated_rate.to_numpy())
+        effect = p1 - p0
+        se = float(np.sqrt(np.sum(np.square(w * rows.purchase_standard_error.to_numpy()))))
+        persona_rows.append({
+            "persona": persona, "matched_control_purchase": p0,
+            "receipt_purchase": p1, "difference": effect,
+            "standard_error": se, "ci95_low": effect - 1.96 * se,
+            "ci95_high": effect + 1.96 * se,
+            "maximum_entropy_canonical_proxy": maximum_entropy_types(p0, p1),
+        })
+    persona_rows.append({**next(row for row in persona_rows if row["persona"] == "P2"),
+                         "persona": "P_LT", "inherited_from": "P2"})
+    persona = pd.DataFrame([{key: value for key, value in row.items()
+                             if key != "maximum_entropy_canonical_proxy"} for row in persona_rows])
+
+    frame.to_parquet(TIANCHI_PERSONA_COUPON_OUT / "cohort.parquet", index=False)
+    shared.to_csv(TIANCHI_PERSONA_COUPON_OUT / "shared_profile_effects.csv", index=False)
+    weights.to_csv(TIANCHI_PERSONA_COUPON_OUT / "persona_transport_weights.csv", index=False)
+    persona.to_csv(TIANCHI_PERSONA_COUPON_OUT / "persona_coupon_proxies.csv", index=False)
+    report = {
+        "dataset": "Tianchi O2O online",
+        "anchor_day": "2016-05-15",
+        "treatment_proxy": "at least one Action=2 coupon-receipt record on the anchor day",
+        "outcome": "at least one Action=1 purchase record in days 1 through 14",
+        "eligibility": "at least two click/purchase records before the anchor; all treated and a deterministic 50,000-user control sample",
+        "eligible_treated_total": int(len(treated)),
+        "treated_profile_assignment": {str(key): int(value) for key, value in assignment_counts.items()},
+        "profile_assignment": "28-day pre-anchor click/purchase behavior matched to Cosmetics K=4 medians; C0/C2/C3 become S0/S1/S2 and C1 is unresolved",
+        "matching": "within-profile regularized-logistic propensity matching without replacement, exact on prior purchase and a 0.2-SD logit caliper",
+        "shared_profile_results": shared_rows,
+        "persona_transport_weights": weights.to_dict(orient="records"),
+        "persona_results": persona_rows,
+        "limitations": [
+            "Receipt is observed, but offer eligibility and failed delivery are not; the matched difference is not an identified causal effect.",
+            "Controls can receive coupons after the anchor, and the later-receipt contrast is reported as a targeting diagnostic.",
+            "Tianchi click is aligned to retail view; cart, removal, product identity, and within-day event order are unavailable.",
+            "P0 and P3 both mainly transport through S1, so Tianchi cannot sharply separate their coupon response.",
+            "P_LT inherits P2 because Tianchi does not identify the rare long-term-buyer subtype.",
+        ],
+    }
+    (TIANCHI_PERSONA_COUPON_OUT / "summary.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+    figure_dir = ROOT / "img/uplift"
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.4), constrained_layout=True)
+    x = np.arange(len(shared))
+    axes[0].bar(x - .18, shared.purchase_matched_control_rate * 100, .36,
+                label="matched no-receipt", color="#4e79a7")
+    axes[0].bar(x + .18, shared.purchase_treated_rate * 100, .36,
+                label="receipt", color="#f28e2b")
+    axes[0].set(xticks=x, xticklabels=shared.shared_profile,
+                ylabel="Users with purchase in days 1–14 (%)", title="Shared behavior profiles")
+    axes[0].legend(frameon=False)
+    px = np.arange(len(persona))
+    estimate = persona.difference.to_numpy() * 100
+    lower = persona.ci95_low.to_numpy() * 100
+    upper = persona.ci95_high.to_numpy() * 100
+    axes[1].bar(px, estimate, color="#59a14f")
+    axes[1].errorbar(px, estimate, yerr=np.vstack([estimate - lower, upper - estimate]),
+                     fmt="none", color="black", capsize=3)
+    axes[1].axhline(0, color="black", linewidth=.8)
+    axes[1].set(xticks=px, xticklabels=persona.persona,
+                ylabel="Matched purchase difference (percentage points)",
+                title="Transported simulator-persona proxies")
+    for axis in axes:
+        axis.grid(axis="y", alpha=.2)
+        axis.spines[["top", "right"]].set_visible(False)
+    fig.suptitle("Tianchi coupon-receipt proxy matched through cross-domain behavior", y=1.02)
+    fig.tight_layout()
+    fig.savefig(figure_dir / "tianchi_persona_coupon_matching.png", dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return report
+
+
+def run_tianchi_long_term_lifecycle():
+    """Check Tianchi analogues of P_LT and purchase-followed-by-nonreturn."""
+    import matplotlib.pyplot as plt
+
+    from analysis.uplift.canonical import bounds
+    from analysis.uplift.model import maximum_entropy_types
+
+    TIANCHI_LONG_TERM_OUT.mkdir(parents=True, exist_ok=True)
+    behavior_parts, receipt_parts = [], []
+    for chunk in pd.read_csv(
+        ONLINE,
+        usecols=["User_id", "Action", "Coupon_id", "Date", "Date_received"],
+        dtype={"User_id": "Int64", "Action": "Int8", "Coupon_id": "string",
+               "Date": "string", "Date_received": "string"},
+        chunksize=1_000_000,
+    ):
+        behavior = chunk.loc[chunk.Action.isin([0, 1]) & chunk.User_id.notna()].copy()
+        if not behavior.empty:
+            behavior["day"] = pd.to_datetime(behavior.Date, format="%Y%m%d", errors="coerce")
+            behavior["purchase"] = behavior.Action.eq(1).astype(int)
+            behavior["coupon_purchase"] = (
+                behavior.Action.eq(1) & behavior.Coupon_id.notna()
+            ).astype(int)
+            behavior_parts.append(
+                behavior.dropna(subset=["day"])
+                .groupby(["User_id", "day"])
+                .agg(events=("Action", "size"), purchases=("purchase", "sum"),
+                     coupon_purchases=("coupon_purchase", "sum"))
+            )
+        receipt = chunk.loc[chunk.Action.eq(2) & chunk.User_id.notna()].copy()
+        if not receipt.empty:
+            receipt["day"] = pd.to_datetime(
+                receipt.Date_received, format="%Y%m%d", errors="coerce"
+            )
+            receipt_parts.append(
+                receipt.dropna(subset=["day"]).groupby(["User_id", "day"]).size()
+                .rename("receipts")
+            )
+    daily = pd.concat(behavior_parts).groupby(level=[0, 1]).sum().reset_index()
+    receipts = pd.concat(receipt_parts).groupby(level=[0, 1]).sum().reset_index()
+    daily = daily.sort_values(["User_id", "day"], kind="stable")
+    observation_end = daily.day.max()
+    anchor = pd.Timestamp("2016-05-15")
+
+    def user_stats(frame):
+        source = frame.assign(purchase_day=frame.purchases.gt(0).astype(int))
+        result = source.groupby("User_id").agg(
+            active_days=("day", "size"), purchase_days=("purchase_day", "sum"),
+            purchases=("purchases", "sum"), events=("events", "sum"),
+            first_day=("day", "min"), last_day=("day", "max"),
+        )
+        result["span_days"] = (result.last_day - result.first_day).dt.days
+        return result
+
+    pre = user_stats(daily.loc[daily.day.lt(anchor)])
+    pre["p_lt"] = (
+        pre.active_days.ge(10) & pre.purchase_days.ge(3) & pre.span_days.ge(30)
+    )
+    pre_receipts = (receipts.loc[receipts.day.lt(anchor)].groupby("User_id").receipts.sum())
+    anchor_receipt = set(receipts.loc[receipts.day.eq(anchor), "User_id"].astype("int64"))
+    post = daily.loc[daily.day.between(anchor + pd.Timedelta(days=1),
+                                       anchor + pd.Timedelta(days=14))]
+    post_purchase = post.groupby("User_id").purchases.sum().gt(0)
+    later_receipt = (receipts.loc[receipts.day.between(anchor + pd.Timedelta(days=1),
+                                                        anchor + pd.Timedelta(days=14))]
+                     .groupby("User_id").receipts.sum().gt(0))
+    anchor_frame = pre.loc[pre.p_lt].reset_index()
+    anchor_frame["treated"] = anchor_frame.User_id.isin(anchor_receipt).astype(int)
+    anchor_frame["pre_purchase_any"] = 1
+    anchor_frame["post_purchase_any"] = (
+        anchor_frame.User_id.map(post_purchase).eq(True).astype(int)
+    )
+    anchor_frame["later_receipt_any"] = (
+        anchor_frame.User_id.map(later_receipt).eq(True).astype(int)
+    )
+    anchor_frame["purchase_day_share"] = anchor_frame.purchase_days / anchor_frame.active_days
+    anchor_frame["log_active_days"] = np.log1p(anchor_frame.active_days)
+    anchor_frame["log_purchase_days"] = np.log1p(anchor_frame.purchase_days)
+    anchor_frame["log_purchases"] = np.log1p(anchor_frame.purchases)
+    anchor_frame["log_events"] = np.log1p(anchor_frame.events)
+    anchor_frame["log_span_days"] = np.log1p(anchor_frame.span_days)
+    anchor_frame["log_prior_receipts"] = np.log1p(
+        anchor_frame.User_id.map(pre_receipts).fillna(0)
+    )
+    covariates = [
+        "log_active_days", "log_purchase_days", "log_purchases", "log_events",
+        "log_span_days", "purchase_day_share", "log_prior_receipts",
+    ]
+    pairs, standardized = _propensity_pairs(anchor_frame, covariates)
+    purchase_match = _paired_binary_summary(anchor_frame, pairs, "post_purchase_any")
+    later_receipt_match = _paired_binary_summary(anchor_frame, pairs, "later_receipt_any")
+    p0 = purchase_match["matched_control_rate"]
+    p1 = purchase_match["treated_rate"]
+    canonical_proxy = maximum_entropy_types(p0, p1)
+    canonical_bounds = bounds(p0, p1)
+    treated_x, control_x = standardized[pairs[:, 0]], standardized[pairs[:, 1]]
+    pooled = np.sqrt((treated_x.var(axis=0, ddof=1) + control_x.var(axis=0, ddof=1)) / 2)
+    smd = np.divide(treated_x.mean(axis=0) - control_x.mean(axis=0), pooled,
+                    out=np.zeros_like(pooled), where=pooled > 0)
+
+    all_users = user_stats(daily)
+    final_day = daily.groupby("User_id", sort=False).tail(1).set_index("User_id")
+    penultimate_day = (daily.groupby("User_id", sort=False).tail(2)
+                       .groupby("User_id", sort=False).head(1).set_index("User_id").day)
+    all_users["final_purchase"] = final_day.purchases.gt(0)
+    all_users["final_coupon_purchase"] = final_day.coupon_purchases.gt(0)
+    all_users["prior_active_days"] = all_users.active_days - 1
+    all_users["prior_purchase_days"] = (
+        all_users.purchase_days - all_users.final_purchase.astype(int)
+    )
+    all_users["prior_span_days"] = (
+        penultimate_day.reindex(all_users.index) - all_users.first_day
+    ).dt.days.fillna(0)
+    all_users["p_lt"] = (
+        all_users.active_days.ge(10) & all_users.purchase_days.ge(3)
+        & all_users.span_days.ge(30)
+    )
+    all_users["established_p_lt_before_final"] = (
+        all_users.prior_active_days.ge(10) & all_users.prior_purchase_days.ge(3)
+        & all_users.prior_span_days.ge(30)
+    )
+    all_users["full_30d_followup"] = (
+        observation_end - all_users.last_day
+    ).dt.days.ge(30)
+    all_users["terminal_state"] = np.select(
+        [all_users.full_30d_followup & all_users.final_purchase,
+         all_users.full_30d_followup & ~all_users.final_purchase],
+        ["SATIATED_EXIT_CANDIDATE", "DISSATISFIED_EXIT_CANDIDATE"],
+        default="RIGHT_CENSORED",
+    )
+    receipt_link = receipts.merge(
+        all_users[["last_day"]], left_on="User_id", right_index=True, how="inner"
+    )
+    prior_14 = (receipt_link.loc[
+        receipt_link.day.between(receipt_link.last_day - pd.Timedelta(days=14),
+                                 receipt_link.last_day)
+    ].groupby("User_id").receipts.sum().gt(0))
+    after_final = (receipt_link.loc[receipt_link.day.gt(receipt_link.last_day)]
+                   .groupby("User_id").receipts.sum().gt(0))
+    all_users["receipt_14d_before_final"] = (
+        all_users.index.map(prior_14).fillna(False).astype(bool)
+    )
+    all_users["receipt_after_final"] = (
+        all_users.index.map(after_final).fillna(False).astype(bool)
+    )
+
+    established = all_users.loc[all_users.established_p_lt_before_final].copy()
+    terminal_rows = []
+    for state, part in established.groupby("terminal_state", sort=True):
+        terminal_rows.append({
+            "terminal_state": state, "users": int(len(part)),
+            "share": float(len(part) / len(established)),
+            "median_active_days": float(part.active_days.median()),
+            "median_purchase_days": float(part.purchase_days.median()),
+            "median_span_days": float(part.span_days.median()),
+            "final_coupon_purchase_rate": float(part.final_coupon_purchase.mean()),
+            "receipt_14d_before_final_rate": float(part.receipt_14d_before_final.mean()),
+            "receipt_after_final_rate": float(part.receipt_after_final.mean()),
+        })
+    terminal = pd.DataFrame(terminal_rows)
+    eligible_established = established.loc[established.full_30d_followup]
+    satiated = eligible_established.terminal_state.eq("SATIATED_EXIT_CANDIDATE")
+    eligible_all = all_users.loc[all_users.full_30d_followup]
+    all_satiated_share = float(
+        eligible_all.terminal_state.eq("SATIATED_EXIT_CANDIDATE").mean()
+    )
+    full_p_lt = all_users.loc[all_users.p_lt]
+
+    anchor_frame.to_parquet(TIANCHI_LONG_TERM_OUT / "anchor_p_lt_cohort.parquet", index=False)
+    established.reset_index().to_parquet(
+        TIANCHI_LONG_TERM_OUT / "established_long_term_terminal_users.parquet", index=False
+    )
+    terminal.to_csv(TIANCHI_LONG_TERM_OUT / "terminal_profiles.csv", index=False)
+    pd.DataFrame([{
+        "persona": "P_LT", "p0": p0, "p1": p1,
+        **canonical_proxy,
+    }]).to_csv(TIANCHI_LONG_TERM_OUT / "canonical_type_proxy.csv", index=False)
+    report = {
+        "dataset": "Tianchi O2O online",
+        "observation_window": [str(daily.day.min().date()), str(observation_end.date())],
+        "p_lt_definition": "at least 10 active days, 3 purchase days, and 30 observed days",
+        "anchor_coupon_proxy": {
+            "anchor_day": str(anchor.date()), "p_lt_users": int(len(anchor_frame)),
+            "treated_users": int(anchor_frame.treated.sum()), "matched_pairs": int(len(pairs)),
+            "max_abs_matched_smd": float(np.abs(smd).max()),
+            "purchase_1to14": purchase_match,
+            "later_receipt_1to14_diagnostic": later_receipt_match,
+            "canonical_types": {
+                "definition": {
+                    "sure_thing": "Y(0)=1, Y(1)=1",
+                    "persuadable": "Y(0)=0, Y(1)=1",
+                    "sleeping_dog": "Y(0)=1, Y(1)=0",
+                    "lost_cause": "Y(0)=0, Y(1)=0",
+                },
+                "maximum_entropy_independent_coupling": canonical_proxy,
+                "frechet_bounds": canonical_bounds,
+                "interpretation": "synthetic joint distribution preserving matched p0 and p1; not identified individual-type proportions",
+            },
+        },
+        "whole_log_p_lt_users": int(len(full_p_lt)),
+        "whole_log_p_lt_share": float(len(full_p_lt) / len(all_users)),
+        "established_before_final_users": int(len(established)),
+        "terminal_profiles": terminal_rows,
+        "established_with_full_followup": int(len(eligible_established)),
+        "satiated_exit_candidates": int(satiated.sum()),
+        "satiated_share_among_established_full_followup": float(satiated.mean()),
+        "satiated_share_among_all_full_followup": all_satiated_share,
+        "satiated_share_ratio_established_vs_all": float(satiated.mean() / all_satiated_share),
+        "terminal_cohort_canonical_types": (
+            "not estimated because terminal cohorts are defined by post-anchor purchase and return; "
+            "conditioning on them would be post-treatment selection"
+        ),
+        "limitations": [
+            "An active day is used as the Tianchi analogue of a retail session because within-day order and session boundaries are unavailable.",
+            "SATIATED_EXIT_CANDIDATE means final-day purchase followed by 30 observed days without click or purchase; satisfaction and permanent churn are not observed.",
+            "Anchor-day coupon receipt is observational; offer eligibility, failed delivery, and targeting rules are unavailable.",
+            "A receipt or coupon-linked purchase on the final day has unknown within-day ordering.",
+        ],
+    }
+    (TIANCHI_LONG_TERM_OUT / "summary.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+    figure_dir = ROOT / "img/uplift"
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.1))
+    axes[0].bar(["matched\nno receipt", "anchor-day\nreceipt"],
+                [purchase_match["matched_control_rate"] * 100,
+                 purchase_match["treated_rate"] * 100],
+                color=["#4e79a7", "#f28e2b"])
+    axes[0].set(ylabel="14-day purchase rate (%)",
+                title=f"P_LT anchor-day coupon proxy (n={len(pairs):,} pairs)")
+    values = np.array([satiated.mean(), 1 - satiated.mean()]) * 100
+    axes[1].bar(["satiated\nexit candidate", "dissatisfied\nexit candidate"],
+                values, color=["#59a14f", "#e15759"])
+    axes[1].set(ylabel="Share of fully observed P_LT users (%)",
+                title=f"Observed terminal proxy (n={len(eligible_established):,})", ylim=(0, 100))
+    for axis in axes:
+        axis.grid(axis="y", alpha=.2)
+        axis.spines[["top", "right"]].set_visible(False)
+    fig.suptitle("Tianchi long-term buyer and purchase-followed-by-nonreturn proxies", y=1.02)
+    fig.savefig(figure_dir / "tianchi_long_term_lifecycle.png", dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return report
 
 
 def coupon_overlap_band(distinct_coupon_count):
@@ -531,6 +1227,239 @@ def run_tianchi_persona_proxies():
               "quantiles": quantiles, "proxies": summary,
               "causal_caveat": "receipt is observational; post rates are not coupon uplift estimates"}
     (TIANCHI_PROXY_OUT / "summary.json").write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+    return result
+
+
+def run_tianchi_first_receipt_alignment():
+    """Match pre-first-receipt Tianchi behavior to fixed retail clusters."""
+    import matplotlib.pyplot as plt
+    from sklearn.preprocessing import RobustScaler
+
+    from analysis.persona.cluster import (
+        ALIGNMENT_FEATURES, _fixed_k4_membership, _selected_events,
+        _shared_behavior_features,
+    )
+
+    TIANCHI_FIRST_RECEIPT_OUT.mkdir(parents=True, exist_ok=True)
+
+    receipt_parts = []
+    for chunk in pd.read_csv(ONLINE, usecols=["User_id", "Action", "Date_received"],
+                             dtype={"User_id": "Int64", "Action": "Int8",
+                                    "Date_received": "string"}, chunksize=1_000_000):
+        chunk = chunk.loc[chunk.Action.eq(2) & chunk.User_id.notna()]
+        if chunk.empty:
+            continue
+        day = pd.to_datetime(chunk.Date_received, format="%Y%m%d", errors="coerce")
+        receipt_parts.append(pd.DataFrame({"user": chunk.User_id.astype("int64"), "day": day})
+                             .dropna().groupby("user").day.min())
+    first_receipt = pd.concat(receipt_parts).groupby(level=0).min()
+    anchors = first_receipt[first_receipt.between("2016-05-01", "2016-05-31")]
+    anchor_users = set(anchors.index)
+
+    behavior_parts, later_receipt_parts = [], []
+    for chunk in pd.read_csv(ONLINE, usecols=["User_id", "Action", "Date", "Date_received"],
+                             dtype={"User_id": "Int64", "Action": "Int8", "Date": "string",
+                                    "Date_received": "string"}, chunksize=1_000_000):
+        chunk = chunk.loc[chunk.User_id.isin(anchor_users) & chunk.Action.isin([0, 1, 2])].copy()
+        if chunk.empty:
+            continue
+        day = pd.to_datetime(chunk.Date, format="%Y%m%d", errors="coerce")
+        is_receipt = chunk.Action.eq(2)
+        day.loc[is_receipt] = pd.to_datetime(
+            chunk.loc[is_receipt, "Date_received"], format="%Y%m%d", errors="coerce"
+        )
+        delta = (day - chunk.User_id.map(anchors)).dt.days
+        behavior = chunk.Action.isin([0, 1]) & (delta.between(-28, -1) | delta.between(1, 28))
+        if behavior.any():
+            part = pd.DataFrame({
+                "user": chunk.loc[behavior, "User_id"].astype("int64"),
+                "at": day[behavior],
+                "action": chunk.loc[behavior, "Action"].map({0: "explore", 1: "purchase"}),
+                "period": np.where(delta[behavior].lt(0), "pre", "post"),
+            }).dropna()
+            behavior_parts.append(part)
+        later = is_receipt & delta.between(1, 28)
+        if later.any():
+            later_receipt_parts.append(chunk.loc[later].groupby("User_id").size())
+    behavior = pd.concat(behavior_parts, ignore_index=True)
+    later_receipts = (pd.concat(later_receipt_parts).groupby(level=0).sum()
+                      if later_receipt_parts else pd.Series(dtype=int))
+
+    counts = (behavior.groupby(["user", "period", "action"]).size()
+                      .unstack(["period", "action"], fill_value=0))
+    for period in ("pre", "post"):
+        for action in ("explore", "purchase"):
+            if (period, action) not in counts:
+                counts[(period, action)] = 0
+    counts = counts.sort_index(axis=1)
+    active_days = (behavior.assign(day=behavior["at"].dt.floor("D"))
+                           .drop_duplicates(["user", "period", "day"])
+                           .groupby(["user", "period"]).size().unstack(fill_value=0))
+    cohort = pd.DataFrame(index=anchors.index)
+    cohort.index.name = "user_id"
+    for period in ("pre", "post"):
+        cohort[f"{period}_click"] = counts[(period, "explore")].reindex(cohort.index, fill_value=0)
+        cohort[f"{period}_purchase"] = counts[(period, "purchase")].reindex(cohort.index, fill_value=0)
+        cohort[f"{period}_active_days"] = active_days.get(period, pd.Series(dtype=int)).reindex(
+            cohort.index, fill_value=0
+        )
+    cohort["later_receipts_28d"] = later_receipts.reindex(cohort.index, fill_value=0).astype(int)
+    cohort["anchor"] = anchors
+    cohort["pre_total"] = cohort.pre_click + cohort.pre_purchase
+    cohort["post_total"] = cohort.post_click + cohort.post_purchase
+    eligible = cohort.pre_total.ge(2)
+    cohort = cohort.loc[eligible].copy()
+
+    reference_features = {}
+    for source in ("cosmetics", "electronics"):
+        membership, _ = _fixed_k4_membership(source)
+        events = _selected_events(source, set(membership.user_id.astype("int64")))
+        events = (events.loc[events.action.isin(["view", "purchase"]),
+                             ["user_id", "at", "action"]]
+                        .rename(columns={"user_id": "user"}))
+        events["action"] = events.action.replace({"view": "explore"})
+        end = events.groupby("user").at.transform("max")
+        events = events.loc[events["at"].gt(end - pd.Timedelta(days=28))]
+        reference_features[source] = _shared_behavior_features(events, membership)
+
+    pre_events = behavior.loc[behavior.period.eq("pre") & behavior.user.isin(cohort.index),
+                              ["user", "at", "action"]]
+    post_events = behavior.loc[behavior.period.eq("post") & behavior.user.isin(cohort.index),
+                               ["user", "at", "action"]]
+    dummy = pd.DataFrame({"user_id": cohort.index, "cluster": 0})
+    pre_features = _shared_behavior_features(pre_events, dummy)
+    post_users = np.sort(post_events.user.unique())
+    post_features = _shared_behavior_features(
+        post_events, pd.DataFrame({"user_id": post_users, "cluster": 0})
+    ) if len(post_users) else pd.DataFrame()
+
+    reference = pd.concat([
+        frame.assign(dataset=source) for source, frame in reference_features.items()
+    ], ignore_index=True)
+    scaler = RobustScaler().fit(reference[list(ALIGNMENT_FEATURES)])
+    reference[list(ALIGNMENT_FEATURES)] = scaler.transform(
+        reference[list(ALIGNMENT_FEATURES)]
+    )
+    pre_scaled = scaler.transform(pre_features[list(ALIGNMENT_FEATURES)])
+    post_scaled = (scaler.transform(post_features[list(ALIGNMENT_FEATURES)])
+                   if len(post_features) else np.empty((0, len(ALIGNMENT_FEATURES))))
+
+    matches = pre_features[["user_id"]].copy()
+    matches["user_id"] = matches.user_id.astype("int64")
+    for source in ("cosmetics", "electronics"):
+        profiles = (reference.loc[reference.dataset.eq(source)]
+                     .groupby("cluster")[list(ALIGNMENT_FEATURES)].median().sort_index())
+        cluster_ids = profiles.index.to_numpy()
+        pre_cluster, similarity, margin = nearest_cluster_matches(
+            pre_scaled, profiles.to_numpy(), cluster_ids
+        )
+        matches[f"{source}_pre_cluster"] = pre_cluster
+        matches[f"{source}_similarity"] = similarity
+        matches[f"{source}_margin"] = margin
+        post_cluster = pd.Series("inactive", index=cohort.index, dtype=object)
+        if len(post_features):
+            assigned, _, _ = nearest_cluster_matches(post_scaled, profiles.to_numpy(), cluster_ids)
+            post_cluster.loc[post_features.user_id.astype("int64")] = assigned.astype(str)
+        matches[f"{source}_post_cluster"] = matches.user_id.map(post_cluster)
+
+    cohort = cohort.reset_index().merge(matches, on="user_id", how="inner", validate="one_to_one")
+    cohort.to_parquet(TIANCHI_FIRST_RECEIPT_OUT / "cohort.parquet", index=False)
+
+    summaries, transitions = {}, {}
+    for source in ("cosmetics", "electronics"):
+        cluster_col = f"{source}_pre_cluster"
+        post_col = f"{source}_post_cluster"
+        rows = []
+        for cluster, part in cohort.groupby(cluster_col, sort=True):
+            no_later = part.loc[part.later_receipts_28d.eq(0)]
+            rows.append({
+                "cluster": int(cluster), "users": int(len(part)),
+                "share": float(len(part) / len(cohort)),
+                "median_similarity": float(part[f"{source}_similarity"].median()),
+                "median_margin": float(part[f"{source}_margin"].median()),
+                "pre_click_mean": float(part.pre_click.mean()),
+                "post_click_mean": float(part.post_click.mean()),
+                "pre_purchase_any": float(part.pre_purchase.gt(0).mean()),
+                "post_purchase_any": float(part.post_purchase.gt(0).mean()),
+                "purchase_any_change": float(
+                    part.post_purchase.gt(0).mean() - part.pre_purchase.gt(0).mean()
+                ),
+                "post_inactive": float(part.post_total.eq(0).mean()),
+                "later_receipt_rate": float(part.later_receipts_28d.gt(0).mean()),
+                "no_later_receipt_users": int(len(no_later)),
+                "no_later_receipt_purchase_change": float(
+                    no_later.post_purchase.gt(0).mean() - no_later.pre_purchase.gt(0).mean()
+                ) if len(no_later) else None,
+            })
+        summaries[source] = rows
+        table = pd.crosstab(cohort[cluster_col], cohort[post_col], normalize="index")
+        transitions[source] = {
+            str(index): {str(column): float(value) for column, value in row.items()}
+            for index, row in table.iterrows()
+        }
+
+    cross_reference = pd.crosstab(
+        cohort.cosmetics_pre_cluster, cohort.electronics_pre_cluster, normalize="index"
+    )
+    result = {
+        "dataset": "Tianchi O2O online",
+        "anchor": "first observed coupon receipt, 2016-05-01 through 2016-05-31",
+        "windows": "days -28..-1 and +1..+28; anchor day excluded because within-day order is unknown",
+        "eligibility": "at least two observed click/purchase events before first receipt",
+        "first_receipt_users": int(len(anchors)),
+        "matched_users": int(len(cohort)),
+        "matching_features": list(ALIGNMENT_FEATURES),
+        "reference_window": "trailing 28 days of each fixed Cosmetics/Electronics K=4 member",
+        "overall_change": {
+            "pre_click_mean": float(cohort.pre_click.mean()),
+            "post_click_mean": float(cohort.post_click.mean()),
+            "pre_purchase_mean": float(cohort.pre_purchase.mean()),
+            "post_purchase_mean": float(cohort.post_purchase.mean()),
+            "pre_purchase_any": float(cohort.pre_purchase.gt(0).mean()),
+            "post_purchase_any": float(cohort.post_purchase.gt(0).mean()),
+            "post_inactive": float(cohort.post_total.eq(0).mean()),
+            "later_receipt_rate": float(cohort.later_receipts_28d.gt(0).mean()),
+        },
+        "cross_reference_match": {
+            str(index): {str(column): float(value) for column, value in row.items()}
+            for index, row in cross_reference.iterrows()
+        },
+        "summaries": summaries,
+        "transitions": transitions,
+        "limitations": [
+            "Tianchi click is treated as the analogue of retail view; cart and removal are unavailable.",
+            "The first observed receipt need not be the user's lifetime first coupon receipt.",
+            "Pre/post changes are observational and can reflect targeting, seasonality, regression to the mean, or later receipts.",
+            "Cosmetics and Electronics do not observe coupon exposure, so their clusters are behavioral references rather than untreated controls.",
+        ],
+    }
+    (TIANCHI_FIRST_RECEIPT_OUT / "summary.json").write_text(
+        json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    )
+
+    fig, axes = plt.subplots(2, 2, figsize=(10.5, 7.2), constrained_layout=True)
+    for column, source in enumerate(("cosmetics", "electronics")):
+        rows = summaries[source]
+        x = np.arange(len(rows))
+        labels = [f"{source[0].upper()}{row['cluster']}" for row in rows]
+        axes[0, column].bar(x, [100 * row["share"] for row in rows], color="#4C78A8")
+        axes[0, column].set(xticks=x, xticklabels=labels, ylabel="Matched users (%)",
+                            title=f"Pre-receipt match to {source.title()} K=4")
+        axes[1, column].bar(x - .18, [100 * row["pre_purchase_any"] for row in rows], .36,
+                            label="pre", color="#9ECAE1")
+        axes[1, column].bar(x + .18, [100 * row["post_purchase_any"] for row in rows], .36,
+                            label="post", color="#F28E2B")
+        axes[1, column].set(xticks=x, xticklabels=labels, ylabel="Users with purchase record (%)",
+                            title="Observed change around first receipt")
+        for ax in axes[:, column]:
+            ax.grid(axis="y", alpha=.2)
+            ax.spines[["top", "right"]].set_visible(False)
+    axes[1, 0].legend(frameon=False)
+    figure_dir = ROOT / "img/uplift"
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(figure_dir / "tianchi_first_receipt_cluster_alignment.png",
+                dpi=180, bbox_inches="tight")
+    plt.close(fig)
     return result
 
 
@@ -1028,11 +1957,15 @@ def run_paired_windows():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("task", choices=("reactivation", "persistence", "long-term", "persona", "persona-proxies", "persona-uplift", "single-receipt-duration", "coupon-overlap", "cumulative-coupons", "uplift-audit", "paired"))
+    parser.add_argument("task", choices=("reactivation", "persistence", "long-term", "persona", "persona-proxies", "persona-uplift", "first-receipt-alignment", "persona-coupon-matching", "tianchi-long-term-lifecycle", "canonical-proxies", "single-receipt-duration", "coupon-overlap", "cumulative-coupons", "uplift-audit", "paired"))
     args = parser.parse_args()
     {"reactivation": run_reactivation, "persistence": run_persistence,
      "long-term": run_long_term, "persona": run_persona_patterns, "persona-proxies": run_tianchi_persona_proxies,
      "persona-uplift": run_tianchi_persona_uplift,
+     "first-receipt-alignment": run_tianchi_first_receipt_alignment,
+     "persona-coupon-matching": run_tianchi_persona_coupon_matching,
+     "tianchi-long-term-lifecycle": run_tianchi_long_term_lifecycle,
+     "canonical-proxies": run_tianchi_canonical_proxy_estimation,
      "single-receipt-duration": run_tianchi_single_receipt_duration,
      "coupon-overlap": run_tianchi_coupon_overlap,
      "cumulative-coupons": run_tianchi_cumulative_coupon_history,

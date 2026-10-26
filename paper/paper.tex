@@ -1,31 +1,27 @@
 \documentclass[9pt,twocolumn]{extarticle}
-\usepackage[a4paper,top=30mm,bottom=20mm,left=10mm,right=10mm,columnsep=12.7mm]{geometry}
-\usepackage{kotex}
-\usepackage{fontspec}
+\usepackage[a4paper,top=24mm,bottom=18mm,left=12mm,right=12mm,columnsep=7mm]{geometry}
+\usepackage{kotex,fontspec,amsmath,amssymb,booktabs,graphicx,xcolor}
 \setmainfont{Times New Roman}
 \setmainhangulfont[AutoFakeSlant=0.2]{HCR Batang}
 \setsansfont{Times New Roman}
 \setsanshangulfont[AutoFakeSlant=0.2]{HCR Batang}
-\usepackage{amsmath,amssymb,booktabs,graphicx,xcolor}
 \usepackage[font=small,labelsep=space]{caption}
-\usepackage{titlesec}
+\usepackage{titlesec,tikz,hyperref,placeins}
 \usepackage[ruled,linesnumbered]{algorithm2e}
-\usepackage{placeins}
-\usepackage{tikz}
 \usetikzlibrary{arrows.meta,positioning,fit,calc,shapes.multipart}
-\usepackage[hidelinks]{hyperref}
+\hypersetup{hidelinks}
 \graphicspath{{./}{../}}
 \setlength{\parindent}{1em}
 \setlength{\parskip}{0pt}
-\setlength{\emergencystretch}{1.5em}
-\renewcommand{\baselinestretch}{1.00}
+\setlength{\emergencystretch}{1em}
+\renewcommand{\baselinestretch}{0.98}
 \renewcommand{\refname}{참고문헌}
 \renewcommand{\figurename}{그림}
 \renewcommand{\tablename}{표}
-\titleformat{\section}{\bfseries\fontsize{10.5}{12}\selectfont}{\thesection.}{0.5em}{}
-\titleformat{\subsection}{\bfseries\fontsize{9.5}{11}\selectfont}{\thesubsection}{0.5em}{}
-\titlespacing*{\section}{0pt}{1.0ex plus .2ex}{0.5ex}
-\titlespacing*{\subsection}{0pt}{0.8ex plus .2ex}{0.35ex}
+\titleformat{\section}{\bfseries\fontsize{10.5}{12}\selectfont}{\thesection.}{0.45em}{}
+\titleformat{\subsection}{\bfseries\fontsize{9.5}{11}\selectfont}{\thesubsection}{0.45em}{}
+\titlespacing*{\section}{0pt}{0.8ex}{0.35ex}
+\titlespacing*{\subsection}{0pt}{0.6ex}{0.25ex}
 \SetAlFnt{\normalsize}
 \SetAlCapFnt{\normalsize}
 \SetAlCapNameFnt{\normalsize\bfseries}
@@ -36,325 +32,263 @@
 \DontPrintSemicolon
 
 \begin{document}
+\raggedbottom
 \twocolumn[
 \begin{@twocolumnfalse}
 \begin{center}
-{\fontsize{16}{19}\selectfont\bfseries 관측 행동 페르소나와 가정 기반 Uplift를 결합한\\
-전자상거래 쿠폰 정책 시뮬레이터\par}
-\vspace{3mm}
-{\fontsize{14}{17}\selectfont\bfseries An E-Commerce Coupon Policy Simulator Combining Observed\\
-Behavioral Personas with Assumption-Based Uplift\par}
+{\fontsize{15.5}{18}\selectfont\bfseries 교차 도메인 행동표현과 합성 Uplift를 결합한\\전자상거래 쿠폰 정책 시뮬레이터\par}
+\vspace{2mm}
+{\fontsize{13}{15}\selectfont\bfseries An E-Commerce Coupon Policy Simulator with Cross-Domain\\Behavior Representations and Synthetic Uplift\par}
 \end{center}
-\vspace{4mm}
-\begin{center}
-{\bfseries 요\hspace{1em}약}
-\end{center}
+\vspace{2.5mm}
+\begin{center}{\bfseries 요\hspace{1em}약}\end{center}
 \vspace{-1mm}
-{\fontsize{9}{11}\selectfont
-전자상거래의 쿠폰 정책은 즉시 구매뿐 아니라 재방문, 반복 노출 및 이탈 상태를
-변화시키므로 단일 시점 구매예측만으로 평가하기 어렵다. 실제 서비스의 장기 온라인
-탐색은 쿠폰비용과 사용자 피로를 유발하며, 공개 로그에서는 동일 사용자의 처치 및
-비처치 잠재결과를 동시에 관측할 수 없다. 이에 본 연구는 관측 행동과 비식별
-개입가정을 분리한 정책 실험용 사용자 시뮬레이터를 제안한다. REES46 Cosmetics
-Shop 로그에서 masked bidirectional-GRU로 48차원 사용자 표현을 학습하고, 행동
-빈도와 세션 내 전이를 이용해 페르소나와 lifecycle을 구성하였다. 2차 상태특징을
-사용하는 maximum-entropy 선택모형과 이산 세션 간격 모형을 결합한 무쿠폰
-생성기의 행동비율 RMSE는 0.0540이었다. Tianchi O2O의 비무작위 쿠폰 수령 차이는
-인과효과 대신 합성환경의 보정 모멘트로 사용하였다. 독립 합성 표본의 가중 14일
-반응 모멘트는 $\Delta_{\mathrm{pop}}^*=12.62\%p$와
-$\widehat\Delta_{\mathrm{pop}}=12.55\%p$로 대응하였다. 주 1회 쿠폰 환경에서
-1,000명, 13주 학습 후 별도 5,000명, 52주를 평가한 결과 discrete SAC는 사용자당
-20.90회의 쿠폰으로 순이익 30,893.46을 기록하였다. 결과는 단일 seed와 가정 기반
-uplift에 조건부이며 실제 인과효과의 증거로 해석하지 않는다.
-\par\vspace{1mm}
+{\fontsize{8.8}{10.5}\selectfont
+실서비스에서 쿠폰 정책을 장기간 탐색하면 직접 비용과 사용자 피로가 발생하지만,
+공개 전자상거래 로그 하나만으로는 무처치 행동 시퀀스와 개인별 쿠폰 반응을 함께
+학습하기 어렵다. 본 연구는 서로 다른 공개 로그의 역할을 분리한 순차 정책
+시뮬레이터를 제안한다. Cosmetics 행동 로그에서 masked bidirectional-GRU 표현과
+행동 페르소나를 학습하고, 사용자별 maximum-entropy 효용계수, lifecycle 및 이산
+세션간격을 결합한다. Electronics와 Tianchi의 공통 과거행동 특징은 Cosmetics
+페르소나에 자동 정렬하며 각 도메인의 이질성은 대각 Gaussian mixture로 보존한다.
+Tianchi 쿠폰 수령은 비무작위이므로 인과효과로 해석하지 않고, 사전행동 대리군 내
+매칭으로 얻은 구매율을 네 canonical response type의 합성 보정 모멘트로만 사용한다.
+48차원 사용자 latent에서 canonical type 확률을 생성하는 행렬은 $L_1$--$L_2$
+정규화로 학습되며, 쿠폰효과는 반복 수령과 시간 감쇠를 거쳐 행동 및 복귀효용에
+결합된다. 세 도메인별로 1,000명·13주 온라인 학습 후 독립 5,000명·52주를 평가하고,
+발송비용과 첫 구매 할인비용의 두 경제조건에서 여섯 정책을 비교한다. 본 결과는
+관측 행동, 전이 가능한 기술통계, 비식별 개입가정을 구분하는 재현 가능한 정책
+실험환경을 제공한다.
+\par\vspace{0.6mm}
 \noindent\textbf{주제어:} 사용자 시뮬레이션, 행동 페르소나, Maximum Entropy IRL,
-Uplift Modeling, Contextual Bandit, 강화학습\par}
-\vspace{4mm}
+Uplift Modeling, Gaussian Mixture, 강화학습\par}
+\vspace{2.5mm}
 \end{@twocolumnfalse}
 ]
 
 \section{서론}
-쿠폰 정책은 구매뿐 아니라 재방문과 이탈을 바꾸지만 실제 사용자 대상 장기 탐색에는
-비용과 피로가 따른다. 또한 행동 로그에는 처치 반사실이 없고 비무작위 쿠폰 수령 차이는
-선택편향을 포함한다. 이에 관측 행동과 가정 기반 개입효과를 분리한 정책 실험용
-시뮬레이터를 제안한다.
+쿠폰 발송은 현재 구매뿐 아니라 다음 방문시점과 이탈확률을 바꿀 수 있다. 실제
+사용자에게 여러 정책을 장기간 적용하는 방법은 비용이 크며, 오프라인 로그에는
+선택되지 않은 행동의 결과가 없다. 행동 로그와 쿠폰 로그가 서로 다른 서비스에서
+수집되었다면 사용자 식별자와 행동공간도 일치하지 않는다.
 
-행동 토큰을 복원하는 양방향 GRU로 사용자 표현을 학습하고, persona 조건부
-maximum-entropy 선택모형과 세션 간격 모형으로 무처치 행동을 생성한다. Tianchi의
-관측 차이는 canonical type과 쿠폰 감쇠항의 보정 모멘트로만 사용하며, 합성환경에서
-bandit과 deep RL의 학습비용 및 장기 순이익을 비교한다.
+본 연구의 핵심은 이를 하나의 인과추정 문제로 포장하지 않고 세 층으로 분리하는
+것이다. 첫째, 관측 시퀀스에서 무쿠폰 행동과 세션 복귀를 학습한다. 둘째, 공통
+과거행동 특징으로 도메인별 집단을 정렬한다. 셋째, Tianchi의 비무작위 수령 차이는
+공개된 합성 uplift 가정으로만 주입한다. 그 결과 쿠폰항을 제거하면 무쿠폰 생성기로
+정확히 환원되는 모듈식 환경을 얻는다.
 
-순차 추천~\cite{sun2019}과 uplift modeling~\cite{devriendt2018}은 각각 행동 예측과
-단일 결과의 증분 반응에 초점을 둔다. RecSim~\cite{ie2019}, RecoGym~\cite{rohde2018},
-Virtual-Taobao~\cite{shi2019}와 달리 본 연구는 공개 데이터의 행동 생성과 쿠폰 반응을
-분리하며, 쿠폰 모듈 제거 시 무처치 생성기로 환원된다.
+순차 추천~\cite{sun2019}은 행동표현에, uplift modeling~\cite{devriendt2018}은
+증분반응에 집중한다. RecSim~\cite{ie2019}, RecoGym~\cite{rohde2018},
+Virtual-Taobao~\cite{shi2019}는 정책평가용 사용자 환경을 제공한다. 본 연구는 세
+공개 로그에서 공통 행동집단을 자동 정렬하고, 사용자 효용의 연속 이질성, 세션
+간격, lifecycle, 비식별 쿠폰반응을 하나의 감사 가능한 파이프라인으로 연결한다.
 
-\section{데이터}
-주 행동 데이터는 REES46 Cosmetics Shop의 2019년 10월부터 2020년 2월까지 5개
-CSV, 총 20,692,840행이다~\cite{rees46}. \texttt{user\_id mod 100=0}인 고정 약
-1\% 표본 216,093행에서 최대 12,000명의 사용자 시퀀스를 구성하였다. 이벤트는
-\texttt{view}, \texttt{cart}, \texttt{remove\_from\_cart}, \texttt{purchase}이며
-명시적인 세션 ID를 제공한다. Electronics는 제거 행동이 없어 보조 분석에만 사용하였다.
+\section{데이터와 대리군}
+Cosmetics와 Electronics는 REES46 행동 로그~\cite{rees46}, 쿠폰 로그는 Alibaba
+Tianchi O2O~\cite{tianchi}를 사용한다. Cosmetics의 행동은 \texttt{view},
+\texttt{cart}, \texttt{remove}, \texttt{purchase}이며 명시적 세션이 있다.
+Electronics에는 \texttt{remove}가 없고, Tianchi online 로그는 날짜별
+\texttt{click}, \texttt{purchase}, 쿠폰 수령을 제공하되 일중 순서는 없다. 쿠폰
+수령은 사용자 행동토큰이 아니라 정책 개입으로 분리한다.
 
-쿠폰 반응 참고 자료는 Tianchi O2O 로그다~\cite{tianchi}. 2016년 5월 15일을 기준일로
-두고, 기준일 수령 기록과 이후 14일 구매 기록을 비교하였다. 대리군은 기준일 이전
-14일의 클릭과 구매만으로 정의하였다. 다섯 기준일의 placebo 구매율 차이가
-6.85--8.87\%p이고 수령군의 후속 쿠폰 수령률도 12.11--31.31\%p 높아, 관측 차이를
-인과적 CATE로 사용하지 않았다.
+교차 도메인 정렬에는 구매비중, 총 행동량, 활동일, 일별 행동량, 구매일 비중,
+중앙간격, 최초·최종 구매위치, 탐색$\leftrightarrow$구매 전이와 지속성 등 13개
+사전행동 특징만 사용한다. pooled robust scaling 후 각 사용자를 Cosmetics $K=4$
+centroid에 최근접 배정한다. Electronics에서 대응이 불명확한 C1은 제외하고 C0,
+C2, C3을 P0, P2, P3의 대리군으로 사용한다. 각 대리군 안에서 과거 구매여부와
+과거 수령횟수를 exact match하고 propensity-logit 0.2 표준편차 caliper의 1:1
+비복원 매칭을 적용한다. 결과 이후 정보는 배정에 사용하지 않는다.
 
 \section{제안 방법}
-\subsection{Masked bidirectional-GRU 표현}
-각 사용자의 행동 사이에 세션 경계 토큰을 삽입하고 앞 64개 토큰을 유지한다. 전체
-유효 위치의 15\%를 마스킹하고 원래 토큰을 복원하도록 학습한다. 목적함수는
-\begin{equation}
-\mathcal{L}_{\mathrm{mask}}
-=-\sum_{i\in\mathcal{M}}\log p_\psi(x_i\mid x_{\setminus\mathcal{M}})
-\end{equation}
-이다. 토큰 임베딩은 16차원, 양방향 GRU의 방향별 hidden size는 24이며, 양방향
-마지막 상태를 연결한 48차원 벡터를 사용자 표현으로 사용한다. 실제 구현의 학습 및
-표현 추출 과정은 알고리즘~\ref{alg:gru} 및 그림~\ref{fig:gru}에 제시한다.
+\subsection{행동표현과 페르소나}
+행동 사이에 세션경계 토큰을 넣고 15\%를 마스킹하여 원래 토큰을 복원한다.
+16차원 토큰 임베딩과 방향별 hidden size 24의 양방향 GRU에서 48차원 사용자
+표현 $z_u$를 얻는다. 저장된 $z_u$에 $K=4$ K-means를 적용하고, 얕은 조회군은
+NEW와 CHURNING의 혼합상태로 분리하여 성숙 home persona를 P0, P2, P3으로 둔다.
 
-\begin{algorithm}[!h]
-\caption{Masked GRU embedding extraction}
+\begin{algorithm}[t]
+\caption{Masked GRU user representation}
 \label{alg:gru}
-\KwIn{$D=\{x_u\}$, masking rate $q$}
-\KwOut{$Z=\{z_u\}$}
-\ForEach{$B\subset D$}{
-  $\widetilde B\leftarrow\operatorname{Mask}(B,q)$\;
-  $H_B\leftarrow\operatorname{BiGRU}(E(\widetilde B))$\;
-  $\psi\leftarrow\arg\min_\psi\mathcal L_{\mathrm{mask}}(B,H_B)$\;
+\KwIn{chronological action sequences $D$}
+\KwOut{stored user embeddings $Z$}
+insert SESSION tokens into every $x_u\in D$\;
+\ForEach{training batch $B$}{
+  $\widetilde B\leftarrow\operatorname{Mask}(B,0.15)$\;
+  $H\leftarrow\operatorname{BiGRU}(E(\widetilde B))$\;
+  update $\psi$ by masked-token reconstruction\;
 }
 $z_u\leftarrow\operatorname{Std}([\overrightarrow h_u;\overleftarrow h_u])$\;
 \end{algorithm}
 
-\subsection{행동 페르소나}
-마스킹 GRU에서 얻은 48차원 사용자 임베딩에 $K=4$ K-means를 적용하여 P0--P3
-집단을 구성하였다. 각 집단의 전체 관측 이벤트를 분모로 한 상대 이벤트 빈도는
-그림~\ref{fig:eventmix}에 제시한다.
-
-\begin{figure*}[!t]
+\begin{figure*}[t]
 \centering
-\resizebox{0.90\textwidth}{!}{\input{paper/figures/masked_gru_architecture.tex}}
-\caption{제안 사용자 모델의 두 학습 단계. (a) 행동 토큰을 마스킹하여 복원하는
-양방향 GRU에서 48차원 사용자 표현을 추출한다. (b) 78차원 2차 상태특징에
-사용자--행동별 reward 계수를 적용해 다섯 행동의 선형 utility를 계산하고,
-softmax 행동확률을 막대로 나타낸다. 기본 상태는 세션 위치와 경과시간,
-직전 이벤트 간격, 과거 행동 횟수 및 직전 행동이며 제곱항과 2변수 교차항을 포함한다.}
-\label{fig:gru}
+\resizebox{0.84\textwidth}{!}{\input{paper/figures/masked_gru_architecture.tex}}
+\caption{사용자 모델의 두 단계. (a) 마스킹된 행동을 복원해 사용자 표현을 얻는다.
+(b) 과거정보 특징에서 다섯 행동효용을 계산하고 다항 logit으로 확률화한다.}
+\label{fig:architecture}
 \end{figure*}
 
+\subsection{사용자별 효용과 세션간격}
+행동 직전의 12개 특징은 절편, 세션 위치·경과시간·직전 이벤트 간격, 네 행동의
+누적횟수와 직전행동 one-hot이다. 사용자 $u$의 즉시 효용과 선택확률은
+\begin{equation}
+r_u(s,a)=\theta_{u,a}^{\top}\phi(s),\qquad
+\pi_u(a\mid s)=\frac{e^{r_u(s,a)}}{\sum_b e^{r_u(s,b)}}.
+\end{equation}
+Temperature는 1이며 각 특징에서 행동계수 합을 0으로 제약한다. persona prior를
+먼저 학습하고 각 centroid 최근접 사용자 20명의 계수를 MAP으로 추정한다. 식별되는
+네 행동$\times$12개 계수벡터에는 3성분 대각 GMM을 적합한다. 제곱·2변수 교차항을
+포함한 78차원 모형은 pooled ablation에서 NLL을 0.648에서 0.600으로 낮췄으나,
+개인별 표본에서의 안정성을 위해 생성기의 사용자 GMM은 12개 기본특징을 사용한다.
+
+\begin{algorithm}[t]
+\caption{Persona-conditioned MaxEnt IRL}
+\label{alg:irl}
+\KwIn{state--action decisions $D$, persona $c_u$}
+\KwOut{coefficient mixture $q(\theta)$, gap model $q(\tau)$}
+fit persona prior $\theta_c$ by multinomial MaxEnt\;
+\ForEach{representative user $u$}{
+  $\theta_u\leftarrow\operatorname{MAP}(D_u\mid\theta_{c_u})$\;
+}
+$q(\theta)\leftarrow\operatorname{GMM}(\{\theta_u\})$\;
+fit $q(\tau\mid s_{\rm end})$ on eight gap tokens\;
+\end{algorithm}
+
+세션 종료 후 $\tau$는 0--1시간, 1--6시간, 6--24시간, 1--3일, 3--7일,
+7--14일, 14--30일, NO\_RETURN\_30D 중 하나다. engagement, friction,
+satiation, inactivity momentum, gap acceleration, habit strength를 과거 세션으로
+재귀 갱신한다. 첫 간격은 학습평균 51.33시간으로 초기화하되 결측 지시자를 유지한다.
+NEW$\rightarrow$home persona$\leftrightarrow$CHURNING 전이와 구매 후 30일
+비복귀 종료를 별도로 모델링한다.
+
+\subsection{도메인 GMM과 합성 uplift}
+세 도메인의 13개 공통특징에 BIC와 최소성분크기 조건을 적용해 각각 4, 5, 6성분
+대각 GMM을 학습한다. 먼저 도메인 GMM 성분을 뽑고 성분별 P0/P2/P3 조성에서
+home persona를 뽑은 뒤 해당 persona의 효용계수를 샘플링한다. Electronics의
+미관측 remove와 Tianchi의 미관측 cart/remove는 0 관측값으로 학습하지 않고
+해당 도메인 행동공간에서 비활성화한다. 서로 다른 세션 단위의 중앙간격 비율은
+제곱근 수축 후 $[0.5,4]$로 제한하여 시간측정 단위 자체가 행동차이로 과대전이되는
+것을 막는다.
+
+매칭된 비수령·수령 구매율을 $p_{c,0},p_{c,1}$라 하면 네 canonical type의 합성
+비율은
+\begin{equation}
+\pi_c=(p_{c,0}p_{c,1},(1-p_{c,0})p_{c,1},
+p_{c,0}(1-p_{c,1}),(1-p_{c,0})(1-p_{c,1})).
+\end{equation}
+순서는 sure thing, persuadable, sleeping dog, lost cause다. 이는 주변확률을
+보존하는 최대엔트로피 독립결합이며 개인 유형의 식별값이 아니다. P0/P2/P3/P\_LT의
+비율(\%)은 각각 $(2.82,19.50,9.82,67.85)$,
+$(4.69,21.98,12.89,60.44)$, $(2.72,19.54,9.50,68.25)$,
+$(10.49,23.86,20.05,45.60)$이다.
+
+48차원 $z_u$와 절편에서 네 logit을 만드는 행렬 $W$를 $L_1=0.001$,
+$L_2=0.01$로 학습하고 $c_u\sim\operatorname{Cat}(\operatorname{softmax}([1;z_u]^TW))$
+로 샘플링한다. P\_LT에는 별도 logit offset을 학습한다. Persuadable과 sleeping
+dog에 서로 반대 부호의 구매·복귀 offset을 주고, 반복 수령 노출은
+\begin{equation}
+E_t=\sqrt{\sum_{r<t}\left[\max\left(0,1-\lfloor(t-r)/7\rfloor/5\right)\right]^2}
+\end{equation}
+로 6주 안에 단조 감소시킨다. 무쿠폰 행동모형은 동결하고 $W$와 persona별
+강도만 보정하므로 이는 continual learning이 아니라 sequential calibration이다.
+
+\newpage
 \begin{figure}[t]
 \centering
-\includegraphics[width=\columnwidth]{img/analysis/cosmetics_k4_event_frequency.png}
-\caption{$K=4$ 사용자 임베딩 군집 P0--P3의 군집 내 이벤트 빈도(\%). 점은 관측값이고
-곡선은 네 행동 범주 사이를 PCHIP으로 연결한 시각적 보간이다.}
-\label{fig:eventmix}
+\includegraphics[width=0.98\columnwidth]{img/analysis/domain_transfer_and_canonical.png}
+\caption{(a) 공통 행동공간에서 전이된 도메인별 home-persona 조성 및 선택된 GMM
+성분 수. (b) Tianchi 매칭 주변확률을 보존하는 canonical-type 합성분포.}
+\label{fig:transfer}
 \end{figure}
+\FloatBarrier
 
-\subsection{Maximum-entropy 행동과 세션 간격}
-세션 내 선택은 \texttt{view}, \texttt{cart}, \texttt{remove}, \texttt{purchase},
-\texttt{end}의 다섯 행동이다. 상태에는 세션 위치와 경과시간, 직전 이벤트 간격,
-과거 행동 횟수와 직전 행동을 사용한다. 11개 비절편 특징의 선형항, 제곱항 및 모든
-2변수 교차항을 포함하여 78차원 특징 $\phi^{(2)}(s)$를 구성한다. 사용자 $u$의
-즉시 보상과 선택확률은
-\begin{align}
-r_u(s,a)&=\theta_{u,a}^{\top}\phi^{(2)}(s),\\
-\pi_u(a\mid s)&=\frac{\exp r_u(s,a)}{\sum_{a'}\exp r_u(s,a')}
-\end{align}
-이다. Temperature는 1로 고정하고 각 특징에서 다섯 행동 계수의 합을 0으로 제약한다.
-대표 사용자 계수에는 3성분 대각 GMM을 적합하며, 모집단 혼합비는 P0 14.70\%,
-P2 18.41\%, P3 66.89\%로 보정한다. 이는 장기 occupancy를 일치시키는 완전한
-trajectory IRL이 아니라 상태조건부 maximum-entropy 선택모형이다~\cite{ziebart2008}.
+\clearpage
+\begin{algorithm}[t]
+\caption{Sequential uplift calibration}
+\label{alg:uplift}
+\KwIn{frozen generator $G$, latent $Z$, targets $\pi^*,\Delta^*$}
+\KwOut{canonical map $W^*$, uplift strength $\lambda^*$}
+$W^*\leftarrow\arg\min_W\|\mathbb E_Z[\operatorname{softmax}([1;Z]^TW)]-\pi^*\|$\;
+\ForEach{calibration iteration $k$}{
+  $\widehat\Delta^{(k)}\leftarrow\operatorname{PairedRollout}(G,W^*,\lambda^{(k)})$\;
+  update $\lambda^{(k)}$ toward $\Delta^*$\;
+}
+select the minimum-error iterate on independent users\;
+\end{algorithm}
 
-\noindent\begin{minipage}{\columnwidth}
-\vspace{2pt}\hrule\vspace{2pt}
-\noindent\textbf{Algorithm 2: Persona-conditioned maximum-entropy IRL}\par
-\vspace{2pt}\hrule\vspace{3pt}
-\noindent\textbf{Input:} $D$, $\{c_u\}$\par
-\noindent\textbf{Output:} $q(\theta)$, $q(\tau\mid s_{\mathrm{end}})$\par
-\begin{tabular}{@{}r@{\hspace{0.6em}}l@{}}
-1 & $X\leftarrow\phi^{(2)}(D)$\\
-2 & \textbf{for each} persona $c$ \textbf{do}\\
-3 & \quad $\theta_c\leftarrow\arg\min_\theta
-      \mathcal L_{\mathrm{MaxEnt}}(X_c,\theta)$\\
-4 & \quad $\theta_u\leftarrow\operatorname{MAP}(D_u\mid\theta_c)$\\
-5 & \textbf{end for}\\
-6 & $q(\theta)\leftarrow\operatorname{GMM}(\{\theta_u\})$\\
-7 & $q(\tau\mid s_{\mathrm{end}})\leftarrow\operatorname{MaxEntGap}(D)$\\
-\end{tabular}
-\vspace{2pt}\hrule
-\end{minipage}
+\section{실험}
+합성 패널은 도메인별 1,000명·13주, 총 13,000 user-week이며 50:50 무작위
+쿠폰행동과 8개 gap-token 횟수를 저장한다. 정책은 같은 규모에서 온라인 학습하고
+독립 seed의 5,000명·52주에서 고정 평가한다. 관측상태는 persona, lifecycle,
+최근 7/30일 행동, 마지막 세션·구매 이후 시간, 쿠폰노출과 발송가능 여부의 19개
+과거정보다. Canonical type과 미래결과는 agent에서 숨긴다. UCB, TS, LinUCB,
+LinTS~\cite{li2010,agrawal2013}, PPO~\cite{schulman2017}, discrete SAC~\cite{haarnoja2018}를
+같은 사용자 seed로 비교한다.
 
-\texttt{end} 이후 간격은 0--1시간, 1--6시간, 6--24시간, 1--3일, 3--7일,
-7--14일, 14--30일, \texttt{NO\_RETURN\_30D}의 여덟 토큰으로 샘플링한다. 첫 세션의
-직전 간격은 학습 평균 51.33시간으로 초기화하되 결측 여부를 별도 지시자로 유지한다.
-내부상태 engagement, friction, satiation, inactivity momentum, gap acceleration,
-habit strength는 과거 세션으로 재귀 갱신되어 행동 효용과 복귀 간격을 조절한다.
-NEW, home persona, CHURNING 및 두 종료상태의 전이는 그림~\ref{fig:lifecycle}과 같다.
-
-\subsection{합성 uplift 모듈}
-\noindent\begin{minipage}{\columnwidth}
-\vspace{2pt}\hrule\vspace{2pt}
-\noindent\textbf{Algorithm 3: Sequential uplift calibration}\par
-\vspace{2pt}\hrule\vspace{3pt}
-\noindent\textbf{Input:} $G$, $Z$, $\{\pi_c^{\mathrm{can}},\Delta_c^*\}_{c\in\mathcal C}$\par
-\noindent\textbf{Output:} $W^*$, $\lambda^*$\par
-\begin{tabular}{@{}r@{\hspace{0.6em}}l@{}}
-1 & $G\leftarrow\operatorname{freeze}(G)$\\
-2 & $W^*\leftarrow\operatorname{FitCanonical}(Z,\pi^{\mathrm{can}})$\\
-3 & \textbf{for each} $k=0,\ldots,K-1$ \textbf{do}\\
-4 & \quad $\widehat\Delta^{(k)}\leftarrow
-      \operatorname{PairedRollout}(G,W^*,\lambda^{(k)},\omega_k)$\\
-5 & \quad $\lambda_c^{(k+1)}\leftarrow\lambda_c^{(k)}
-      \Delta_c^*/\widehat\Delta_c^{(k)}$\\
-6 & \textbf{end for}\\
-7 & $\lambda^*\leftarrow
-      \lambda^{(\arg\min_k\|\widehat\Delta^{(k)}-\Delta^*\|_2)}$\\
-\end{tabular}
-\vspace{2pt}\hrule
-\end{minipage}
-
-\begin{figure*}[!t]
-\centering
-\includegraphics[width=0.64\textwidth]{img/analysis/figure3_simulated_user_distribution.png}
-\caption{합성 사용자 분포. (a) 최대엔트로피 결합의 persona별 canonical-type 분포.
-ST, P, SD, LC는 sure thing, persuadable, sleeping dog, lost cause다. (b) 합성 사용자
-10,000명의 48차원 latent에 대한 t-SNE 투영이며 좌표축은 생성에 사용하지 않는다.}
-\label{fig:canonical-latent}
-\end{figure*}
-
-Tianchi에는 장바구니와 세션 경계가 없으므로 처치 이전의 공통 행동공간만 사용한다.
-사용자 $i$의 행동요약과 대리군, Cosmetics persona 대응은
-\begin{equation}
-\begin{gathered}
-h_i^-=(n_{i,\mathrm{click}}^-,n_{i,\mathrm{purchase}}^-,
-n_{i,\mathrm{active}}^-),\qquad
-g_i=\Gamma(h_i^-;q_{.25},q_{.75},q_{.95}),\\
-m(0)=g_{\mathrm{purchase}},\qquad
-m(2)=g_{\mathrm{deep}},\qquad
-m(3)=g_{\mathrm{browse}}
-\end{gathered}
-\end{equation}
-로 정의한다. 여기서 $\Gamma$는 처치 이전 활동량과 구매 유무의 분위수 규칙이며,
-$m$은 공통된 탐색 깊이와 구매 이력을 이용한 persona--proxy 대응이다. $H=14$,
-$A_i\in\{0,1\}$ 및 $Y_i^{(H)}=\mathbb{1}[\sum_{d=1}^{H}N_{i,d}^{\mathrm{purchase}}>0]$에 대해
-\begin{equation}
-p_{c,a}=\mathbb{E}[Y_i^{(H)}\mid g_i=m(c),A_i=a],\qquad
-\Delta_c^*=p_{c,1}-p_{c,0}
-\end{equation}
-를 보정 모멘트로 둔다. 주변분포를 보존하면서 추가 상관을 주입하지 않는
-최대엔트로피 결합을 위해
-\begin{equation}
-\mathcal T=\{ST:(1,1),\ P:(0,1),\ SD:(1,0),\ LC:(0,0)\}
-\end{equation}
-의 네 canonical type을 정의한다. 각 순서쌍은 $(Y^{(H)}(0),Y^{(H)}(1))$이며,
-각 persona의 목표분포는
-\begin{equation}
-\begin{aligned}
-\pi_{c,ST}&=p_{c,0}p_{c,1}, & \pi_{c,P}&=(1-p_{c,0})p_{c,1},\\
-\pi_{c,SD}&=p_{c,0}(1-p_{c,1}), &
-\pi_{c,LC}&=(1-p_{c,0})(1-p_{c,1})
-\end{aligned}
-\end{equation}
-48차원 사용자 latent에 절편을 붙인 $49\times4$ 행렬과 softmax로 개인별 canonical
-type 확률을 생성하고 persona별 평균이 목표분포를 근사하도록 학습한다.
-그림~\ref{fig:canonical-latent}(a)는 persona별 목표분포를 나타낸다.
-Persuadable에는 양의 쿠폰 offset, sleeping dog에는 음의
-offset, 나머지 두 유형에는 0을 준다. 각 수령효과는
-\begin{equation}
-d(k)=\left[\max\left(0,1-\frac{\lfloor k/7\rfloor}{5}\right)\right]^2,
-\qquad E_t=\sqrt{\sum_{r<t}d(t-r)}
-\end{equation}
-로 35일 안에 단조 감소하며, 제곱근으로 반복 수령의 한계기여를 줄인다. 쿠폰이 없거나
-strength가 0이면 모든 offset이 0이 되어 무쿠폰 생성기를 정확히 복원한다.
-
-본 단계는 행동 생성기를 계속 갱신하는 continual learning이 아니다. Cosmetics에서
-학습한 reward, coefficient GMM 및 세션 간격 모형을 동결한 뒤, Tianchi 모멘트를
-이용해 canonical-type 매핑과 persona별 쿠폰 강도만 순차적으로 보정한다. 따라서
-무쿠폰 행동 적합도를 보존하면서 uplift 가정만 별도로 교체하거나 검증할 수 있다.
-\section{실험 결과}
-\subsection{사용자 생성기와 uplift 보정}
-무쿠폰 10,000명에서 행동비율 RMSE는 0.0540, 구매 세션률은 관측 4.23\% 대비
-생성 3.94\%, 30일 비복귀율은 26.24\% 대비 21.91\%였다. 2차 reward는 persona
-평균 NLL을 0.648에서 0.600으로, lifecycle 상태는 0.840에서 0.808로 낮췄다.
-별도 6,000명으로 보정하고 10,000명으로 검증한 결과
-$|\widehat\Delta_{\mathrm{pop}}-\Delta_{\mathrm{pop}}^*|=0.07\%p$였다.
-그림~\ref{fig:canonical-latent}(b)는 보정된 home-persona 혼합비에서 생성한 latent의
-t-SNE 투영이며, 좌표는 생성이나 분류에 사용하지 않는다.
-
-\begin{figure}[b]
-\centering
-\resizebox{0.52\columnwidth}{!}{\input{paper/figures/lifecycle_transition.tex}}
-\caption{세션 종료 시 적용되는 lifecycle 전이. $P_c$는 출생 시 고정된 home
-persona이고 MISSION EXIT와 EXIT는 30일 비복귀를 나타내는 흡수상태다.}
-\label{fig:lifecycle}
-\end{figure}
-
-\subsection{주간 쿠폰 정책 비교}
-정책은 사용자별 주 1회 쿠폰 발송 여부를 결정하고 이후 7일의 구매, 세션과 쿠폰비를
-합산하여 직전 선택의 feedback으로 받는다. 관측 상태는 persona와 lifecycle,
-최근 7일 및 30일 행동, 마지막 세션과 구매 이후 경과일, 쿠폰 노출과 발송 가능 여부의
-19개 과거정보 특징이다. 목적함수는
-\begin{equation}
-R=1000N_{\mathrm{purchase}}-100N_{\mathrm{coupon}}
-\end{equation}
-이다. UCB, TS, LinUCB, LinTS, PPO~\cite{schulman2017}, discrete SAC~\cite{haarnoja2018}를
-1,000명, 13주 동안 학습하고 별도 5,000명, 52주에서 고정 정책을 평가하였다.
+판매 1회 가치는 1,000으로 고정한다. 비용모형 S는 발송마다 100을 차감한다.
+비용모형 D는 발송비가 없고, 42일 내 미사용 쿠폰을 FIFO로 보관하여 첫 후속
+구매에만 $\alpha=10\%$ 할인을 적용하며 이후 구매는 정상가격이다.
 
 \begin{table}[t]
 \centering
-\caption{주간 쿠폰 정책의 1년 고정 정책 평가: 평균(표준편차)}
-\label{tab:policy}
-\small
-\setlength{\tabcolsep}{2pt}
-\begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}}lrrr@{}}
+\caption{도메인별 52주 고정정책의 사용자당 순이익(평균$\pm$표준편차,
+$10^3$ 단위). 괄호는 평균 쿠폰 수이며 S는 발송비용, D는 첫 구매 할인비용이다.}
+\label{tab:benchmark}
+\scriptsize
+\setlength{\tabcolsep}{2.2pt}
+\begin{tabular}{llrrr}
 \toprule
-Policy & Profit/user ($\times10^3$) & Purch./user & Coupons/user\\
+Policy&Cost&Cosmetics&Electronics&Tianchi\\
 \midrule
-UCB & 27.69 (75.21) & 32.89 (75.21) & 52.00 (0.00)\\
-TS & 27.69 (75.21) & 32.89 (75.21) & 52.00 (0.00)\\
-LinUCB & 28.96 (73.15) & 30.76 (74.35) & 18.01 (18.76)\\
-LinTS & 29.40 (73.34) & 31.36 (74.51) & 19.63 (19.20)\\
-PPO & 27.69 (75.21) & 32.89 (75.21) & 52.00 (0.00)\\
-\textbf{Discrete SAC} & \textbf{30.89 (73.83)} & \textbf{32.98 (75.07)} & \textbf{20.90 (17.00)}\\
-Never coupon & 3.35 (2.48) & 3.35 (2.48) & 0.00 (0.00)\\
-Weekly coupon & 27.69 (75.21) & 32.89 (75.21) & 52.00 (0.00)\\
+UCB&S&--&--&--\\
+   &D&--&--&--\\
+TS&S&--&--&--\\
+  &D&--&--&--\\
+LinUCB&S&--&--&--\\
+      &D&--&--&--\\
+LinTS&S&--&--&--\\
+     &D&--&--&--\\
+PPO&S&--&--&--\\
+   &D&--&--&--\\
+SAC&S&--&--&--\\
+   &D&--&--&--\\
 \bottomrule
-\end{tabular*}
+\end{tabular}
 \end{table}
+\FloatBarrier
 
-SAC는 매주 발송보다 순이익이 11.56\% 높고 쿠폰은 59.81\% 적게 사용하였다.
-PPO는 최종적으로 매주 발송과 같은 정책을 선택했으며 학습기간 oracle 대비 비용이
-2,264,500으로 가장 컸다. 본 환경은 약 13,000개의 주간 transition만 제공하므로
-on-policy PPO보다 replay를 사용하는 SAC에 표본효율 측면에서 유리할 수 있다.
+Uplift 보정은 독립 10,000명에서 목표 가중 구매율 차이 0.09813과 생성값
+0.09766을 기록해 절대오차 0.00047이었다. P\_LT canonical 분포의 latent
+근사 RMSE는 0.00513이었다. 표~\ref{tab:benchmark}는 세 도메인과 두 비용모형에서
+정책의 수익과 쿠폰 사용량을 함께 비교한다. 동일 정책도 행동공간, 복귀간격과
+비용이 달라지면 순위가 달라질 수 있으므로 하나의 도메인 결과를 일반화하지 않는다.
 
-\section{논의 및 결론}
-본 연구는 Cosmetics 기반 행동 생성기와 Tianchi 기반 합성 uplift 모듈을 분리해
-순차 쿠폰 정책을 평가하였다. 모듈 분리는 0효과, 감쇠율 및 canonical 결합을 바꾼
-민감도 분석을 가능하게 한다.
-
-페르소나는 기술적 군집이고 Tianchi 수령은 비무작위이므로 canonical 분포와 coupon
-offset은 인과 추정치가 아니다. 정책 순위 역시 단일 seed와 실험용 비용에 조건부다.
-향후 다중 seed, 비용·감쇠 민감도 및 무작위 처치자료 검증이 필요하다.
+\section{결론}
+본 연구는 공개 행동 로그에서 사용자 효용과 세션 lifecycle을 학습하고, 공통
+특징정렬과 GMM으로 두 행동 도메인 및 쿠폰 도메인에 전이한 정책 시뮬레이터를
+제시하였다. Tianchi 차이는 인과효과가 아니라 명시적 합성 보정값이며, canonical
+type 역시 잠재결과 결합에 대한 가정이다. 따라서 표의 정책순위는 실제 배포효과의
+증거가 아니라 비용·uplift·감쇠 가정에 조건부인 알고리즘 스트레스 테스트다.
+후속연구에서는 무작위 쿠폰 로그로 반응모듈을 교체하고 비용 및 감쇠 민감도와
+다중 seed 불확실성을 확대해야 한다.
 
 \begingroup
-\small
+\footnotesize
 \setlength{\parindent}{0pt}
 \begin{thebibliography}{20}
 \bibitem{rees46} REES46, ``Free datasets with eCommerce behavior data,'' \url{https://rees46.com/en/datasets}.
 \bibitem{tianchi} Alibaba Cloud Tianchi, ``O2O Coupon Usage Prediction Dataset,'' \url{https://tianchi.aliyun.com/dataset/5903}.
-\bibitem{sun2019} F. Sun et al., ``BERT4Rec: Sequential Recommendation with Bidirectional Encoder Representations from Transformer,'' \textit{CIKM}, 2019.
-\bibitem{cho2014} K. Cho et al., ``Learning Phrase Representations using RNN Encoder-Decoder for Statistical Machine Translation,'' \textit{EMNLP}, 2014.
-\bibitem{ziebart2008} B. D. Ziebart et al., ``Maximum Entropy Inverse Reinforcement Learning,'' \textit{AAAI}, 2008.
-\bibitem{devriendt2018} F. Devriendt, D. Moldovan, and W. Verbeke, ``A Literature Survey and Experimental Evaluation of the State-of-the-Art in Uplift Modeling,'' \textit{Big Data}, 6(1), 2018.
-\bibitem{ie2019} E. Ie et al., ``RecSim: A Configurable Simulation Platform for Recommender Systems,'' arXiv:1909.04847, 2019.
-\bibitem{rohde2018} D. Rohde et al., ``RecoGym: A Reinforcement Learning Environment for Product Recommendation in Online Advertising,'' arXiv:1808.00720, 2018.
-\bibitem{shi2019} J.-C. Shi et al., ``Virtual-Taobao: Virtualizing Real-World Online Retail Environment for Reinforcement Learning,'' \textit{AAAI}, 2019.
+\bibitem{sun2019} F. Sun et al., ``BERT4Rec,'' \textit{CIKM}, 2019.
+\bibitem{ziebart2008} B. Ziebart et al., ``Maximum Entropy Inverse Reinforcement Learning,'' \textit{AAAI}, 2008.
+\bibitem{devriendt2018} F. Devriendt et al., ``A Literature Survey and Experimental Evaluation of Uplift Modeling,'' \textit{Big Data}, 2018.
+\bibitem{ie2019} E. Ie et al., ``RecSim,'' arXiv:1909.04847, 2019.
+\bibitem{rohde2018} D. Rohde et al., ``RecoGym,'' arXiv:1808.00720, 2018.
+\bibitem{shi2019} J.-C. Shi et al., ``Virtual-Taobao,'' \textit{AAAI}, 2019.
 \bibitem{li2010} L. Li et al., ``A Contextual-Bandit Approach to Personalized News Article Recommendation,'' \textit{WWW}, 2010.
-\bibitem{agrawal2013} S. Agrawal and N. Goyal, ``Thompson Sampling for Contextual Bandits with Linear Payoffs,'' \textit{ICML}, 2013.
+\bibitem{agrawal2013} S. Agrawal and N. Goyal, ``Thompson Sampling for Contextual Bandits,'' \textit{ICML}, 2013.
 \bibitem{schulman2017} J. Schulman et al., ``Proximal Policy Optimization Algorithms,'' arXiv:1707.06347, 2017.
-\bibitem{haarnoja2018} T. Haarnoja et al., ``Soft Actor-Critic: Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor,'' \textit{ICML}, 2018.
+\bibitem{haarnoja2018} T. Haarnoja et al., ``Soft Actor-Critic,'' \textit{ICML}, 2018.
 \end{thebibliography}
 \endgroup
-
 \end{document}

@@ -8,45 +8,43 @@
 \citation{shi2019}
 \citation{rees46}
 \citation{tianchi}
-\citation{ziebart2008}
 \HyPL@Entry{0<</S/D>>}
 \providecommand \oddpage@label [2]{}
 \@writefile{toc}{\contentsline {section}{\numberline {1}서론}{1}{section.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {2}데이터}{1}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2}데이터와 대리군}{1}{section.2}\protected@file@percent }
 \@writefile{toc}{\contentsline {section}{\numberline {3}제안 방법}{1}{section.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Masked bidirectional-GRU 표현}{1}{subsection.3.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}행동 페르소나}{1}{subsection.3.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Maximum-entropy 행동과 세션 간격}{1}{subsection.3.3}\protected@file@percent }
-\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Masked bidirectional-GRU의 학습 및 사용자 표현 추출 구조. Transformer의 모듈식 도식 표현을 참고하되, 실제 구현에는 attention과 positional encoding이 없으며 순서 정보는 양방향 GRU가 처리한다. 왼쪽 분기는 masked-token 복원에, 오른쪽 분기는 48차원 사용자 임베딩과 행동 페르소나 구성에 사용된다.}}{2}{figure.1}\protected@file@percent }
-\newlabel{fig:gru}{{1}{2}{Masked bidirectional-GRU의 학습 및 사용자 표현 추출 구조. Transformer의 모듈식 도식 표현을 참고하되, 실제 구현에는 attention과 positional encoding이 없으며 순서 정보는 양방향 GRU가 처리한다. 왼쪽 분기는 masked-token 복원에, 오른쪽 분기는 48차원 사용자 임베딩과 행동 페르소나 구성에 사용된다}{figure.1}{}}
-\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces 운영 페르소나별 관측 이벤트 구성비. P0는 구매, P1은 조회, P2는 장기 제거 행동, P3는 장바구니 추가가 상대적으로 두드러진다.}}{2}{figure.2}\protected@file@percent }
-\newlabel{fig:eventmix}{{2}{2}{운영 페르소나별 관측 이벤트 구성비. P0는 구매, P1은 조회, P2는 장기 제거 행동, P3는 장바구니 추가가 상대적으로 두드러진다}{figure.2}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}합성 uplift 모듈}{2}{subsection.3.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {4}실험 결과}{2}{section.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}사용자 생성기와 uplift 보정}{2}{subsection.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}행동표현과 페르소나}{1}{subsection.3.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}사용자별 효용과 세션간격}{1}{subsection.3.2}\protected@file@percent }
+\@writefile{loa}{\contentsline {algocf}{\numberline {1}{\ignorespaces Masked GRU user representation}}{1}{algocf.1}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{alg:gru}{{1}{1}{행동표현과 페르소나}{algocf.1}{}}
+\@writefile{loa}{\contentsline {algocf}{\numberline {2}{\ignorespaces Persona-conditioned MaxEnt IRL}}{1}{algocf.2}\protected@file@percent }
+\newlabel{alg:irl}{{2}{1}{사용자별 효용과 세션간격}{algocf.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}도메인 GMM과 합성 uplift}{1}{subsection.3.3}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces 사용자 모델의 두 단계. (a) 마스킹된 행동을 복원해 사용자 표현을 얻는다. (b) 과거정보 특징에서 다섯 행동효용을 계산하고 다항 logit으로 확률화한다.}}{2}{figure.caption.2}\protected@file@percent }
+\newlabel{fig:architecture}{{1}{2}{사용자 모델의 두 단계. (a) 마스킹된 행동을 복원해 사용자 표현을 얻는다. (b) 과거정보 특징에서 다섯 행동효용을 계산하고 다항 logit으로 확률화한다}{figure.caption.2}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces (a) 공통 행동공간에서 전이된 도메인별 home-persona 조성 및 선택된 GMM 성분 수. (b) Tianchi 매칭 주변확률을 보존하는 canonical-type 합성분포.}}{2}{figure.caption.4}\protected@file@percent }
+\newlabel{fig:transfer}{{2}{2}{(a) 공통 행동공간에서 전이된 도메인별 home-persona 조성 및 선택된 GMM 성분 수. (b) Tianchi 매칭 주변확률을 보존하는 canonical-type 합성분포}{figure.caption.4}{}}
+\citation{li2010}
+\citation{agrawal2013}
 \citation{schulman2017}
 \citation{haarnoja2018}
 \bibcite{rees46}{1}
 \bibcite{tianchi}{2}
 \bibcite{sun2019}{3}
-\bibcite{cho2014}{4}
-\bibcite{ziebart2008}{5}
-\bibcite{devriendt2018}{6}
-\bibcite{ie2019}{7}
-\bibcite{rohde2018}{8}
-\bibcite{shi2019}{9}
-\bibcite{li2010}{10}
-\bibcite{agrawal2013}{11}
-\bibcite{schulman2017}{12}
-\bibcite{haarnoja2018}{13}
-\@writefile{loa}{\contentsline {algocf}{\numberline {1}{\ignorespaces Masked bidirectional-GRU 사용자 임베딩 추출}}{3}{algocf.1}\protected@file@percent }
-\newlabel{alg:gru}{{1}{3}{Masked bidirectional-GRU 표현}{algocf.1}{}}
-\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Cosmetics K=4 행동 페르소나와 이벤트 구성비(\%)}}{3}{table.1}\protected@file@percent }
-\newlabel{tab:persona}{{1}{3}{Cosmetics K=4 행동 페르소나와 이벤트 구성비(\%)}{table.1}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}주간 쿠폰 정책 비교}{3}{subsection.4.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {5}논의 및 결론}{3}{section.5}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces 주간 쿠폰 정책의 1년 고정 정책 평가}}{3}{table.2}\protected@file@percent }
-\newlabel{tab:policy}{{2}{3}{주간 쿠폰 정책의 1년 고정 정책 평가}{table.2}{}}
-\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces 5,000명, 1년 고정 정책 평가. 왼쪽 오차막대는 사용자 평균 순이익의 표준오차이며, 오른쪽은 연간 쿠폰 사용량과 구매 수의 관계다.}}{4}{figure.3}\protected@file@percent }
-\newlabel{fig:policy}{{3}{4}{5,000명, 1년 고정 정책 평가. 왼쪽 오차막대는 사용자 평균 순이익의 표준오차이며, 오른쪽은 연간 쿠폰 사용량과 구매 수의 관계다}{figure.3}{}}
-\gdef \@abspage@last{4}
+\bibcite{ziebart2008}{4}
+\bibcite{devriendt2018}{5}
+\bibcite{ie2019}{6}
+\bibcite{rohde2018}{7}
+\bibcite{shi2019}{8}
+\bibcite{li2010}{9}
+\bibcite{agrawal2013}{10}
+\bibcite{schulman2017}{11}
+\bibcite{haarnoja2018}{12}
+\@writefile{loa}{\contentsline {algocf}{\numberline {3}{\ignorespaces Sequential uplift calibration}}{3}{algocf.3}\protected@file@percent }
+\newlabel{alg:uplift}{{3}{3}{도메인 GMM과 합성 uplift}{algocf.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces 도메인별 52주 고정정책의 사용자당 순이익(평균$\pm $표준편차, $10^3$ 단위). 괄호는 평균 쿠폰 수이며 S는 발송비용, D는 첫 구매 할인비용이다.}}{3}{table.caption.6}\protected@file@percent }
+\newlabel{tab:benchmark}{{1}{3}{도메인별 52주 고정정책의 사용자당 순이익(평균$\pm $표준편차, $10^3$ 단위). 괄호는 평균 쿠폰 수이며 S는 발송비용, D는 첫 구매 할인비용이다}{table.caption.6}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}실험}{3}{section.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}결론}{3}{section.5}\protected@file@percent }
+\gdef \@abspage@last{3}

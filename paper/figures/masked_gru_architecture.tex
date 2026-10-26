@@ -24,7 +24,7 @@
   \node[panel, minimum width=72mm, minimum height=34mm, anchor=south west]
     (encbox) at (0.1,0.65) {};
   \foreach \x/\id/\tok/\emb/\out in {
-    0.85/a/[USR]/$E_{\rm usr}$/$z_u$,
+    0.85/a/view/$E_1$/$\hat{x}_1$,
     2.25/b/[MASK]/$E_2$/$\hat{x}_2$,
     3.65/c/cart/$E_3$/$\hat{x}_3$,
     5.05/d/$\cdots$/$\cdots$/$\cdots$,
@@ -48,20 +48,20 @@
   \draw[arrow] ([yshift=-1.2mm]hidb.west) -- ([yshift=-1.2mm]hida.east);
 
   \node[font=\tiny, text=black!65, align=center] at (3.7,-0.42)
-    {$z_u\in\mathbb{R}^{48}$ from the [USR] state; 15\% masking during training only};
+    {$z_u=[\overrightarrow{h}_T;\overleftarrow{h}_1]\in\mathbb{R}^{48}$; 15\% masking during training only};
 \end{scope}
 
-% (b) The 78-dimensional quadratic reward map converges to five utilities.
+% (b) Twelve past-only reward features converge to five utilities.
 \begin{scope}[xshift=9.75cm]
   \node[paneltitle] at (3.72,4.55) {(b) Persona-conditioned MaxEnt IRL policy};
   \node[font=\tiny\bfseries, text=black!70] at (1.00,4.02)
-    {78-D reward features};
+    {12-D reward features};
   \node[font=\tiny\bfseries, text=black!70] at (3.15,4.02)
     {5 action utilities};
   \node[font=\tiny\bfseries, text=black!70] at (5.85,4.02)
     {Action probabilities};
 
-  % Twelve representative nodes; the vertical ellipsis denotes omitted dimensions.
+  % Twelve feature nodes; the ellipsis separates recent-state and history terms.
   \foreach \fy in {3.65,3.42,3.19,2.96,2.73,2.50,
                     1.70,1.47,1.24,1.01,0.78,0.55} {
     \foreach \uy in {3.40,2.75,2.10,1.45,0.80} {

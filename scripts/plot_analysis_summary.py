@@ -146,6 +146,8 @@ def coupon_weeks():
 
 def agent_benchmark():
     data = load('agent-benchmark/summary.json')
+    if 'benchmarks' in data:
+        return multi_domain_agent_benchmark(data)
     agent_names = ['UCB', 'TS', 'LinUCB', 'LinTS', 'PPO', 'SAC']
     baseline_names = ['Never coupon', 'Max allowed']
     colors = {
@@ -212,6 +214,55 @@ def agent_benchmark():
     fig.suptitle('Online learning over 1,000 users × 13 weeks')
     fig.tight_layout()
     save('agent_learning_curve.png')
+
+
+def multi_domain_agent_benchmark(data):
+    """Plot the three-domain, two-cost benchmark from the final protocol."""
+    agents = ['UCB', 'TS', 'LinUCB', 'LinTS', 'PPO', 'SAC']
+    domains = ['cosmetics', 'electronics', 'tianchi']
+    costs = [('send_cost', 'Send cost'),
+             ('redemption_discount', 'First-purchase discount')]
+    colors = ['#54789b', '#7896b2', '#c99a43', '#e0b765', '#a66a87', '#c65d3e']
+    fig, axes = plt.subplots(2, 3, figsize=(13.2, 7.2), sharex=True)
+    for row, (cost, cost_label) in enumerate(costs):
+        for column, domain in enumerate(domains):
+            result = data['benchmarks'][f'{domain}:{cost}']
+            summaries = [result['agents'][agent]['test'] for agent in agents]
+            means = np.array([entry['mean_net_profit'] for entry in summaries]) / 1000
+            errors = np.array([
+                entry['standard_error_net_profit'] for entry in summaries
+            ]) / 1000
+            axis = axes[row, column]
+            axis.bar(np.arange(len(agents)), means, yerr=errors, capsize=2,
+                     color=colors, width=.72)
+            axis.set_title(f'{domain.title()} — {cost_label}')
+            axis.grid(axis='y', alpha=.2)
+            if column == 0:
+                axis.set_ylabel('Net profit per user (×1,000)')
+            axis.set_xticks(np.arange(len(agents)), agents, rotation=35, ha='right')
+    fig.suptitle('Frozen-policy evaluation: 5,000 users × 52 weeks')
+    fig.tight_layout()
+    save('agent_policy_comparison.png')
+
+    fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.2), sharex=True)
+    for axis, (cost, cost_label) in zip(axes, costs, strict=True):
+        x = np.arange(len(agents))
+        width = .25
+        for index, domain in enumerate(domains):
+            result = data['benchmarks'][f'{domain}:{cost}']
+            values = [
+                result['agents'][agent]['test']['mean_coupon_cost_per_purchase']
+                for agent in agents
+            ]
+            axis.bar(x + (index - 1) * width, values, width, label=domain.title())
+        axis.set_title(cost_label)
+        axis.set_ylabel('Coupon cost per realized purchase')
+        axis.set_xticks(x, agents, rotation=35, ha='right')
+        axis.grid(axis='y', alpha=.2)
+    axes[1].legend(frameon=False)
+    fig.suptitle('Coupon economics under the frozen policies')
+    fig.tight_layout()
+    save('agent_coupon_cost_per_purchase.png')
 
 
 def operational_persona_event_mix():
@@ -330,6 +381,56 @@ def simulator_distribution_figure():
     save('figure3_simulated_user_distribution.png')
 
 
+def domain_transfer_and_canonical():
+    transfer = pd.read_parquet(
+        ROOT / 'artifacts/domain-simulator-profiles/user_persona_transfer.parquet'
+    )
+    proxy = pd.read_csv(
+        ROOT / 'artifacts/tianchi-canonical-proxies/canonical_type_proxies.csv'
+    )
+    model = load('domain-simulator-profiles/model.json')
+    colors = {0: '#4C78A8', 2: '#E3A13B', 3: '#6BA56B'}
+    canonical_colors = ['#4C78A8', '#E3A13B', '#B279A2', '#A7A7A7']
+    fig, axes = plt.subplots(1, 2, figsize=(10.4, 3.7), constrained_layout=True)
+
+    domains = ['cosmetics', 'electronics', 'tianchi']
+    bottom = np.zeros(len(domains))
+    for persona in (0, 2, 3):
+        values = np.array([
+            100 * transfer.loc[transfer.dataset.eq(domain), 'transferred_persona']
+            .eq(persona).mean() for domain in domains
+        ])
+        axes[0].bar(domains, values, bottom=bottom, color=colors[persona],
+                    label=f'P{persona}', width=.62)
+        bottom += values
+    components = [len(model['domains'][domain]['gmm']['weights']) for domain in domains]
+    for index, count in enumerate(components):
+        axes[0].text(index, 102, f'{count}-component GMM', ha='center', va='bottom', fontsize=8)
+    axes[0].set(ylabel='Transferred users (%)', ylim=(0, 112),
+                title='(a) Domain sampling mixture')
+    axes[0].legend(frameon=False, ncol=3, loc='lower center')
+    axes[0].grid(axis='y', alpha=.2)
+
+    groups = ['P0', 'P2', 'P3', 'P_LT']
+    types = ['sure_thing', 'persuadable', 'sleeping_dog', 'lost_cause']
+    labels = ['ST', 'P', 'SD', 'LC']
+    x = np.arange(len(groups))
+    width = .19
+    for index, (kind, label, color) in enumerate(zip(types, labels, canonical_colors)):
+        values = [
+            100 * float(proxy.loc[proxy.persona.eq(group), kind].iloc[0])
+            for group in groups
+        ]
+        axes[1].bar(x + (index - 1.5) * width, values, width,
+                    color=color, label=label)
+    axes[1].set_xticks(x, groups)
+    axes[1].set(ylabel='Canonical-type probability (%)', ylim=(0, 78),
+                title='(b) Matched Tianchi calibration')
+    axes[1].legend(frameon=False, ncol=4, loc='upper center')
+    axes[1].grid(axis='y', alpha=.2)
+    save('domain_transfer_and_canonical.png')
+
+
 if __name__ == '__main__':
     personas()
     evolution()
@@ -341,3 +442,4 @@ if __name__ == '__main__':
     canonical_type_fit()
     simulator_latent_tsne()
     simulator_distribution_figure()
+    domain_transfer_and_canonical()

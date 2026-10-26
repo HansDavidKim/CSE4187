@@ -62,3 +62,37 @@ def test_latent_assignment_matches_persona_targets_with_regularized_matrix():
     assert np.allclose(matrix.sum(axis=1), 0)
     assert assignment['l1'] > 0 and assignment['l2'] > 0
     assert assignment['final_persona_distribution_rmse'] < .03
+
+
+def test_latent_assignment_calibrates_regularized_subgroup_offset():
+    rng = np.random.default_rng(4)
+    frames = []
+    for persona, centre in zip((0, 2, 3), (-2., 0., 2.)):
+        for user in range(40):
+            frames.append({
+                'user_id': persona * 100 + user, 'cluster': persona,
+                'z_0': centre + rng.normal(scale=.2), 'z_1': rng.normal(),
+            })
+    proxies = [{
+        'proxy_persona': name, 'purchase_14d_control': .1,
+        'purchase_14d_treated': .2,
+    } for name in ('P4_purchase_path_proxy', 'P2_deep_consideration_proxy',
+                   'P3_cart_revision_proxy')]
+    returns = []
+    for group in ('purchase_only', 'click_purchase', 'click_only'):
+        returns.extend([
+            {'group': group, 'anchor_receipt': 0, 'return_7d': 10, 'n': 100},
+            {'group': group, 'anchor_receipt': 1, 'return_7d': 20, 'n': 100},
+        ])
+    model = calibrate({'results': proxies}, returns)
+    model['canonical_subgroups'] = {
+        'P_LT': {'canonical_type_probabilities': maximum_entropy_types(.3, .4)}
+    }
+    model = fit_latent_canonical_assignment(
+        model, pd.DataFrame(frames),
+        subgroup_users={'P_LT': set(range(200, 220))},
+    )
+    assignment = model['canonical_assignment']
+    assert len(assignment['group_logit_offsets']['P_LT']) == 4
+    assert assignment['subgroup_fit'][0]['users'] == 20
+    assert assignment['subgroup_fit'][0]['rmse'] < .03

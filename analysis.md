@@ -263,6 +263,98 @@ proxy는 비교용 진단값일 뿐 현재 시뮬레이터 입력으로 사용�
 구매 없이 다시 미복귀하면 `EXIT`로 이동한다. `MISSION_EXIT`과 `EXIT`는 무쿠폰
 기준 흡수상태다. 재현 산출물은 `artifacts/cosmetics-lifecycle/`에 저장했다.
 
+### Electronics 교차검증과 lifecycle·구매 패턴 확정
+
+Cosmetics 전용 분석의 상태 규칙을 Electronics에 그대로 적용했다. 두 로그 모두 가입일이
+없으므로 `NEW`는 최초 관측 두 세션의 proxy로 한정했다. 최초 관측이 로그 시작 30일 뒤,
+종료 60일 전이며 6세션 이상인 사용자를 초기 2세션·중기 2세션·후기 2세션으로 나눴다.
+30일 추적이 완전한 최종 세션 중 구매가 없으면 `DISSATISFIED_CHURNING`, 구매가 있으면
+`SATIATED_EXIT_CANDIDATE`로 정의했다. 후자는 만족을 직접 관측한 라벨이 아니라
+시뮬레이터에서 포만 이탈로 해석하기 위한 구매-후-미복귀 proxy다.
+
+Cosmetics 425명은 불만족 이탈 247명, 만족 이탈 후보 21명, 우측 검열 157명이었다.
+Electronics 128명은 각각 101명, 7명, 20명이었다. 불만족 이탈군의 초기→중기→후기
+직전 gap 중앙값은 Cosmetics에서 `0.24→1.27→11.20시간`, Electronics에서
+`17.15→28.89→40.89시간`으로 모두 증가했다. 같은 구간의 view 비중은 각각
+`81.0→84.6→87.4%`, `89.3→89.6→94.7%`로 높아지고 이벤트 중앙값은 `3→2→2`,
+`4→3→2`로 감소했다. 따라서 절대 시간척도는 다르지만 방문 간격 증가, 조회 집중,
+행동량 감소라는 이탈 방향은 공통이다.
+
+만족 이탈 후보는 후기 구매 비중이 Cosmetics 46.8%, Electronics 20.5%였고, 불만족
+이탈군은 각각 0.6%, 2.4%였다. 이 차이로 두 종료 모드를 운영상 분리할 수 있다. 다만
+표본이 21명과 7명뿐이므로 만족 이탈의 모집단 비율을 정밀 추정한 결과로 사용하지 않는다.
+
+교차검증 군집은 기존 simulator의 P0/P2/P3와 동일한 이름을 쓰지 않는다. 기존 P0는
+구매 혼합형인데 새 K=4의 C0는 저구매형이므로 이름을 재사용하면 의미가 충돌한다.
+공통 행동 프로파일의 최근접 대응 `C0↔E1`, `C2↔E0/E2`, `C3↔E3`을 각각
+S0·S1·S2로 두었다. Cosmetics C1은 독립적인 Electronics 대응군이 없어
+`UNRESOLVED`로 제외했다. 공통 프로파일별 구매 세션률은 다음과 같다.
+
+| Shared profile | Cosmetics | Electronics | 공통 순위 |
+|---|---:|---:|---|
+| S0 | 0.60% | 2.21% | 최저 |
+| S1 | 9.81% | 20.52% | 최고 |
+| S2 | 6.54% | 7.40% | 중간 |
+
+S1의 30일 미복귀 중 만족 이탈 후보 비중은 Cosmetics 16.6%, Electronics 26.0%였고,
+S0는 0.5%, 1.5%였다. 즉 구매 행동뿐 아니라 구매 후 종료 분기도 행동 프로파일에
+조건부로 두는 것이 타당하다. S2는 두 도메인 모두 구매율이 중간이지만 Electronics
+표본이 42명, lifecycle cohort가 11명뿐이므로 종료상태 분포는 고정하지 않는다.
+
+실제 simulator home persona는 기존 Cosmetics P0/P2/P3를 유지한다. 이들의 구매 세션률은
+각각 7.47%, 4.19%, 4.30%이고 구매 이벤트 비중은 13.03%, 5.50%, 4.93%다. 따라서
+P0의 구매 혼합형, P2의 장기 검토형, P3의 장바구니 중심형이라는 기존 reward 계수의
+의미를 보존한다.
+
+여기에 희소 장기 구매자 `P_LT`를 P2의 latent subtype으로 추가했다. 운영상 정의는
+10세션 이상, 구매 세션 3회 이상, 관측 span 30일 이상이다. Cosmetics에서는
+10,672명 중 70명(0.656%), Electronics에서는 10,688명 중 7명(0.066%)이 만족했다.
+Cosmetics 70명 중 51명이 기존 P2였으므로 P2 조건부 subtype으로 둔다. P2 내부에서
+`P_LT`의 구매 logit은 +0.568, 30일 미복귀 logit은 -0.539였다. 이는 전체 이력을 사용한
+사후 calibration label이며 온라인에서 직접 관측되는 persona가 아니다.
+
+각 LT 사용자의 30일 결과를 판정할 수 있는 세션을 시간순 3등분해 이탈 진행 신호를
+확인했다. `view-led churning`은 최종 비구매 세션 뒤 30일 미복귀, 후기 조회 비중
+10%p 이상 증가, 후기 세션당 행동량 감소를 모두 만족하는 대리상태다.
+
+| Dataset | LT | 비구매 30일 미복귀 | 조회 +10%p | 행동량 감소 | 두 조건 동시 |
+|---|---:|---:|---:|---:|---:|
+| Cosmetics | 70 | 7 | 4/7 | 6/7 | 4/7 |
+| Electronics | 7 | 2 | 1/2 | 1/2 | 1/2 |
+
+Cosmetics 비구매 미복귀자 중 구매 비중 감소와 과거 세션 간격 2배 증가는 각각
+3/7이었다. 조회 중심 변화는 존재하지만 모든 LT 이탈자에게 나타나지 않았고, 단독
+전조로는 특이도가 부족하다. 따라서 생성기의 `DISSATISFIED_CHURNING` 판정은 조회비중
+하나가 아니라 행동량 수축과 30일 미복귀를 함께 사용한다. Electronics는 LT가 7명뿐인
+존재성 확인 결과다. 상세 산출물은 `long_term_stage_changes.csv`,
+`long_term_churn_signals.csv`, 그림은 `img/persona/long_term_churn_progression.png`다.
+
+![Electronics와 Cosmetics의 공통 lifecycle 신호, 종료 모드 및 persona 구매 패턴](img/persona/cross_domain_lifecycle.png)
+
+최종 무쿠폰 상태공간은 `NEW`, `HOME_PERSONA(P0/P2/P3, P_LT subtype)`,
+`DISSATISFIED_CHURNING`, `SATIATED_EXIT`, `EXIT`로 고정한다. home persona는 출생 시 한
+번 샘플링하고 재활성화 시 복원한다. 세션 종료 시 공통 11개 과거정보 feature로 30일
+미복귀를 먼저 선택한 뒤, 현재 세션 구매가 있으면 `SATIATED_EXIT`, 없으면
+`DISSATISFIED_CHURNING`으로 분기한다. 현재 실행기의 `MISSION_EXIT`은
+`SATIATED_EXIT`의 호환 별칭으로 남긴다.
+
+공통 transition head는 현재 세션의 순서·행동량·view/cart/purchase 비중·지속시간,
+직전 gap·gap acceleration과 S1/S2 indicator를 사용했다. 사용자 단위 보류 ROC-AUC는
+Cosmetics 0.774, Electronics 0.674였다. Cosmetics→Electronics 전이는 0.641,
+Electronics→Cosmetics 전이는 0.762였다. 방향성은 양쪽에서 재현됐지만 절대 이탈률과
+시간척도는 도메인별로 달라 공통 slope와 persona 효과만 공유하고 baseline calibration은
+도메인별로 유지해야 한다. 이는 예측적 lifecycle 구조이며 인과효과가 아니다.
+
+관측 intercept를 생성기에 그대로 넣지 않고 simulator moment로 재보정했다. 독립 seed
+10,000명 rollout에서 30일 미복귀율은 목표 26.243% 대비 26.325%(오차 0.082%p),
+미복귀 중 만족 이탈 비중은 목표 4.915% 대비 5.007%였다. `P_LT`는 82명(0.82%)이
+샘플링됐고 구매 세션률 5.23%, 30일 미복귀율 4.37%로 일반 사용자 3.20%, 27.24%와
+구분됐다.
+
+재현 산출물은 `artifacts/cross-domain-lifecycle/`의 `lifecycle_model.json`,
+`stage_profiles.csv`, `persona_purchase_profiles.csv`, `persona_terminal_profiles.csv`,
+`long_term_buyer_profiles.csv`, `rollout_summary.json` 및 `return_decisions.parquet`에 저장했다.
+
 ### Lifecycle-conditioned immediate MaxEnt IRL
 
 사용자 계수 자체를 세션마다 random walk시키지 않는다. 출생 시 home persona에
@@ -347,6 +439,89 @@ early stopping으로 P0/P2/P3 strength `8.536/3.811/3.508`을 학습했다.
 이력이 없으면 offset이 정확히 0이므로 기존 baseline을 그대로 재현한다. 모델은
 `artifacts/tianchi-uplift-model/model.json`, 검증은 `rollout_summary.json`에 저장했다.
 이 수치는 Tianchi의 인과효과 주장이 아니라 합성환경의 calibration target이다.
+
+#### 공통 행동 프로파일을 통한 Tianchi 쿠폰 대리군 매칭
+
+기존 Tianchi proxy 이름을 P0/P2/P3에 직접 대응시키지 않고, 수령 전 행동만으로
+교차 도메인 프로파일을 먼저 거쳤다. 2016년 5월 15일 이전 28일의 click·purchase가
+2건 이상인 사용자의 13개 공통 행동특징을 Cosmetics·Electronics 기준으로 robust
+scaling한 뒤 Cosmetics (K=4) 중앙값에 정렬해 C0/C2/C3을 각각 S0/S1/S2로 변환했다.
+대응이 불명확한 C1은 제외했다.
+이후 각 S 안에서 과거 구매 여부를 정확히 맞추고 14개 사전변수로 추정한
+성향점수의 logit 거리 0.2 표준편차 안에서 쿠폰 수령자와 비수령자를 1:1 비복원
+매칭했다. 결과변수는 이후 1--14일 구매 기록이다.
+
+| 공통 프로파일 | 수령자/매칭쌍 | 비수령 대리군 | 수령군 | 관측 차이 (95% CI) | 매칭 후 최대 절대 SMD |
+|---|---:|---:|---:|---:|---:|
+| S0 | 9 / 7 | 14.29% | 0.00% | -14.29%p (-42.29, 13.71) | 0.000 |
+| S1 | 109 / 109 | 11.93% | 22.02% | +10.09%p (-0.11, 20.29) | 0.135 |
+| S2 | 165 / 165 | 17.58% | 26.67% | +9.09%p (1.04, 17.14) | 0.084 |
+
+S0는 수령자가 9명뿐이므로 효과 방향을 사용할 수 없다. S1과 S2에서는 약
+9--10%p의 양의 관측 차이가 남았지만, 같은 매칭쌍에서 후속 쿠폰 수령 차이도
+각각 +16.51%p와 +18.79%p였다. 따라서 이 값은 단일 수령의 순수 인과효과가 아니라
+지속적인 타기팅을 포함한 **쿠폰 반응 calibration proxy**다.
+
+기존 Cosmetics persona와 S의 겹침을 운송가중치로 사용했다. P0는
+S0/S1/S2=`1.20/86.57/12.23%`, P2는 S2=100%, P3는
+S1/S2=`94.93/5.07%`였다. 이에 따른 14일 구매 대리차이는 P0 +9.68%p,
+P2 +9.09%p, P3 +10.04%p다. P0와 P3가 모두 주로 S1을 통과하므로 현재 공통 관측변수로는
+두 persona의 쿠폰 민감도를 구분할 수 없다. 재현 산출물과 코호트는
+`artifacts/tianchi-persona-coupon-matching/`, 그림은
+`img/uplift/tianchi_persona_coupon_matching.png`에 저장했다.
+
+matched 주변확률을 보존하는 최대엔트로피 독립 결합과 5,000회 pair bootstrap으로
+canonical 대리비율을 다시 계산했다. 괄호는 고정된 매칭과 운반 가중치에 조건부인
+95% 구간이다.
+
+| Persona | Sure thing | Persuadable | Sleeping dog | Lost cause |
+|---|---:|---:|---:|---:|
+| P0 | 2.82 (1.54–4.43) | 19.50 (13.69–26.02) | 9.82 (5.86–14.39) | 67.85 (60.62–74.82) |
+| P2 | 4.69 (2.79–7.07) | 21.98 (16.61–27.48) | 12.89 (8.92–17.19) | 60.44 (53.13–68.17) |
+| P3 | 2.72 (1.33–4.43) | 19.54 (13.26–26.77) | 9.50 (5.14–14.26) | 68.25 (60.46–76.12) |
+| P_LT | 10.49 (6.93–14.42) | 23.86 (17.88–30.02) | 20.05 (14.68–25.98) | 45.60 (38.18–53.70) |
+
+P_LT는 P2 값을 복사하지 않고 아래의 P_LT 내부 131쌍에서 직접 계산했다. 산출물은
+`artifacts/tianchi-canonical-proxies/`에 저장했다.
+
+#### Tianchi 장기 구매자와 구매 후 장기 미복귀 대리군
+
+Tianchi에는 세션 경계가 없어 활동일을 세션 대리변수로 사용했다. P_LT는
+`활동일 ≥10`, `구매일 ≥3`, `최초--최종 행동 span ≥30일`로 정의했다. 이 세 조건은
+반복 활동, 반복 구매, 장기관측을 동시에 요구해 일회성 구매자를 제외하면서 기존
+Cosmetics P_LT의 운영 정의를 날짜 단위 로그로 옮긴 것이다. 기준일 이전에 이 조건을
+만족한 12,980명 중 2016-05-15 쿠폰 수령자는 131명이었다. P_LT 내부에서 사전
+활동일·구매일·구매수·이벤트수·span·구매일 비중·과거 수령수를 이용해 1:1
+성향점수 매칭한 결과는 다음과 같다.
+
+| 지표 | 비수령 대리군 | 수령군 | 차이 (95% CI) |
+|---|---:|---:|---:|
+| 1--14일 구매 | 30.53% | 34.35% | +3.82%p (-6.87, +14.50) |
+| 1--14일 추가 수령 | 30.53% | 35.88% | +5.34%p (-6.35, +17.04) |
+
+구매 차이는 방향만 양수이고 불확실성이 크므로 인과적인 P_LT 쿠폰계수로 해석하지
+않는다. 무쿠폰 행동 reward는 소표본 때문에 P2 prior를 유지하지만, canonical
+분포는 이 P_LT 직접 매칭값으로 보정한다.
+
+P_LT의 14일 구매 주변확률은 (p_0=30.53\%, p_1=34.35\%)다. 이를 보존하는
+최대엔트로피 독립 결합의 합성 canonical 비율은 sure thing 10.49%, persuadable
+23.86%, sleeping dog 20.05%, lost cause 45.60%다. 그러나 Fréchet 구간은 각각
+`0--30.53%`, `3.82--34.35%`, `0--30.53%`, `35.11--65.65%`로 넓다. 따라서
+이 값은 실제 구성비의 추정치가 아니라 simulator point assumption이다.
+
+종료상태 분석에서는 최종 행동일을 제외한 과거만으로 P_LT 조건을 다시 적용했다.
+이는 최종 구매로 장기 구매자와 만족 이탈을 동시에 정의하는 순환을 막는다. 이렇게
+사전에 확립된 장기 구매자는 21,836명이었고, 관측 종료까지 30일 이상 남아 종료상태를
+판정할 수 있는 사용자는 2,388명이었다. 최종일 구매 후 30일 미복귀인
+`SATIATED_EXIT_CANDIDATE`는 799명(33.46%), 비구매 후 미복귀는 1,589명(66.54%)이었다.
+전체 30일 추적 가능 사용자의 구매 후 미복귀 비중은 40.69%여서 P_LT가 이 종료모드에
+더 집중된 것은 아니다. 만족 이탈 후보의 최종 구매 32.42%에는 `Coupon_id`가 있었고,
+18.52%는 최종 행동 뒤 쿠폰을 다시 받았지만 click·purchase로 복귀하지 않았다.
+이는 구매 후 장기 미복귀의 존재를 보여주는 기술통계이지 만족도, 영구 이탈 또는
+쿠폰 유발 이탈의 증거가 아니다. 결과는 `artifacts/tianchi-long-term-lifecycle/`,
+그림은 `img/uplift/tianchi_long_term_lifecycle.png`에 저장했다.
+종료 대리군은 구매와 미복귀라는 사후 결과로 정의되므로 canonical type 비율을
+추가로 적합하지 않는다. 그렇게 하면 post-treatment selection이 된다.
 
 페르소나를 제거하고 이탈 직전 세 세션을 합치면 직전 gap 중앙값은
 `0.22h → 0.89h → 5.69h`로 증가했다. 30일 내 복귀 경로는
@@ -1181,7 +1356,62 @@ PYTHONPATH=src pytest -q
 
 교환가능성, positivity, 일관성, 관측 완전성 등이 확인되지 않았다. 아래 범위는 **관측 구매율을 잠재결과 확률로 치환한 조건부 시나리오**로, 실제 모집단의 인과적 경계라고 주장할 수 없다. 잠재결과 정의의 개입 버전도 명확해야 한다. 특히 Starbucks 할인과 BOGO를 합친 처치는 특정 오퍼의 효과가 아니며, 하나의 비교 가능한 혼합 정책이라는 추가 가정이 필요하다. 이전·이후 오퍼 이력도 통제하지 않았다. 단일 사용자가 동일 시간 창에서 네 유형 중 무엇인지 확인한 결과도 아니다.
 
-## Tianchi coupon-anchor users matched to Cosmetics persona proxies
+## Tianchi online-only behavioral personas
+
+`ccf_online_stage1_train.csv`만으로 동일한 masked-GRU→K-sweep→centroid 대표군
+파이프라인을 다시 학습했다. 원시 사용자 행동 `Action=0` click, `Action=1`
+purchase, `Action=2` coupon receive를 모두 포함한다. 시각이 날짜까지만 제공되므로
+하루를 click/purchase/receive의 일곱 비어 있지 않은 조합 중 하나로 변환했으며,
+동일일 내부 순서는 추정하지 않았다. 사용자 ID modulo 50 표본에서 12,000명을
+사용했고 두 날짜 이상 관측된 8,000명을 군집 적합에 사용했다.
+
+독립 GRU 초기화에서 자동 silhouette 선택은 \(K=8\)과 \(K=6\)으로 달랐다.
+\(K=6\)의 cross-run ARI는 0.767, silhouette는 0.592와 0.574였고, 고정 \(K=6\)
+재학습의 held-out silhouette는 0.598과 0.597이었다. \(K=7,8\)은 첫 실행의
+silhouette는 높지만 두 번째 실행에서 약 0.53으로 낮아져 운영 군집 수를 \(K=6\)으로
+고정했다.
+
+| 군집 | 사용자 | 원시 action 구성: click / purchase / receive | 요약 |
+|---|---:|---:|---|
+| C0 | 6,647 | 96.3 / 2.6 / 1.1% | 클릭 지배 |
+| C1 | 2,501 | 4.2 / 78.4 / 17.4% | 구매 지배, 쿠폰 수령 동반 |
+| C2 | 714 | 70.3 / 25.0 / 4.8% | 클릭·구매 혼합 |
+| C3 | 784 | 76.6 / 19.3 / 4.1% | 반복 탐색·구매 혼합 |
+| C4 | 828 | 54.9 / 9.1 / 36.0% | 쿠폰 수령 민감형 |
+| C5 | 526 | 81.0 / 11.5 / 7.5% | 탐색 중심, 간헐적 수령·구매 |
+
+![Tianchi online-only persona K sweep](img/persona/tianchi_online_k_sweep.png)
+
+각 \(K=6\) centroid와 표준화된 48차원 GRU 공간에서 Euclidean distance가 가장
+작은 반복 사용자 20명을 선택했다. 아래 histogram은 파생 user-day 비중이 아니라
+각 대표 사용자의 원시 `Action=0/1/2` 발생 횟수다. 점선은 20명의 중앙값이다.
+
+![Tianchi centroid-nearest user action distributions](img/persona/tianchi_centroid_action_histograms.png)
+
+| 군집 | 대표군 평균 click | 평균 purchase | 평균 receive | 대표군 해석 |
+|---|---:|---:|---:|---|
+| C0 | 13.55 | 0.55 | 0.10 | 조회 중심 |
+| C1 | 0.35 | 2.55 | 0.10 | 구매 중심 |
+| C2 | 1.30 | 1.30 | 0.00 | 저활동 비수령 혼합형 |
+| C3 | 5.70 | 1.70 | 0.00 | 비수령 클릭·구매형 |
+| C4 | 4.45 | 0.45 | 4.50 | 쿠폰 수령 중심 |
+| C5 | 6.80 | 1.90 | 0.00 | 비수령 탐색·구매형 |
+
+Cosmetics는 쿠폰 상태가 관측되지 않은 기본 행동 자료이며 시뮬레이터에서 무쿠폰
+baseline으로 두는 것은 명시적 모델링 가정이다. Tianchi는 동일 표현·군집 파이프라인에
+쿠폰 수령 행동을 추가한 독립 환경이다. 두 데이터셋의 cluster ID를 동일 persona로
+간주하지 않는다. Tianchi에는 장바구니·삭제·정확한 세션·동일일 순서가 없기 때문이다.
+또한 `Action=2` 부재는 기록상 비수령일 뿐 offer·eligibility의 부재가 아니다.
+
+결과는 `artifacts/tianchi-online-personas/clusters.json`, 대표 사용자 매핑은
+`centroid_representatives.parquet`, 원시 행동 군집 요약은
+`raw_action_cluster_summary.json`, 독립 실행 안정성은 `cross_encoder_stability.json`에
+저장했다.
+
+## Legacy: Tianchi coupon-anchor users matched to Cosmetics persona proxies
+
+다음 분석은 이전의 cross-dataset proxy 설계를 감사 목적으로 보존한 것이다.
+Tianchi-native 군집이 확인됐으므로 이후 모델의 기본 persona로 사용하지 않는다.
 
 Cosmetics is the primary source for the four behavioral personas. Tianchi O2O is used only to find coupon-receipt users with similar **observable pre-receipt behavior** for later uplift analysis. The datasets cannot support a literal cross-dataset persona transfer: Tianchi records click, purchase, and coupon receipt, but has no cart, removal, product sequence, or session boundary.
 
@@ -3345,6 +3575,225 @@ The input panel is prepared locally; raw and row-level derivatives are not
 redistributed. A next step is pre-specified temporal validation, diagnostics with
 customer/calendar dependence accounted for, domain-constraint parity, and actual
 intervention evidence. Do not use this graph as causal truth for RL/IRL.
+
+## Tianchi-anchored cross-domain cluster alignment
+
+세 데이터셋에서 masked-GRU 표현을 각각 독립적으로 학습했다. Cosmetics와
+Electronics는 silhouette 최적 \(K=2\)보다 세부 행동 이질성을 보존하기 위해
+\(K=4\)를 운영 해상도로 고정했다. 동일한 80/20 사용자 분할에서 얻은 결과는
+다음과 같다.
+
+| 데이터셋 | Train silhouette | Held-out silhouette | Seed ARI | 전체 군집 크기 |
+|---|---:|---:|---:|---|
+| Cosmetics | 0.498 | 0.487 | 0.987 | 9,272 / 86 / 2,078 / 564 |
+| Electronics | 0.423 | 0.428 | 1.000 | 2,464 / 7,912 / 1,577 / 47 |
+
+두 데이터셋 모두 seed 변화에 안정적이지만 작은 희귀 군집을 포함한다.
+따라서 \(K=4\)는 silhouette 최적값이 아니라 compactness와 simulator 행동
+이질성 사이의 운영적 절충이다. Tianchi \(K=6\) 군집을 두 \(K=4\) 군집계로
+정렬했다. 정렬에는 세 도메인에서
+공통으로 관측되는 탐색·구매 행동만 사용했다. 장바구니, 삭제, 쿠폰 수령은
+도메인 고유 사건이므로 제외했다. 사용자별 공통 특징은 구매 비중, 활동량과
+활동일 수, 일별 구매 비중, 활동일 간격, 최초·최종 활동일 구매 여부 및
+탐색·구매 간 전이율이다. 전체 사용자를 합쳐 robust scaling한 뒤 각 군집의
+중앙값 profile을 계산했다.
+
+\[
+S(T_i,D_j)=\exp\left[-\sqrt{\frac{1}{|F|}
+\sum_{f\in F}\left(\widetilde m_{T_i,f}-\widetilde m_{D_j,f}\right)^2}\right],
+\qquad D\in\{C,E\}.
+\]
+
+각 Tianchi 군집은 두 대상 도메인에서 \(S\)가 가장 큰 군집으로 독립 매핑했다.
+1:1 대응을 강제하지 않았으므로 여러 Tianchi 군집이 같은 기본 행동군으로
+합쳐질 수 있다. 부트스트랩 확률 \(B\)는 사용자 재표집 200회 중 동일 군집이
+최근접으로 선택된 비율이다.
+
+| Tianchi | Cosmetics \(S/B\) | Electronics \(S/B\) |
+|---|---:|---:|
+| T0 | C0 0.564 / 0.900 | E1 0.564 / 0.860 |
+| T1 | C0 0.574 / 1.000 | E2 0.672 / 1.000 |
+| T2 | C2 0.513 / 0.900 | E2 0.524 / 0.860 |
+| T3 | C2 0.495 / 0.420 | E2 0.504 / 0.775 |
+| T4 | C0 0.612 / 0.790 | E1 0.612 / 0.750 |
+| T5 | C1 0.520 / 0.705 | E0 0.514 / 0.660 |
+
+Tianchi의 6개 군집은 공통 행동 공간에서 Cosmetics와 Electronics 각각의
+3개 군집으로 수축했다. 따라서 시뮬레이터에서는 쿠폰 조건이
+없는 상태에서 Tianchi의 쿠폰 관련 세분화가 몇 개의 기본 행동군으로 합쳐지는
+구조를 사용한다. Cosmetics와 Electronics에는 쿠폰 노출 변수가 없으므로
+“쿠폰 없음”은 관측된 처치 상태가 아니라 모델링 baseline이다. 이 결과는
+쿠폰이 군집 분화를 일으킨다는 인과 증거가 아니라, coupon-receipt 축을 제거한
+공통 관측 공간에서 일부 Tianchi 군집이 구분되지 않는다는 관찰 결과다.
+Cosmetics C3와 Electronics E3는 어느 Tianchi 군집의 최근접 대상도 아니었다.
+T3→C2의 부트스트랩 대응 확률은 0.420이고 T5→E0의 최근접 margin은
+0.001이므로 이 두 대응은 특히 불확실하다.
+
+![Tianchi-anchored cross-domain cluster alignment](img/persona/cross_domain_cluster_alignment.png)
+
+### Direct Cosmetics--Electronics \(K=4\) mapping
+
+동일한 공통 특징과 유사도 정의로 Cosmetics와 Electronics를 직접 비교했다.
+최근접 대응은 대칭일 필요가 없으므로 양방향을 별도로 계산했다.
+
+| 방향 | 원본 | 최근접 대상 | \(S\) | Bootstrap |
+|---|---|---|---:|---:|
+| Cosmetics→Electronics | C0 | E1 | 1.000 | 1.000 |
+| Cosmetics→Electronics | C1 | E3 | 0.564 | 0.790 |
+| Cosmetics→Electronics | C2 | E0 | 0.960 | 0.865 |
+| Cosmetics→Electronics | C3 | E3 | 0.644 | 1.000 |
+| Electronics→Cosmetics | E0 | C2 | 0.960 | 1.000 |
+| Electronics→Cosmetics | E1 | C0 | 1.000 | 1.000 |
+| Electronics→Cosmetics | E2 | C2 | 0.657 | 1.000 |
+| Electronics→Cosmetics | E3 | C3 | 0.644 | 0.960 |
+
+C0–E1은 한 번 또는 소수의 조회가 지배적인 사용자의 공통 특징 중앙값이
+동일해 \(S=1\)이 되었다. C2–E0의 유사도는 장바구니 조성이 아니라 이를
+제외한 활동량·구매 이력 축에서 나온다.
+C3–E3은 희귀한 장기 활동군에 대응한다. Cosmetics C1은 삭제 비중이 높은
+희귀군이지만 Electronics에는 삭제 사건이 없어 독립 대응군이 없다. 이에 따라
+C1은 E3을 선택하지만 E3의 역방향 최근접은 C3이다. 이 비대칭은 두 데이터셋의
+행동 어휘 차이가 남긴 정보 손실을 보여준다.
+
+![Direct Cosmetics--Electronics K=4 alignment](img/persona/cosmetics_electronics_k4_alignment.png)
+
+### Electronics-drop ablation
+
+Cosmetics에만 존재하는 remove_from_cart 사건을 토큰화 전에 삭제하고
+view/cart/purchase 세 행동만으로 masked-GRU를 처음부터 재학습했다. 이 변형을
+electronics_drop으로 기록했다. 사용자 표본, 최대 시퀀스 길이, 학습 epoch와
+\(K=4\) 설정은 유지했다. 변형 모형의 train·held-out silhouette는
+0.445·0.431이고 seed ARI는 0.995였다. Electronics의 대응 값은
+0.423·0.428과 1.000이다.
+
+정렬에는 두 데이터셋에서 모두 관측되는 장바구니 비중, 구매 비중, 활동량,
+세션 수와 간격, 구매·장바구니 경험, 최초·최종 행동 및 세션 내
+view→cart, cart→purchase와 행동 지속률을 사용했다. 비교 척도가 ablation에
+따라 변하지 않도록 robust scaler는 원본 Cosmetics와 Electronics에만 적합하고,
+electronics_drop에는 고정된 변환을 out-of-sample로 적용했다.
+
+| 변형 | 원천 군집 | Electronics 최근접 | \(S\) | Bootstrap |
+|---|---|---|---:|---:|
+| 원본 Cosmetics | C0 | E1 | 0.785 | 1.000 |
+| 원본 Cosmetics | C1 | E2 | 0.234 | 1.000 |
+| 원본 Cosmetics | C2 | E2 | 0.133 | 1.000 |
+| 원본 Cosmetics | C3 | E2 | 0.187 | 1.000 |
+| electronics_drop | D0 | E1 | 0.925 | 1.000 |
+| electronics_drop | D1 | E2 | 0.388 | 0.860 |
+| electronics_drop | D2 | E2 | 0.200 | 1.000 |
+| electronics_drop | D3 | E2 | 0.240 | 1.000 |
+
+일대일 제약 Hungarian 대응의 평균 유사도는 0.273에서 0.384로 0.112
+상승했다. 최근접 유사도 역시 네 원천 군집 모두 증가했다. 그러나 원본에서는
+C1·C2·C3, 제거 변형에서는 D1·D2·D3이 모두 E2로 대응한다. 두 경우 모두
+정방향 일대일 대응이 아니며 상호 최근접 쌍도 두 개다.
+
+electronics_drop과 Electronics만으로 scaler를 다시 적합하면 네 군집이 서로
+다른 대상에 대응하는 결과가 나오지만, 이는 ablation이 평가 척도까지 바꾼
+정규화 민감 결과이므로 채택하지 않았다. 고정 척도 결과는
+remove_from_cart 미관측이 도메인 간 거리의 일부를 설명한다는 제한적 증거다.
+활동량·구매율·세션 구조의 도메인 차이까지 제거되지는 않아, 미관측 삭제 사건
+하나가 전체 군집 불일치의 원인이라고 결론낼 수 없다. 또한 사건 삭제는
+Electronics 로깅 환경에서 Cosmetics 사용자가 보였을 반사실 행동을 복원하지
+않는다.
+
+![Electronics-drop alignment](img/persona/electronics_drop_alignment.png)
+
+### Cosmetics-drop와 Electronics 공동 군집
+
+독립적으로 학습한 두 임베딩을 사후 정렬하는 대신, Cosmetics의
+remove_from_cart를 제거한 로그와 Electronics 로그를 합쳐 하나의
+masked-GRU와 하나의 K-means를 학습했다. 행동 어휘는 view, cart, purchase로
+동일하다. 사용자 ID 충돌은 도메인별 namespace로 방지했다. 각 도메인에서
+4,140명씩 같은 수를 추출했고, K-means 학습과 보류 평가는 2세션 이상 사용자도
+각각 423명과 109명씩 균형화했다. \(K=4\)는 비교 목적의 고정값이며 silhouette
+최적값이 아니다. Train·held-out silhouette는 0.490·0.461이다.
+
+| 공동 군집 | Cosmetics-drop \(P(J\mid D)\) | Electronics \(P(J\mid D)\) | 반복 세션 사용자 C / E | 행동 조성 유사도 |
+|---|---:|---:|---:|---:|
+| J0 | 62.7% | 72.9% | 1,730 / 388 | 0.986 |
+| J1 | 6.2% | 7.3% | 172 / 39 | 0.868 |
+| J2 | 24.0% | 19.2% | 662 / 102 | 0.811 |
+| J3 | 7.1% | 0.6% | 196 / 3 | 표본 부족 |
+
+도메인과 공동 군집의 NMI는 0.013이고, 도메인별 군집 분포의 total variation
+distance는 0.114, Jensen--Shannon divergence는 0.020이다. J0--J2는 두
+도메인에 30명 이상의 반복 세션 사용자가 존재하며 같은 공동 공간에서 직접
+대응한다. J3은 Electronics 표본이 3명뿐이므로 공통 군집으로 채택하지 않는다.
+
+따라서 공통 행동만 사용하면 두 도메인의 주된 세 행동 군집은 상당 부분
+겹치지만 네 군집 전체가 일대일로 대응하지는 않는다. remove_from_cart의
+미관측은 기존 거리의 일부를 설명하지만, 관측 기간·활동 깊이·구매율·로깅
+구조 차이가 남는다. 변수 미관측 하나만으로 기존 불일치를 설명한다는 가설은
+부분적으로만 지지된다.
+
+![Joint Cosmetics-drop and Electronics K=4](img/persona/retail_combined_k4.png)
+
+### Tianchi 최초 관측 쿠폰 수령 전후와 행동 군집 매칭
+
+Cosmetics와 Electronics에는 쿠폰 수령 변수가 없으므로 해당 데이터셋 안에서
+무수령→수령 전환을 직접 관측할 수 없다. 두 데이터셋은 무처치 대조군이 아니라
+행동 참조군으로만 사용하고, 전환 분석은 Tianchi online 로그에서 수행했다.
+
+온라인 로그 전체에서 사용자의 최초 **관측** 쿠폰 수령일이 2016년 5월인
+33,003명을 찾았다. 수령 전 28일에 클릭 또는 구매 기록이 두 건 이상인
+9,723명을 최종 매칭했다. 기준일은 같은 날 사건의 순서가 없으므로 제외하고,
+수령 후 28일까지 관측했다. Tianchi click은 retail view에 대응시켰으며,
+Tianchi에 없는 cart와 remove는 매칭 특징에서 제외했다. 관측창 차이를 줄이기
+위해 기존 Cosmetics·Electronics K=4 사용자도 개인별 마지막 관측일 이전 28일로
+잘랐다. 공통 특징은 구매비중, 총 행동·활동일·일평균 행동, 구매일 비중,
+중앙 활동간격, 최초·최종일 구매 여부와 일간 행동 전이였다. 참조 두 데이터셋에
+robust scaler를 적합한 뒤 Tianchi 사전 행동을 out-of-sample로 최근접 매칭했다.
+
+| Cosmetics 매칭 | 사용자 | 비중 | 중앙 유사도 | 구매 사용자 수령 전→후 | 수령 후 무기록 | 28일 내 추가 수령 |
+|---|---:|---:|---:|---:|---:|---:|
+| C0 | 302 | 3.1% | 0.441 | 73.8%→32.8% | 44.7% | 29.5% |
+| C1 | 5,101 | 52.5% | 0.455 | 45.0%→27.7% | 31.0% | 25.4% |
+| C2 | 2,607 | 26.8% | 0.612 | 49.0%→25.6% | 45.6% | 23.6% |
+| C3 | 1,713 | 17.6% | 0.526 | 46.8%→33.7% | 12.4% | 25.3% |
+
+| Electronics 매칭 | 사용자 | 비중 | 중앙 유사도 | 구매 사용자 수령 전→후 | 수령 후 무기록 | 28일 내 추가 수령 |
+|---|---:|---:|---:|---:|---:|---:|
+| E0 | 1,475 | 15.2% | 0.540 | 2.9%→21.2% | 33.2% | 22.4% |
+| E1 | 2,353 | 24.2% | 0.408 | 15.9%→21.5% | 32.4% | 23.3% |
+| E2 | 3,017 | 31.0% | 0.463 | 100.0%→35.5% | 48.1% | 28.0% |
+| E3 | 2,878 | 29.6% | 0.458 | 40.4%→30.2% | 14.5% | 24.5% |
+
+![Tianchi first-receipt users matched to retail clusters](img/uplift/tianchi_first_receipt_cluster_alignment.png)
+
+Electronics 기준 E0·E1은 수령 후 구매 기록 사용자 비율이 각각 +18.2%p,
++5.7%p 증가했다. 반면 사전 구매가 지배적인 E2는 −64.5%p, E3는 −10.3%p
+감소했다. 28일 안에 추가 수령이 없는 7,291명에서도 방향은 각각 +14.2%p,
++3.4%p, −68.6%p, −12.7%p로 유지됐다. 전체 표본에서는 클릭 평균이
+7.53회에서 5.93회, 구매 평균이 1.33회에서 0.78회, 구매 경험률이
+47.3%에서 28.4%로 감소했고 32.1%는 수령 후 클릭·구매 기록이 없었다.
+
+사전 Cosmetics C3 매칭자의 98.6%는 Electronics E3에도 매칭되어 장기
+고관여형의 교차 참조가 가장 안정적이었다. C2의 49.0%는 E2에 대응했지만,
+C0는 E1/E2로 거의 양분되고 C1은 네 Electronics 군집으로 분산됐다. 매칭
+유사도와 최근접 margin도 전반적으로 낮아 cart가 없는 Tianchi에서 Cosmetics의
+세부 장바구니 행동군을 복원하기는 어렵다.
+
+이 전후 차이는 쿠폰의 인과효과가 아니다. 최초 관측 수령은 생애 최초 수령을
+보장하지 않으며, 수령 자체가 최근 구매·활동에 의해 타기팅됐을 수 있다.
+특히 E2의 큰 감소는 쿠폰의 부정적 효과보다 사전 구매를 조건으로 집단을
+선택한 뒤 발생한 평균회귀와 관측창 차이로 해석하는 편이 타당하다. 따라서
+시뮬레이터에는 E0·E1의 증가를 직접 uplift 계수로 복사하지 않고, 수령 전 행동에
+따라 반응 시나리오의 prior가 달라질 수 있다는 정성적 근거로만 사용한다.
+
+재현 명령은 PYTHONPATH=src python -m analysis.persona.cluster similarity이다.
+사용자 공통 특징, 군집 중앙값, 전체 유사도 행렬과 부트스트랩 결과는
+artifacts/cross-dataset-persona-similarity/에 저장한다.
+Electronics-drop은 PYTHONPATH=src python -m analysis.persona.cluster
+electronics-drop으로 재현하며 결과는 artifacts/electronics-drop-alignment/에
+저장한다.
+공동 군집은 PYTHONPATH=src python -m analysis.persona.sequence --source
+retail_combined --input DATA_ROOT --cluster-count 4 --max-users 24000으로 학습하고,
+PYTHONPATH=src python -m analysis.persona.cluster retail-combined으로 요약한다.
+결과는 artifacts/retail-combined-personas/에 저장한다.
+최초 수령 전후 매칭은 PYTHONPATH=src python -m analysis.uplift.observed
+first-receipt-alignment으로 재현하며 결과는
+artifacts/tianchi-first-receipt-alignment/에 저장한다.
 
 <a id="archive-uplift-sequence-long-term-pilot"></a>
 
