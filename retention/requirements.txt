@@ -1,0 +1,14 @@
+numpy>=1.26,<2.4
+pandas>=2.2,<3
+duckdb>=1.1,<2
+pyarrow>=17
+scikit-learn>=1.5,<2
+lightgbm>=4.5,<5
+catboost>=1.2,<2
+xgboost>=2,<4
+torch>=2.4,<3
+optuna>=4,<5
+shap>=0.46,<1
+matplotlib>=3.9,<4
+PyYAML>=6,<7
+pytest>=8,<10

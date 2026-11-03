@@ -1,0 +1,22 @@
+# Replace paths/periods with the actual seven-table release; do not infer collection end.
+input_dir: retention/input
+output_dir: retention/artifacts/real_run_001
+first_as_of: '2025-03-01'
+last_as_of: '2025-11-30'
+observation_end: '2026-01-01'
+test_start: '2025-10-15'
+observation_assumption: 'REPLACE: confirmed generation/collection boundary and known missing intervals'
+target: visit
+horizon_days: 30
+lookback_days: 30
+minimum_age_days: 30
+stride_days: 7
+seed: 42
+max_length: 128
+trials: 3
+iterations: 120
+epochs: 12
+hidden: 24
+batch_size: 128
+bootstrap_repeats: 100
+data_role: provided_records
