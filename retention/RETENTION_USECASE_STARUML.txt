@@ -1,0 +1,180 @@
+﻿/*
+Retention 파트 — 슬라이드 4용 StarUML JavaScript snippet
+
+입력 자료:
+- ch5.pdf 전체 69쪽. 주요 근거: 31~32, 36~48, 52~53, 56~62, 67~69쪽.
+- 루트의 '유스케이스 명세 — 고객 행동 시뮬레이터 기반 리텐션 최적화.pptx'
+  슬라이드 3~6. 명세 PDF는 없으며 PPTX를 확인했다.
+
+사용 방법:
+1. StarUML에서 프로젝트를 연다.
+2. View > Script Console (Ctrl+Alt+J)을 연다.
+3. 이 파일 전체를 붙여넣어 실행한다. 주석도 함께 붙여넣어도 된다.
+4. Model Explorer에서 'Retention_UseCase_Slide4' 아래 다이어그램을 연다.
+5. 이미지로 내보내어 슬라이드 4에 삽입한다.
+
+형식: PlantUML이 아닌 StarUML app.factory 기반 JavaScript.
+공식 Scripting API 기준으로 작성했으며, 로컬에 StarUML이 없어
+실제 GUI 생성/렌더링은 확인하지 못했다. 문법 및 mock 실행만 검증한다.
+
+표현 범위:
+- 시스템 경계는 전체 '고객 행동 시뮬레이터 기반 리텐션 전략 최적화 시스템'.
+- 이 그림은 그중 Retention 기능만 발췌한다. 전체 프로젝트 다이어그램 완성본이 아니다.
+- 팀 전체 그림에 합칠 때 시스템 경계는 하나로 유지하고 동일 역할 액터는 재사용한다.
+- Simulator/Uplift/CLV/전략 모듈은 전체 시스템 내부이므로 외부 액터로 만들지 않는다.
+- 팀 내 다른 파트를 액터로 표시할 수 있는 ch5 56~57쪽의 예외는
+  'Retention 서브시스템'만 경계로 잡은 별도 상세도에 적용한다.
+
+슬라이드 5 — 아래 2개 역할을 액터 표에 추가/통합:
+A-R01 | 모델 운영자 | 사용자
+  학습 데이터와 이탈 정의·기간·학습 설정을 지정해 모델 학습을 요청하고,
+  학습된 모델로 고객별 이탈 위험 예측을 요청하는 역할.
+A-R02 | 리텐션 전략 분석가 | 사용자
+  고객별 이탈 확률·예측 대상 제외 사유와 제공되는 예측 설명을 조회해
+  유지 전략 수립에 활용하는 역할. 한 사람이 두 역할을 맡을 수 있다.
+
+슬라이드 6 — 아래 3개 유스케이스를 추가:
+UC-R01 | 이탈 예측 모델 학습
+  지정한 데이터·이탈 정의·설정으로 후보 모델을 학습하고 성능을 비교하여,
+  선택 모델과 비교 보고서를 제공한다. 활성화 액터: 모델 운영자.
+UC-R02 | 고객 이탈 위험 예측
+  지정한 모델·고객 데이터·기준시각으로 고객별 이탈 확률을 산출하고,
+  예측 대상 제외/실패 상태를 포함한 결과를 저장·제공한다.
+  활성화 액터: 모델 운영자. 학습된 모델의 존재가 선행 조건이다.
+UC-R03 | 이탈 예측 결과 조회
+  이미 산출된 고객별 이탈 확률·제외 사유와 제공되는 예측 설명을 조회한다.
+  활성화 액터: 리텐션 전략 분석가. 예측 결과의 존재가 선행 조건이다.
+
+명세 유의사항:
+- R03은 사용자에게 제공할 조회 기능의 제안이다. 현재 구현은 결과 파일과
+  비교/SHAP 보고서 출력까지이며, 별도 조회 화면/API는 아직 구현하지 않았다.
+- 비교·튜닝·5-fold·피처 생성·SHAP 계산은 R01/R02의 세부 처리로 설명한다.
+  ML/DL 알고리즘마다 유스케이스를 만들지 않는다.
+- R01/R02/R03은 따로 요청할 수 있는 사용자 기능이므로 분리한다.
+  조회가 매번 재학습·재예측을 수행한다는 뜻이 아니다.
+- 유스케이스 간 학습→예측→조회 순서선을 넣지 않는다(ch5 62쪽).
+  include/extend를 순서 표현에 사용하지 않는다.
+- 액터→유스케이스 화살표는 활성화 제어이며 데이터 전달 방향이 아니다.
+  결과를 받는다는 이유만으로 반대 방향 선을 추가하지 않는다.
+- 스케줄 실행 요구가 없으므로 Timer 액터를 추가하지 않는다.
+- 가상 고객은 이 시스템을 직접 사용하는 주체가 아니므로 액터에 넣지 않는다.
+- 정상·입력 오류·모델 없음·대상 제외는 각 유스케이스 시나리오로 기술한다.
+
+API 근거:
+https://docs.staruml.io/developing-extensions/scripting-api/
+https://docs.staruml.io/developing-extensions/creating-deleting-and-modifying-elements/
+https://docs.staruml.io/developing-extensions/getting-started/
+*/
+
+(function () {
+  "use strict";
+
+  if (typeof app === "undefined" || !app.factory || !app.repository) {
+    throw new Error("StarUML Script Console에서 실행하세요.");
+  }
+
+  var modelName = "Retention_UseCase_Slide4";
+  var project = app.project.getProject();
+  if (!project) {
+    throw new Error("먼저 StarUML 프로젝트를 여세요.");
+  }
+
+  var existing = app.repository.select("@UMLModel").filter(function (m) {
+    return m.name === modelName;
+  });
+  if (existing.length > 0) {
+    throw new Error("같은 이름의 모델이 이미 있습니다. 기존 결과를 사용하거나 modelName을 바꾸세요.");
+  }
+
+  var nodeIds = app.factory.getModelAndViewIds();
+  ["UMLActor", "UMLUseCase", "UMLUseCaseSubject", "UMLAssociation"].forEach(function (id) {
+    if (nodeIds.indexOf(id) < 0) {
+      throw new Error("현재 StarUML에서 지원하지 않는 factory ID: " + id);
+    }
+  });
+  if (app.factory.getDiagramIds().indexOf("UMLUseCaseDiagram") < 0) {
+    throw new Error("Use Case Diagram factory를 사용할 수 없습니다.");
+  }
+
+  var model = app.factory.createModel({
+    id: "UMLModel",
+    parent: project,
+    modelInitializer: function (m) {
+      m.name = modelName;
+      m.documentation = "전체 리텐션 전략 최적화 시스템의 Retention 파트 발췌. 슬라이드 5·6과 명칭을 일치시킨다.";
+    }
+  });
+
+  var retentionPackage = app.factory.createModel({
+    id: "UMLPackage",
+    parent: model,
+    modelInitializer: function (m) { m.name = "Retention"; }
+  });
+
+  var diagram = app.factory.createDiagram({
+    id: "UMLUseCaseDiagram",
+    parent: model,
+    diagramInitializer: function (d) { d.name = "Retention 유스케이스 — 전체 시스템 중 발췌"; }
+  });
+
+  function node(id, parent, name, x1, y1, x2, y2, documentation, container) {
+    var options = {
+      id: id, parent: parent, diagram: diagram,
+      x1: x1, y1: y1, x2: x2, y2: y2,
+      modelInitializer: function (m) {
+        m.name = name;
+        m.documentation = documentation;
+      }
+    };
+    if (container) { options.containerView = container; }
+    var view = app.factory.createModelAndView(options);
+    if (!view) { throw new Error("요소 생성 실패: " + name); }
+    return view;
+  }
+
+  var subject = node("UMLUseCaseSubject", model,
+    "고객 행동 시뮬레이터 기반 리텐션 전략 최적화 시스템",
+    340, 30, 1440, 540,
+    "전체 시스템 경계. 내부에는 이번 Retention 파트만 표시한다.");
+
+  var operator = node("UMLActor", model, "모델 운영자", 60, 160, 200, 270,
+    "학습 설정을 지정해 학습과 배치 예측을 활성화하는 사용자 역할.");
+  var analyst = node("UMLActor", model, "리텐션 전략 분석가", 60, 390, 220, 500,
+    "산출된 이탈 위험 결과를 조회해 유지 전략에 활용하는 사용자 역할.");
+
+  var train = node("UMLUseCase", retentionPackage, "이탈 예측 모델 학습",
+    700, 105, 1190, 190,
+    "UC-R01. 모델 운영자가 학습을 요청한다. 후보 학습·성능 비교 후 선택 모델과 보고서를 제공한다.", subject);
+  var predict = node("UMLUseCase", retentionPackage, "고객 이탈 위험 예측",
+    700, 260, 1190, 345,
+    "UC-R02. 모델 운영자가 지정한 모델과 기준시각으로 고객별 이탈 확률·제외 상태를 산출한다. 학습 모델이 선행 조건이다.", subject);
+  var inspect = node("UMLUseCase", retentionPackage, "이탈 예측 결과 조회",
+    700, 415, 1190, 500,
+    "UC-R03. 전략 분석가가 저장된 이탈 확률·제외 사유·제공되는 설명을 조회한다. 결과의 존재가 선행 조건이다.", subject);
+
+  function activation(actor, useCase) {
+    var edge = app.factory.createModelAndView({
+      id: "UMLAssociation",
+      parent: model,
+      diagram: diagram,
+      tailView: actor, headView: useCase,
+      tailModel: actor.model, headModel: useCase.model,
+      modelInitializer: function (m) {
+        m.documentation = "활성화: " + actor.model.name + "가 " + useCase.model.name + "을 요청한다. 데이터 흐름을 뜻하지 않는다.";
+        // v5+ navigability is an enum; older versions used booleans.
+        m.end1.navigable = typeof m.end1.navigable === "boolean" ? false : "unspecified";
+        m.end2.navigable = typeof m.end2.navigable === "boolean" ? true : "navigable";
+      }
+    });
+    if (!edge) { throw new Error("활성화 연관 생성 실패"); }
+  }
+
+  activation(operator, train);
+  activation(operator, predict);
+  activation(analyst, inspect);
+
+  // Deliberately no use-case-to-use-case sequencing arrows or include/extend.
+  // Existing project elements are not deleted or renamed.
+  console.log("생성 완료: " + modelName + " / 액터 2개 / 유스케이스 3개 / 활성화 연관 3개");
+  return diagram;
+})();
