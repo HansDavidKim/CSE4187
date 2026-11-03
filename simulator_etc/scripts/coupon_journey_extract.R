@@ -1,0 +1,13 @@
+args <- commandArgs(trailingOnly = TRUE)
+stopifnot(length(args) == 2)
+transactions <- readRDS(file.path(args[1], "transactions.rds"))
+load(file.path(args[1], "coupon_redemptions.rda"))
+transactions$day <- as.Date(transactions$transaction_timestamp, tz = "America/New_York")
+baskets <- unique(transactions[c("household_id", "day", "basket_id")])
+daily <- aggregate(basket_id ~ household_id + day, baskets, length)
+names(daily)[3] <- "baskets"
+spend <- aggregate(sales_value ~ household_id + day, transactions, sum)
+daily <- merge(daily, spend, by = c("household_id", "day"))
+write.csv(daily, file.path(args[2], "journey_daily.csv"), row.names = FALSE)
+write.csv(coupon_redemptions, file.path(args[2], "journey_redemptions.csv"), row.names = FALSE)
+stopifnot(sum(daily$baskets) == nrow(baskets))

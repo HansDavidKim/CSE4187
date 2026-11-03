@@ -1,0 +1,202 @@
+\documentclass[11pt,twocolumn]{article}
+\usepackage[a4paper,top=15mm,bottom=17mm,left=15mm,right=15mm,columnsep=7mm]{geometry}
+\usepackage{kotex}
+\usepackage{fontspec}
+\setmainfont{NanumGothic}
+\setsansfont{NanumGothic}
+\usepackage{amsmath,amssymb,booktabs,enumitem,microtype,xcolor,hyperref,balance}
+\hypersetup{colorlinks=true,linkcolor=black,citecolor=black,urlcolor=blue!55!black}
+\setlength{\parindent}{0.8em}
+\setlength{\parskip}{0pt}
+\setlist{nosep,leftmargin=1.4em}
+\renewcommand{\baselinestretch}{0.98}
+\setlength{\emergencystretch}{1.2em}
+\newcommand{\draftnote}[1]{\textcolor{red!65!black}{[초안: #1]}}
+\renewcommand{\abstractname}{초록}
+\renewcommand{\refname}{참고문헌}
+
+\title{\vspace{-8mm}\textbf{인과 구조와 역강화학습을 결합한\\
+이커머스 사용자 행동 시뮬레이터 설계}\vspace{-2mm}}
+\author{익명 저자 \quad \textit{KSC 투고용 연구계획 초안}}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-6mm}
+
+\begin{abstract}
+본 연구는 AmExpert 2019의 고객 거래 및 쿠폰 캠페인 이력을 다변량 시계열로 재구성하고,
+NTS-NOTEARS로 비선형 동적 인과 그래프를 학습한 뒤, 그래프 기반 상태 특징과 최대엔트로피
+역강화학습(MaxEnt IRL)을 결합하여 사용자 효용을 복원하는 합성 이커머스 환경을 제안한다.
+사용자별 효용계수는 혼합 가우시안으로 계층화하고, 온도 보정 다항로짓 선택모형으로
+부분적으로 결정적이면서 확률적인 행동을 생성한다. 생성 환경에서는 Bandit, PPO, SAC와
+GRU4Rec을 동일한 관측·행동 공간에서 비교한다. 본 초안은 데이터 전처리, 식별 가정,
+모형 구성 및 검증 계획을 명시하며, 실험 결과는 후속 구현 후 채울 예정이다.
+\end{abstract}
+\noindent\textbf{주제어:} 인과발견, NTS-NOTEARS, 역강화학습, 선택모형, 사용자 시뮬레이션
+
+\section{서론}
+추천·프로모션 정책의 오프라인 평가는 로그에 존재하지 않는 행동의 반응을 관찰할 수 없다는
+근본적 한계를 갖는다. 단순 재표본화는 사용자 상태 변화와 정책 개입의 방향성을 보존하지
+못하고, 예측모형만으로 만든 시뮬레이터는 상관관계를 개입 효과로 오해할 수 있다. 이에 본
+연구는 (1) 시간 지연과 동시점 관계를 포함하는 동적 인과 구조, (2) 관찰 행동으로부터 복원한
+사용자 효용, (3) 고객 이질성과 확률적 선택을 하나의 생성과정으로 결합한다.
+
+핵심 연구질문은 다음과 같다. 첫째, 캠페인과 구매가 중첩된 패널에서 안정적인 Markov
+boundary를 발견할 수 있는가? 둘째, 이 특징 집합으로 추정한 보상은 관찰 행동과 구매 반응을
+재현하는가? 셋째, 합성 환경에서 우수한 정책 순위가 관측자료의 보유기간 평가에서도 유지되는가?
+본 연구의 기여는 단일 DAG를 정답으로 선언하는 데 있지 않다. 부트스트랩과 시간해상도 변화에도
+남는 구조만 생성기의 제약으로 사용하고, 알려진 DAG를 가진 합성 실험을 먼저 통과시키는
+검증 중심 파이프라인을 제안한다.
+
+\section{데이터와 전처리}
+\subsection{AmExpert 2019의 재구성}
+AmExpert 2019는 고객 인구통계, 상품 메타데이터, 일자별 구매, 쿠폰--상품 매핑, 캠페인 기간,
+고객별 쿠폰 수신과 사용 여부를 제공한다. Langen과 Huber~\cite{langen2023}에 따르면 원자료는
+2012년 1월부터 2013년 7월까지의 구매와 시간적으로 일부 중첩된 18개 캠페인을 포함한다.
+원 논문은 쿠폰 유효 집합이 기간 안에서 일정하도록 모든 시작·종료 경계에서 시간을 다시 나누어
+33개 인공 캠페인 기간을 만들었다. 기간별 결과는 고객의 총지출을 유효일수로 나눈 일평균 지출이며,
+각 고객을 33개 기간에 걸쳐 결합하였다. 통제변수는 인구통계, 기간 고정효과, 상품군별 사전
+일평균 지출, 직전 기간의 쿠폰 수신·사용, 그리고 관심 상품군 외 동시 노출 쿠폰 더미이다.
+
+원 논문의 전체 표본은 50,624개 고객--기간 관측치이며, 15,327개(약 30\%)가 하나 이상의
+쿠폰을 수신했다. 수신 관측치 중 실제 사용률은 3\%에 불과하다. 연령·가구규모·주거형태·소득의
+\texttt{unknown}은 각각 52\%, 혼인상태는 72.8\%였으며, 논문은 이를 별도 범주로 유지한 주 분석과
+인구통계가 모두 관측된 431명(13,792개 관측치)의 완전사례 강건성 분석을 병행하였다. 따라서
+쿠폰사용 희소성뿐 아니라 정보 관측 여부와 타기팅의 연관성도 검증해야 한다.
+
+위 절차는 원 논문의 효과추정용 전처리이다. 이와 구분하여, \textbf{본 연구가 새로 제안하는}
+NTS-NOTEARS 입력의 주 분석 단위는 고정 간격인 \textbf{고객--주(customer-week)}이다.
+고객 $i$, 주 $t$에 대해
+\[
+\begin{aligned}
+x_{it}=(&{\rm spend,qty,items,categories},\\[-1mm]
+        &{\rm discount,offer,redeem})
+\end{aligned}
+\]
+를 구성한다. 지출·수량·고유 상품/상품군 수, 일반·쿠폰 할인액, 신규 및 활성 쿠폰 수,
+보고된 사용 여부를 포함한다. 인구통계의 결측은 삭제하지 않고 ``unknown'' 범주와 관측 마스크로
+분리한다. 원자료에 정확한 쿠폰 발송·사용 시각이 없으므로 발송은 캠페인 시작 주, 사용 보고는
+종료 주에 배치한다. 이는 원 논문의 처리법이 아니라 본 연구의 측정 가정이며, 시작·종료 주
+배치를 바꾼 민감도 분석을 함께 수행한다. 거래가 없는 주도 0으로 채워 균일한 간격을 유지하되,
+구조적 0과 결측을 구분한다.
+
+고객별 시계열은 독립된 배열로 보존한다. 마지막 고객의 마지막 주와 다음 고객의 첫 주를
+연결하면 거짓 lag edge가 생기므로, lag window는 고객 경계를 절대 넘지 않는다. 고객 단위로
+학습/검증/시험을 분리하고, 시간 누수를 막기 위해 각 고객 내부에서도 과거에서 미래 순으로
+절단한다. 원 논문의 33개 캠페인 기간 패널은 동일한 일평균 정의로 별도 재현하여 주 단위 결과의
+시간 집계 민감도 분석에 사용한다.
+
+\section{제안 방법}
+\subsection{NTS-NOTEARS 기반 동적 인과발견}
+NTS-NOTEARS~\cite{sun2023}는 1차원 CNN으로 비선형 조건부 함수를 근사하며 lagged
+(inter-slice) 관계와 instantaneous(intra-slice) 관계를 함께 학습한다. 시차 $L\in\{2,4\}$에
+대해 각 변수 $X_j^t$를 $X^{t-L:t}$로 예측하고 다음 목적함수를 최적화한다.
+\begin{align*}
+\min_{\theta,W}\quad &\frac{1}{n}\sum_t\|X^t-f_\theta(X^{t-L:t})\|_2^2
++\lambda_1\|W\|_1,\\[-1mm]
+\text{s.t.}\quad &h(W^{(0)})=0,
+\end{align*}
+\[
+h(W^{(0)})=\operatorname{tr}\!\left[\exp(W^{(0)}\circ W^{(0)})\right]-d.
+\]
+동시점 그래프 $W^{(0)}$에만 비순환 제약을 부여하고 과거에서 미래로의 edge만 허용한다.
+캠페인 시작 시 고정된 \texttt{offers\_started}로 향하는 동시점 구매 edge는 금지하되, 과거
+구매에서 미래 offer로의 edge는 관측 타기팅을 반영하므로 허용한다. 고객 부트스트랩, lag,
+임계값 변화에서 선택확률이 $\pi_0$ 이상인 edge만 안정 그래프에 남긴다. DYNOTEARS와
+PCMCI+를 구조 민감도 기준선으로 둔다~\cite{pamfil2020,runge2019}.
+
+\subsection{그래프 기반 특징 추출과 MaxEnt IRL}
+구매·지출·쿠폰사용 노드 $Y$에 대해 안정 그래프의 부모, 자식 및 자식의 부모로 구성되는
+Markov boundary 후보 $\mathcal{M}(Y)$를 구한다. 단일 그래프의 오류 전파를 줄이기 위해
+edge 선택확률, lag, 방향을 특징에 함께 부여하고, 정책결정 이후 관측되는 변수는 상태에서
+제외한다. 최종 상태 $s_t$는 안정 특징, 최근 $L$주 요약, 정적 고객정보 및 노출 가능한
+행동 집합으로 구성한다.
+
+쿠폰 미수신을 포함한 캠페인 행동 $a_t$가 선형 보상
+$r_{\beta_u}(s_t,a_t)=\beta_u^\top\phi(s_t,a_t)$를 최대화한다고 가정한다. MaxEnt IRL은
+\begin{align*}
+p(\tau_u\mid\beta_u)&\propto
+\exp\!\left\{\sum_t\beta_u^\top\phi(s_t,a_t)\right\},\\
+\hat\beta&=\arg\max_\beta\sum_u\log p(\tau_u\mid\beta)-\lambda\|\beta\|_2^2
+\end{align*}
+를 이용해 관측 궤적과 모형의 기대 feature count를 맞춘다~\cite{ziebart2008}. 고객별 로그가
+짧으므로 완전 독립 추정보다 전역 평균에 shrinkage되는 계층형 $\beta_u$를 사용한다. 정책의
+support가 부족한 행동에 대한 보상은 식별되지 않으므로 propensity와 유효표본크기(ESS)를
+함께 보고한다. 단, AmExpert에는 진열·재고를 포함한 완전한 소비자 선택집합이 없으므로
+$\beta_u$는 상품 수준의 절대 선호가 아니라 관측된 쿠폰 범주와 구매 요약에 대한 상대 효용으로
+해석한다.
+
+\subsection{GMM 이질성과 다항로짓 선택}
+추정된 계수와 정적 문맥 $z_u=[\beta_u,c_u]$에 혼합 가우시안을 적합한다.
+\[
+p(z_u)=\sum_{k=1}^{K}\pi_k\mathcal{N}(z_u\mid\mu_k,\Sigma_k),
+\]
+여기서 $K$는 BIC와 부트스트랩 군집 안정도로 정한다. 새 사용자는 군집을 먼저 뽑고
+$\beta_u$를 조건부 표본추출하여 군집 내·군집 간 이질성을 모두 보존한다.
+
+행동은 외부선택(outside option)을 포함한 다항로짓으로 생성한다~\cite{mcfadden1974}.
+\begin{align*}
+P(a\mid s,u)&=\frac{\exp\{V_{u}(s,a)/T\}}
+{\sum_{a'\in\mathcal{A}(s)}\exp\{V_u(s,a')/T\}},\\[-1mm]
+V_u(s,a)&=\beta_u^\top\phi(s,a).
+\end{align*}
+온도 $T$가 작을수록 결정적이고 클수록 무작위에 가깝다. $\beta/T$는 별도로 식별되지 않으므로
+$\|\beta\|$ 또는 $T$ 중 하나를 고정하고, 검증자료의 선택 엔트로피, top-1 비율과 상품군 점유율을
+동시에 맞춘다. 확률을 임의로 sharpen하지 않고, $T$의 허용구간과 outside-option 상수를
+사전등록해 과도한 결정성과 과도한 무작위성을 모두 방지한다.
+
+\section{실험 및 평가 계획}
+첫째, 알려진 동적 DAG와 잠재 사용자 군집을 가진 반합성자료에서 edge F1, SHD, 방향 및 lag
+정확도를 측정한다. 둘째, AmExpert에서 고객 부트스트랩 edge 안정도, 보유기간 예측오차,
+행동확률 calibration과 생성자료의 marginal/transition distance를 평가한다. 셋째, 생성기에
+개입하여 쿠폰 강도·상품군 정책의 dose-response와 방향 일관성을 점검하되, 관측 AmExpert만으로
+실세계 개입효과가 식별되었다고 주장하지 않는다.
+
+정책 비교군은 무작위·인기·contextual bandit, PPO~\cite{schulman2017}, SAC~\cite{haarnoja2018},
+GRU4Rec~\cite{hidasi2016}이다. SAC는 연속 할인강도, PPO는 이산/혼합 쿠폰 정책에 적용하고,
+GRU4Rec은 다음 상품군 또는 쿠폰 순위 예측기로 사용한다. 공통 후보집합과 예산 아래 누적 효용,
+구매·사용률, 매출, 다양성, 장기 유지, regret 및 정책 간 순위 안정성을 보고한다. simulator가
+특정 학습기에게 유리하지 않은지 확인하기 위해 구조, 보상, choice temperature를 각각
+교란하는 ablation을 수행한다.
+
+\section{예상 기여와 한계}
+제안 파이프라인은 ``상관 기반 로그 $\rightarrow$ 인과 가설 $\rightarrow$ 효용 분포
+$\rightarrow$ 확률적 선택 $\rightarrow$ 정책평가''를 재현 가능한 단위로 연결한다. 그러나
+AmExpert의 쿠폰 할당은 무작위화가 확인되지 않았고, 정확한 발송·사용 시점, 비구매 시 고려한
+상품, 진열·재고와 경쟁상품 노출이 없다. 선택-관측가능성 가정이 위배되면 구조와 보상이 함께
+편향된다. 따라서 학습 DAG는 인과 정답이 아니라 검증 대상 가설 그래프이며, MaxEnt IRL 보상도
+관측정책과 구성한 선택집합 아래의 상대 효용이다. 최종 논문에서는 외부 randomized uplift
+자료를 보정·검증에 추가하거나, 불가능할 경우 부분식별 범위와 이 한계를 결과 해석의 전제로
+둔다. \draftnote{실험 수치, 표본 생성 규칙과 최종 하이퍼파라미터는 구현 후 삽입한다.}
+
+\balance
+\begingroup
+\footnotesize
+\setlength{\parindent}{0pt}
+\begin{thebibliography}{10}
+\bibitem{langen2023} H. Langen and M. Huber, ``How causal machine learning can leverage marketing strategies: Assessing and improving the performance of a coupon campaign,'' \textit{PLoS ONE}, 18(1):e0278937, 2023.
+\bibitem{sun2023} X. Sun, O. Schulte, G. Liu, and P. Poupart, ``NTS-NOTEARS: Learning Nonparametric DBNs With Prior Knowledge,'' \textit{AISTATS}, pp. 1942--1964, 2023.
+\bibitem{zheng2018} X. Zheng et al., ``DAGs with NO TEARS: Continuous Optimization for Structure Learning,'' \textit{NeurIPS}, 2018.
+\bibitem{pamfil2020} R. Pamfil et al., ``DYNOTEARS: Structure Learning from Time-Series Data,'' \textit{AISTATS}, 2020.
+\bibitem{runge2019} J. Runge et al., ``Detecting and Quantifying Causal Associations in Large Nonlinear Time Series Datasets,'' \textit{Science Advances}, 5(11), 2019.
+\bibitem{ziebart2008} B. Ziebart et al., ``Maximum Entropy Inverse Reinforcement Learning,'' \textit{AAAI}, 2008.
+\bibitem{mcfadden1974} D. McFadden, ``Conditional Logit Analysis of Qualitative Choice Behavior,'' in \textit{Frontiers in Econometrics}, 1974.
+\bibitem{schulman2017} J. Schulman et al., ``Proximal Policy Optimization Algorithms,'' arXiv:1707.06347, 2017.
+\bibitem{haarnoja2018} T. Haarnoja et al., ``Soft Actor-Critic: Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor,'' \textit{ICML}, 2018.
+\bibitem{hidasi2016} B. Hidasi et al., ``Session-based Recommendations with Recurrent Neural Networks,'' \textit{ICLR}, 2016.
+\end{thebibliography}
+
+\section*{부록 A. 재현성 및 전처리 체크리스트}
+\begin{enumerate}
+\item 원본 6개 테이블의 행 수, schema, checksum을 manifest로 기록하고 원자료는 배포하지 않는다.
+\item 금액 부호, 중복 거래, 캠페인 날짜 형식, 상품 매핑 cardinality와 결측률을 검증한다.
+\item 원 논문의 33개 기간, 일평균 지출, 사전 상품군 지출, 직전·동시 쿠폰 통제를 재현한다.
+\item 고객 경계 보존 offset을 저장하고 모든 split·bootstrap을 고객 단위로 수행한다.
+\item 주 단위 패널과 33개 인공 캠페인 패널, lag 2/4의 안정 edge를 비교한다.
+\item unknown 범주 주 분석과 완전사례 분석을 병행하고 사용률 3\%의 불균형을 보고한다.
+\item seed, forbidden edge, threshold, GMM $K$, 온도 $T$와 모든 평가 지표를 공개한다.
+\end{enumerate}
+\endgroup
+
+\end{document}
