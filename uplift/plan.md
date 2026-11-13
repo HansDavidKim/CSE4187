@@ -28,7 +28,7 @@
 ## 3. 전처리와 분할
 
 - train / valid / test를 고객 단위로 분할하고 T 비율을 유지. 기준 주가 여러 개면 시간 순으로 분할.
-- null은 그대로 두고 결측을 처리하는 트리 모델(LightGBM 등)을 base learner로 사용. 대체값·스케일러가 필요하면 train에서만 적합.
+- null은 그대로 두고 결측을 처리하는 트리 모델(scikit-learn `HistGradientBoosting`)을 base learner로 사용. 대체값·스케일러가 필요하면 train에서만 적합.
 
 ## 4. 모델 학습 (UC-02)
 
@@ -36,9 +36,10 @@
 | --- | --- |
 | T-learner | `μ1`(T=1), `μ0`(T=0)를 따로 학습. `τ = μ1(x) − μ0(x)` |
 | X-learner | T-learner의 `μ0, μ1`로 대조군·처치군의 가상 효과 `D0 = μ1(x) − Y`, `D1 = Y − μ0(x)`를 만들고 각각 회귀한 뒤 propensity `e = 0.5`로 가중 평균 |
-| H-learner | 직접 추정(X/DR 방식)과 간접 추정(T 방식)을 섞는 hybrid 방식. 표준 라이브러리에 없어 직접 구현 |
+| H-learner | 두 함수 `f0, f1`을 `(1−λ)·결과 손실 + λ·(f1 − f0 − 가상 효과)²`로 함께 학습. `τ = f1(x) − f0(x)`. λ=0이면 T 방식, λ=1이면 가상 효과 회귀. λ는 검증 데이터로 선택 (`H_learner.pdf`) |
 
-- T·X는 `causalml` 또는 `econml` 사용, 설치가 안 되면 scikit-learn/LightGBM으로 직접 구현.
+- 세 모델 모두 scikit-learn으로 직접 구현: `uplift/Tlearner`, `uplift/Xlearner`, `uplift/Hlearner`. 공통 코드는 `uplift/common`.
+- H-learner는 논문의 신경망(TARNet) 대신 같은 손실을 gradient boosting으로 최소화한다.
 - UC-04가 `p1`, `p0`를 모두 요구하므로 세 모델 모두 `μ0, μ1`도 함께 저장.
 - 하이퍼파라미터는 valid의 Qini 계수로 선택.
 
@@ -55,7 +56,8 @@
 - `uplift_score`와 `p0` 기준으로 4개 세그먼트 분류, 임계값은 valid에서 결정.
 - CSV: `customer_id, w0, p1, p0, uplift_score, segment` + `model_version`, `definition_id`.
 
-## 확인 필요
+## 현재 상태
 
-- H-learner의 정확한 정의(참고 논문). 위 설명은 추정이므로 구현 전에 확정해야 한다.
-- 현재 `.venv`는 Python 3.14라 `causalml`/`econml` 설치 가능 여부 미확인.
+- 구현됨: 데이터셋 생성(`common/features.py`), 세 모델, Qini 평가(`common/evaluate.py`), 학습 스크립트(`train.py`), 테스트(`tests/`).
+- 시뮬레이터가 없어 `common/synthetic.py`의 임시 데이터로만 실행을 확인했다. 성능 수치는 의미가 없다.
+- 남은 일: 시뮬레이터 출력 연결, 하이퍼파라미터 선택, 세그먼트 분류와 CSV 내보내기(UC-05, UC-06), `config/uplift.yaml`.
