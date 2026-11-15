@@ -1,0 +1,1419 @@
+{
+  "schema_version": 1,
+  "created_at_utc": "2026-11-14T17:30:41.092824+00:00",
+  "passed": true,
+  "scope": "Independent source/parameter/clock validation, source-population precision arithmetic, final 500-customer6month run, and entire20000-customer24month raw/export integrity with explicitly sampled feature recomputation. No training, generation or source mutation by this auditor.",
+  "final_event_scope": [
+    "view",
+    "cart",
+    "remove_from_cart",
+    "purchase",
+    "coupon_usage",
+    "review"
+  ],
+  "final_registered_predictors": 39,
+  "default_shopping_termination": "policy_end",
+  "default_decision_cap": 782,
+  "final_model_sha256": "a52a5b27ad190675de84f8c0c224d31c418e1ea14d7d732b82af8d51558d4f38",
+  "final_visit_timing_sha256": "c45cc76bb15f9adb2ea15ffe2cfc954cbb160bc3b059974c80e3edf2f9ef666a",
+  "final_review_sha256": "55312c03a7b1b33757002315c5a5a59ca255f0d2dbe7355fc08b937d63d36e1e",
+  "final_engine_sha256": "ab06ccd726c93acdba311e2731c4e39099a93756f534460d073de9a6a2146532",
+  "full_dataset_id": "cosmetics-source-v10-six-event-checkout-tianchi-joint-timing-full-24m-seed42-n20000-c713dd57fe000bb0-28d",
+  "full_generation_fingerprint": "c713dd57fe000bb0c3629ceb0affb726b3e99c7b59c5ef7eb5a1b477fc146dd0",
+  "sections": {
+    "source_native_timing": {
+      "passed": true,
+      "check_count": 26,
+      "checks": [
+        {
+          "name": "independent_native_all_entry_pool",
+          "passed": true
+        },
+        {
+          "name": "independent_native_all_regular_pool",
+          "passed": true
+        },
+        {
+          "name": "independent_native_all_entry_profile_banks",
+          "passed": true
+        },
+        {
+          "name": "independent_native_all_regular_profile_banks",
+          "passed": true
+        },
+        {
+          "name": "independent_native_all_regular_stratum_banks",
+          "passed": true
+        },
+        {
+          "name": "independent_native_count_entry_complete_windows",
+          "passed": true
+        },
+        {
+          "name": "independent_native_count_entry_active_windows",
+          "passed": true
+        },
+        {
+          "name": "independent_native_count_entry_session_starts",
+          "passed": true
+        },
+        {
+          "name": "independent_native_count_entry_duplicate_start_clocks",
+          "passed": true
+        },
+        {
+          "name": "independent_native_count_entry_templates_with_ties",
+          "passed": true
+        },
+        {
+          "name": "independent_native_count_regular_complete_windows",
+          "passed": true
+        },
+        {
+          "name": "independent_native_count_regular_active_windows",
+          "passed": true
+        },
+        {
+          "name": "independent_native_count_regular_session_starts",
+          "passed": true
+        },
+        {
+          "name": "independent_native_count_regular_duplicate_start_clocks",
+          "passed": true
+        },
+        {
+          "name": "independent_native_count_regular_templates_with_ties",
+          "passed": true
+        },
+        {
+          "name": "independent_native_count_regular_active_previous30_1_windows",
+          "passed": true
+        },
+        {
+          "name": "independent_native_count_regular_active_previous30_0_windows",
+          "passed": true
+        },
+        {
+          "name": "training_user_partition",
+          "passed": true
+        },
+        {
+          "name": "maximum_label_maturity_strict",
+          "passed": true
+        },
+        {
+          "name": "native_anchor_phase15",
+          "passed": true
+        },
+        {
+          "name": "all_regular_bank_CDF_exact",
+          "passed": true
+        },
+        {
+          "name": "all_integer_quantiles_sampler_entry_pool",
+          "passed": true
+        },
+        {
+          "name": "all_integer_quantiles_sampler_stratum_1",
+          "passed": true
+        },
+        {
+          "name": "all_integer_quantiles_sampler_stratum_0",
+          "passed": true
+        },
+        {
+          "name": "fitter_provenance_hash",
+          "passed": true
+        },
+        {
+          "name": "source_cache_provenance_hash",
+          "passed": true
+        }
+      ],
+      "native_templates_recomputed_exactly": true,
+      "native_CDF_cells": 4240,
+      "native_CDF_max_error": 0.0,
+      "quantile_draws_checked": {
+        "entry_pool": 8012,
+        "stratum_1": 922,
+        "stratum_0": 123
+      },
+      "training": {
+        "user_rule": "sha256(seed:user_id).digest()[0] < 205",
+        "source_train_partition_users": 13155,
+        "source_training_users": 8012,
+        "entry_complete_windows": 8012,
+        "entry_active_windows": 8012,
+        "entry_session_starts": 20332,
+        "entry_duplicate_start_clocks": 81,
+        "entry_templates_with_ties": 41,
+        "regular_complete_windows": 8851,
+        "regular_active_windows": 1045,
+        "regular_session_starts": 6500,
+        "regular_duplicate_start_clocks": 43,
+        "regular_templates_with_ties": 18,
+        "regular_active_previous30_1_windows": 922,
+        "regular_active_previous30_0_windows": 123,
+        "max_window_end_at": "2020-01-28T00:00:00+00:00",
+        "entry_profile_coverage": 8012,
+        "regular_profile_coverage": 843,
+        "active_window_count_summary": {
+          "entry": {
+            "mean": 2.5376934598102845,
+            "max": 1134,
+            "p99": 23.0
+          },
+          "regular": {
+            "mean": 6.220095693779904,
+            "max": 455,
+            "p99": 66.55999999999995
+          }
+        },
+        "pooled_first_offset_lt_28d_share": {
+          "entry": 1.0,
+          "regular": 0.9732057416267943
+        }
+      },
+      "model_sha256": "c45cc76bb15f9adb2ea15ffe2cfc954cbb160bc3b059974c80e3edf2f9ef666a",
+      "fitter_sha256": "faecc11645c8acd4d8568c890799cf7391344ebe73c636679c5b0640de4ff9d6",
+      "scope": "Independent native-session-start replay of all strict pre-Jan29 train-user entry and regular windows; whole schedule/count/ties/frequencies and exact regular CDF."
+    },
+    "source_donor_trait_sample": {
+      "passed": true,
+      "bank_profiles": 16415,
+      "all_bank_ids_are_known_source_users": true,
+      "all_bank_first_observations_precede_source_end": true,
+      "sampled_profiles": 10,
+      "samples": [
+        {
+          "profile_id": "f254a1a1acd01f0e",
+          "posterior_max_abs_error": 1.609823385706477e-15,
+          "recomputed_posterior": [
+            0.3587969521640078,
+            0.4522875338793797,
+            2.325885081309298e-102,
+            0.1889155139566118
+          ],
+          "source_supported_action_records": 16,
+          "source_completed_activity_records": 4
+        },
+        {
+          "profile_id": "272917210eaf7ebd",
+          "posterior_max_abs_error": 2.053010505837683e-28,
+          "recomputed_posterior": [
+            7.224535538852547e-16,
+            1.0,
+            0.0,
+            1.765954835775952e-21
+          ],
+          "source_supported_action_records": 198,
+          "source_completed_activity_records": 2
+        },
+        {
+          "profile_id": "7cb83faae748cd47",
+          "posterior_max_abs_error": 1.2212453270876722e-15,
+          "recomputed_posterior": [
+            0.7080148953813248,
+            0.28428464483009436,
+            6.963371988929481e-267,
+            0.007700459788580579
+          ],
+          "source_supported_action_records": 9,
+          "source_completed_activity_records": 3
+        },
+        {
+          "profile_id": "f063d36519a97984",
+          "posterior_max_abs_error": 8.131516293641283e-19,
+          "recomputed_posterior": [
+            0.9996210594944377,
+            5.711646576478093e-05,
+            0.0,
+            0.00032182403979665167
+          ],
+          "source_supported_action_records": 38,
+          "source_completed_activity_records": 2
+        },
+        {
+          "profile_id": "886f4876f7e3a61c",
+          "posterior_max_abs_error": 6.708500942254059e-19,
+          "recomputed_posterior": [
+            0.9790385223480895,
+            4.720046471565836e-05,
+            1.4060119599047307e-132,
+            0.020914277187191962
+          ],
+          "source_supported_action_records": 46,
+          "source_completed_activity_records": 1
+        },
+        {
+          "profile_id": "b878e92744260bc4",
+          "posterior_max_abs_error": 1.567625207131004e-117,
+          "recomputed_posterior": [
+            0.357505123518397,
+            0.3397225164458719,
+            5.5097154677783814e-104,
+            0.3027723600357324
+          ],
+          "source_supported_action_records": 16,
+          "source_completed_activity_records": 4
+        },
+        {
+          "profile_id": "90a89adc4b8be1b0",
+          "posterior_max_abs_error": 3.608224830031759e-16,
+          "recomputed_posterior": [
+            0.8757370512895843,
+            0.10151308440229675,
+            2.1342934982450257e-200,
+            0.022749864308117606
+          ],
+          "source_supported_action_records": 23,
+          "source_completed_activity_records": 3
+        },
+        {
+          "profile_id": "d7e0f017deb5b18a",
+          "posterior_max_abs_error": 3.122502256758253e-16,
+          "recomputed_posterior": [
+            0.9429590756723397,
+            0.0437483909652224,
+            2.086015027308304e-283,
+            0.013292533362438021
+          ],
+          "source_supported_action_records": 31,
+          "source_completed_activity_records": 3
+        },
+        {
+          "profile_id": "ca68630ba44aa8cc",
+          "posterior_max_abs_error": 3.608224830031759e-16,
+          "recomputed_posterior": [
+            0.06515016074088156,
+            0.8355774019448379,
+            0.0,
+            0.09927243731428159
+          ],
+          "source_supported_action_records": 24,
+          "source_completed_activity_records": 2
+        },
+        {
+          "profile_id": "fe46770cccf4b567",
+          "posterior_max_abs_error": 2.475797344914099e-14,
+          "recomputed_posterior": [
+            0.8713362704984591,
+            0.06870413064765417,
+            0.0,
+            0.05995959885387747
+          ],
+          "source_supported_action_records": 139,
+          "source_completed_activity_records": 1
+        }
+      ],
+      "maximum_sampled_posterior_error": 2.475797344914099e-14,
+      "method": "Rebuilt ten complete native customer traces independently of cached training arrays; supported complete source-session gate + only fully observed source-end-mature activity labels; direct product likelihood posterior compared with serialized bank. This synthesis bank includes parent heldout observations and is forbidden for source forecast evaluation."
+    },
+    "source_tail_cap": {
+      "passed": true,
+      "native_rows": 216093,
+      "collapsed_unit_rows": 12499,
+      "native_checkout_decisions": 203594,
+      "native_sessions": 52183,
+      "maximum_checkout_decisions": 781,
+      "over64_sessions": 283,
+      "late_decisions_at_or_after64": 14118,
+      "late_removes_at_or_after64": 7388,
+      "cap_with_one_END_query": 782,
+      "support_caveat": "Direct all-prepared-source replay; known-total mask maximum is independently disclosed in the existing tail-support report, not inferred as full SKU observability."
+    },
+    "parameter_graph_CDF_and_identity_500": {
+      "passed": true,
+      "check_count": 18,
+      "checks": [
+        {
+          "name": "all_parent_non_bank_fields_equal",
+          "passed": true
+        },
+        {
+          "name": "all_non_latent_shopping_fields_equal",
+          "passed": true
+        },
+        {
+          "name": "all_forecast_validation_unchanged",
+          "passed": true
+        },
+        {
+          "name": "synthesis_scope_explicit",
+          "passed": true
+        },
+        {
+          "name": "parent_model_sha",
+          "passed": true
+        },
+        {
+          "name": "original_shopping_code_snapshot_sha",
+          "passed": true
+        },
+        {
+          "name": "all_numeric_training_policy_AST_unchanged",
+          "passed": true
+        },
+        {
+          "name": "all_500_analytic_CDF_and_probability_products_exact",
+          "passed": true
+        },
+        {
+          "name": "expected_control_churn_is_CDF_guarded",
+          "passed": true
+        },
+        {
+          "name": "expected_treatment_churn_is_CDF_guarded",
+          "passed": true
+        },
+        {
+          "name": "expected_factual_churn_uses_actual_arm",
+          "passed": true
+        },
+        {
+          "name": "generation_input_fingerprint_reproduced",
+          "passed": true
+        },
+        {
+          "name": "dataset_ID_includes_N_and_fingerprint",
+          "passed": true
+        },
+        {
+          "name": "clock_source_basegraph",
+          "passed": true
+        },
+        {
+          "name": "clock_model_metadata_sha",
+          "passed": true
+        },
+        {
+          "name": "clock_runtime_hash",
+          "passed": true
+        },
+        {
+          "name": "actual_default_cap782",
+          "passed": true
+        },
+        {
+          "name": "tail_cap_declaration_known_total",
+          "passed": true
+        }
+      ],
+      "maximum_CDF_probability_error": 0.0,
+      "recomputed_generation_fingerprint": "69798784cfcaeeaf19e11e618f7ea68a93961ed1926ba46308f4097cb8390010",
+      "trait_model_sha256": "a52a5b27ad190675de84f8c0c224d31c418e1ea14d7d732b82af8d51558d4f38",
+      "timing_model_sha256": "c45cc76bb15f9adb2ea15ffe2cfc954cbb160bc3b059974c80e3edf2f9ef666a",
+      "source_support_limit": "known-total valid is not fully observed matching-SKU history",
+      "scope": "Independent frozen parameter/validation equality, numeric AST preservation, empirical-CDF guard, input identity and source-derived cap checks."
+    },
+    "precision_comparison": {
+      "passed": true,
+      "exact_aggregate_reproduction": true,
+      "protocol_matches_same_clock": {
+        "source_cache_fingerprint": true,
+        "customers": true,
+        "seeds": true,
+        "months": true,
+        "clock_start": true,
+        "clock_end": true,
+        "as_of_at": true,
+        "source_cache_sha256": true,
+        "configuration_except_profile_sha256": true
+      },
+      "customers_per_seed": 5000,
+      "seeds": [
+        3109,
+        3163
+      ],
+      "same_clock_primary3_pass": {
+        "matched_five_months_no_new_coupon": true,
+        "pre_asof_30d": true
+      },
+      "aggregate_means": {
+        "matched_five_months_no_new_coupon": {
+          "original_clock_baseline": {
+            "action_L1": 0.19404991538919594,
+            "transition_L1": 0.13290527037048327,
+            "session_item_proxy_length_KS": 0.02395830819320055,
+            "purchased_price_minor_KS": 0.033821400932663406,
+            "idle_gap_seconds_KS": 0.09807772463329045,
+            "sessions_per_selected_customer_KS": 0.1142147066774804
+          },
+          "native_clock_baseline": {
+            "action_L1": 0.27537259521753704,
+            "transition_L1": 0.20211639138203064,
+            "session_item_proxy_length_KS": 0.0894567754163143,
+            "purchased_price_minor_KS": 0.02957996735834737,
+            "idle_gap_seconds_KS": 0.0581523546396952,
+            "sessions_per_selected_customer_KS": 0.03784801297648013
+          },
+          "native_clock_irl": {
+            "action_L1": 0.11530902492042162,
+            "transition_L1": 0.10738216633862874,
+            "session_item_proxy_length_KS": 0.03857101116563405,
+            "purchased_price_minor_KS": 0.05493768978915807,
+            "idle_gap_seconds_KS": 0.026578607855572256,
+            "sessions_per_selected_customer_KS": 0.030279318734793184
+          }
+        },
+        "pre_asof_30d": {
+          "original_clock_baseline": {
+            "action_L1": 0.16480492682756065,
+            "transition_L1": 0.10763080923118945,
+            "session_item_proxy_length_KS": 0.018832069027031828,
+            "purchased_price_minor_KS": 0.0322804079161674,
+            "idle_gap_seconds_KS": 0.10242903639206452,
+            "sessions_per_selected_customer_KS": 0.07636007028926736
+          },
+          "native_clock_baseline": {
+            "action_L1": 0.2922837292011582,
+            "transition_L1": 0.17241673575672933,
+            "session_item_proxy_length_KS": 0.07867502918963509,
+            "purchased_price_minor_KS": 0.049263911814978786,
+            "idle_gap_seconds_KS": 0.04502616802709112,
+            "sessions_per_selected_customer_KS": 0.03956007028926737
+          },
+          "native_clock_irl": {
+            "action_L1": 0.15157069159364947,
+            "transition_L1": 0.10751732500084986,
+            "session_item_proxy_length_KS": 0.04361468038976918,
+            "purchased_price_minor_KS": 0.03629801199909169,
+            "idle_gap_seconds_KS": 0.04607369836023741,
+            "sessions_per_selected_customer_KS": 0.03376007028926736
+          }
+        },
+        "post_asof_28d_no_new_coupon": {
+          "original_clock_baseline": {
+            "action_L1": 0.28317360637283473,
+            "transition_L1": 0.1829126726184565,
+            "session_item_proxy_length_KS": 0.06182743744204496,
+            "purchased_price_minor_KS": 0.11011599472380218,
+            "idle_gap_seconds_KS": 0.09610104400570971,
+            "sessions_per_selected_customer_KS": 0.050891538253582044
+          },
+          "native_clock_baseline": {
+            "action_L1": 0.3259181680968156,
+            "transition_L1": 0.2481347405430706,
+            "session_item_proxy_length_KS": 0.09268238957655575,
+            "purchased_price_minor_KS": 0.14948722647233842,
+            "idle_gap_seconds_KS": 0.051646983885015596,
+            "sessions_per_selected_customer_KS": 0.03489153825358205
+          },
+          "native_clock_irl": {
+            "action_L1": 0.16630348086715624,
+            "transition_L1": 0.08846819071918363,
+            "session_item_proxy_length_KS": 0.03268494496956918,
+            "purchased_price_minor_KS": 0.1064299393485639,
+            "idle_gap_seconds_KS": 0.12202180505026639,
+            "sessions_per_selected_customer_KS": 0.011056285482562855
+          }
+        }
+      },
+      "whole_pipeline_delta_candidate_minus_original": {
+        "action_L1": -0.07874089046877432,
+        "transition_L1": -0.025523104031854538,
+        "session_item_proxy_length_KS": 0.0146127029724335,
+        "purchased_price_minor_KS": 0.021116288856494664,
+        "idle_gap_seconds_KS": -0.0714991167777182,
+        "sessions_per_selected_customer_KS": -0.08393538794268722
+      },
+      "whole_pipeline_regressions": [
+        "session_item_proxy_length_KS",
+        "purchased_price_minor_KS"
+      ],
+      "old_whole_baseline_cap": 64,
+      "same_clock_both_actor_cap": [
+        782,
+        782
+      ],
+      "same_source_population_generalization_claim": false,
+      "model_tuned_after_precision_declared": false,
+      "artifact_sha256": {
+        "original_clock_baseline": "345dfb80324794b29c78c08e79f632ff50ae9a414e1f7d6f52f91a5c7ee4bc2e",
+        "native_clock_baseline": "7b4bc95658e1df2fdd5ee379c5c855d4ac121cb65f344d9353c60f9659bba585",
+        "native_clock_irl": "e351c08523c1cbdd00e131e04ca0b3c3c1b199188ee7ce640a95c6002f7f6c3a"
+      },
+      "comparison_sha256": "47962eafb9dbe92b57f6ec81ab6fc6d9f06f10a27db4a862a58e103f72ac05e5",
+      "interpretation": "Independent arithmetic reproduction of two-seed source-population reconstruction fidelity. Same-clock/cap comparison isolates the actor package; comparison against the original pipeline also changes timing/cap. Neither is a heldout real-person forecast or individual causal-effect validation."
+    },
+    "six_month_500_customer_runtime": {
+      "passed": true,
+      "checks": [
+        {
+          "name": "sqlite_fk",
+          "passed": true
+        },
+        {
+          "name": "sqlite_integrity",
+          "passed": true
+        },
+        {
+          "name": "seven_business_relations",
+          "passed": true
+        },
+        {
+          "name": "raw_schema5",
+          "passed": true
+        },
+        {
+          "name": "six_actual_events",
+          "passed": true
+        },
+        {
+          "name": "metadata_six_events",
+          "passed": true
+        },
+        {
+          "name": "model_sha_actual",
+          "passed": true
+        },
+        {
+          "name": "review_sha_actual",
+          "passed": true
+        },
+        {
+          "name": "no_removed_event_models",
+          "passed": true
+        },
+        {
+          "name": "no_cs_sidecar",
+          "passed": true
+        },
+        {
+          "name": "no_removed_generation_metadata",
+          "passed": true
+        },
+        {
+          "name": "all_cart_prefixes_and_checkout_sources",
+          "passed": true
+        },
+        {
+          "name": "all_order_prices_quantities_gross_net",
+          "passed": true
+        },
+        {
+          "name": "review_purchase_product_once",
+          "passed": true
+        },
+        {
+          "name": "every_review_actual_purchase_sku_line_and_clock",
+          "passed": true
+        },
+        {
+          "name": "usage_coupon_once",
+          "passed": true
+        },
+        {
+          "name": "usage_highest_unit_half_up_discount_and_purchase_link",
+          "passed": true
+        },
+        {
+          "name": "500_feature_rows_39_predictors",
+          "passed": true
+        },
+        {
+          "name": "feature_version",
+          "passed": true
+        },
+        {
+          "name": "no_removed_feature_columns",
+          "passed": true
+        },
+        {
+          "name": "private_components_not_public_features",
+          "passed": true
+        },
+        {
+          "name": "private_components_only_diagnostics",
+          "passed": true
+        },
+        {
+          "name": "weekly_rows_500x27",
+          "passed": true
+        },
+        {
+          "name": "no_removed_weekly_columns",
+          "passed": true
+        },
+        {
+          "name": "experiment_500_balanced_assignment",
+          "passed": true
+        },
+        {
+          "name": "experiment_actual_sending",
+          "passed": true
+        },
+        {
+          "name": "28d_labels",
+          "passed": true
+        },
+        {
+          "name": "labels_recomputed_from_actual_session_starts",
+          "passed": true
+        },
+        {
+          "name": "export_schema2",
+          "passed": true
+        },
+        {
+          "name": "export_checksum_weekly_panel",
+          "passed": true
+        },
+        {
+          "name": "export_checksum_experiment_log",
+          "passed": true
+        },
+        {
+          "name": "export_checksum_no_purchase_labels",
+          "passed": true
+        },
+        {
+          "name": "export_checksum_paired_rollouts",
+          "passed": true
+        },
+        {
+          "name": "export_checksum_latent_truth",
+          "passed": true
+        },
+        {
+          "name": "all_3500_strict_past_feature_cells_match_independent_SQL",
+          "passed": true
+        }
+      ],
+      "check_count": 35,
+      "dataset_path": "data/generated/six_event_native_v4",
+      "dataset_id": "cosmetics-source-v10-six-event-checkout-tianchi-joint-timing-small-6m-seed2203-n500-69798784cfcaeeaf-28d",
+      "database_sha256": "46b897195683c789fdb3db1063ebd24afa5937daeef220c2c1b7a04395cacc10",
+      "event_counts": {
+        "view": 9125,
+        "cart": 5571,
+        "remove_from_cart": 3792,
+        "review": 1383,
+        "purchase": 186,
+        "coupon_usage": 4
+      },
+      "table_rows": {
+        "customers": 500,
+        "products": 26116,
+        "sessions": 5228,
+        "events": 20061,
+        "orders": 186,
+        "order_items": 1687,
+        "coupons": 250,
+        "labels": 500,
+        "treatments": 500,
+        "diagnostics": 500,
+        "session_diagnostics": 5228,
+        "coupon_response_diagnostics": 500,
+        "review_diagnostics": 1687,
+        "lifecycle": 5813
+      },
+      "private_component_counts": {
+        "0": 239,
+        "1": 221,
+        "3": 40
+      },
+      "feature_shape": [
+        500,
+        87
+      ],
+      "registered_predictors": 39,
+      "independent_SQL_feature_cells": 3500,
+      "maximum_SQL_feature_error": 0.0,
+      "multiunit_item_lines": 2,
+      "export_rows": {
+        "weekly_panel": 13500,
+        "experiment_log": 500,
+        "no_purchase_labels": 500,
+        "paired_rollouts": 16000,
+        "latent_truth": 500
+      },
+      "limitation": "This generated research dataset validates wiring and integrity; fidelity/adoption are separately evaluated, and no real-customer causal effect is inferred."
+    },
+    "full_24month_raw": {
+      "passed": true,
+      "check_count": 27,
+      "checks": [
+        {
+          "name": "sqlite_integrity",
+          "passed": true
+        },
+        {
+          "name": "all_sqlite_foreign_keys",
+          "passed": true
+        },
+        {
+          "name": "only_seven_business_tables",
+          "passed": true
+        },
+        {
+          "name": "published_database_checksum",
+          "passed": true
+        },
+        {
+          "name": "published_row_count_customers",
+          "passed": true
+        },
+        {
+          "name": "published_row_count_products",
+          "passed": true
+        },
+        {
+          "name": "published_row_count_sessions",
+          "passed": true
+        },
+        {
+          "name": "published_row_count_events",
+          "passed": true
+        },
+        {
+          "name": "published_row_count_orders",
+          "passed": true
+        },
+        {
+          "name": "published_row_count_order_items",
+          "passed": true
+        },
+        {
+          "name": "published_row_count_coupons",
+          "passed": true
+        },
+        {
+          "name": "complete_event_clock_order",
+          "passed": true
+        },
+        {
+          "name": "exact_all_cart_prefixes_and_checkout_sources",
+          "passed": true
+        },
+        {
+          "name": "all_order_item_prices_positive_quantities_and_money",
+          "passed": true
+        },
+        {
+          "name": "all_purchased_product_review_FK_line_uniqueness",
+          "passed": true
+        },
+        {
+          "name": "all_highest_unit_coupon_usage_exact",
+          "passed": true
+        },
+        {
+          "name": "coupon_uses_equals_redeemed_orders",
+          "passed": true
+        },
+        {
+          "name": "six_event_scope",
+          "passed": true
+        },
+        {
+          "name": "all_488k_sessions_nonoverlapping",
+          "passed": true
+        },
+        {
+          "name": "all_synchronous_event_session_bounds_and_owners",
+          "passed": true
+        },
+        {
+          "name": "all_customers_active30_eligible",
+          "passed": true
+        },
+        {
+          "name": "all_20k_28d_labels_and_28_30d_revenues_from_raw",
+          "passed": true
+        },
+        {
+          "name": "all_10k_Control_mature_12m_revenue_targets",
+          "passed": true
+        },
+        {
+          "name": "full_12m_observation_mature",
+          "passed": true
+        },
+        {
+          "name": "fixed_10000_per_arm",
+          "passed": true
+        },
+        {
+          "name": "Treatment_only_one_coupon_per_customer",
+          "passed": true
+        },
+        {
+          "name": "finalcap782_native_clock",
+          "passed": true
+        }
+      ],
+      "dataset_path": "data/generated/full_native_v4",
+      "dataset_id": "cosmetics-source-v10-six-event-checkout-tianchi-joint-timing-full-24m-seed42-n20000-c713dd57fe000bb0-28d",
+      "database_sha256": "e540c3c295c47c3800275a9ed0aa607eea906f71d424d65cace7ee2e416cb164",
+      "table_rows": {
+        "customers": 20000,
+        "products": 26116,
+        "sessions": 488069,
+        "events": 2292528,
+        "orders": 21364,
+        "order_items": 200433,
+        "coupons": 10000,
+        "labels": 20000,
+        "treatments": 20000,
+        "diagnostics": 20000,
+        "session_diagnostics": 488069,
+        "coupon_response_diagnostics": 20000,
+        "review_diagnostics": 200433,
+        "lifecycle": 530092
+      },
+      "event_counts": {
+        "view": 908209,
+        "cart": 657717,
+        "remove_from_cart": 524936,
+        "purchase": 21364,
+        "review": 180020,
+        "coupon_usage": 282
+      },
+      "multiunit_item_lines": 92,
+      "whole_period_totals": {
+        "gross_minor": 91235070,
+        "discount_minor": 46607,
+        "paid_minor": 91188463,
+        "orders": 21364,
+        "coupon_uses": 282,
+        "reviews": 180020
+      },
+      "full_Control_12m_targets": 10000,
+      "raw_manifest_sha256": "6d90eaf613b87151e32bb6f8c2024d04ca7b17cc9a1165ad2d14f1b92c439c34",
+      "generation_fingerprint": "c713dd57fe000bb0c3629ceb0affb726b3e99c7b59c5ef7eb5a1b477fc146dd0",
+      "engine_sha256": "ab06ccd726c93acdba311e2731c4e39099a93756f534460d073de9a6a2146532",
+      "scope": "Entire final full dataset streamed independently from SQLite; no generation/refit or mutation."
+    },
+    "full_24month_exports": {
+      "passed": true,
+      "check_count": 30,
+      "checks": [
+        {
+          "name": "same_full_dataset",
+          "passed": true
+        },
+        {
+          "name": "export_schema2_scope6",
+          "passed": true
+        },
+        {
+          "name": "published_checksum_weekly_panel",
+          "passed": true
+        },
+        {
+          "name": "published_rows_weekly_panel",
+          "passed": true
+        },
+        {
+          "name": "published_checksum_experiment_log",
+          "passed": true
+        },
+        {
+          "name": "published_rows_experiment_log",
+          "passed": true
+        },
+        {
+          "name": "published_checksum_no_purchase_labels",
+          "passed": true
+        },
+        {
+          "name": "published_rows_no_purchase_labels",
+          "passed": true
+        },
+        {
+          "name": "published_checksum_paired_rollouts",
+          "passed": true
+        },
+        {
+          "name": "published_rows_paired_rollouts",
+          "passed": true
+        },
+        {
+          "name": "published_checksum_latent_truth",
+          "passed": true
+        },
+        {
+          "name": "published_rows_latent_truth",
+          "passed": true
+        },
+        {
+          "name": "full_grid_20000x106",
+          "passed": true
+        },
+        {
+          "name": "retired_weekly_columns_absent",
+          "passed": true
+        },
+        {
+          "name": "entire_weekly_unobserved_NULL_vs_observed_zero_contract",
+          "passed": true
+        },
+        {
+          "name": "weekly_orders_match_all_raw",
+          "passed": true
+        },
+        {
+          "name": "weekly_gross_match_all_raw",
+          "passed": true
+        },
+        {
+          "name": "weekly_discount_match_all_raw",
+          "passed": true
+        },
+        {
+          "name": "weekly_paid_match_all_raw",
+          "passed": true
+        },
+        {
+          "name": "weekly_review_match_all_raw",
+          "passed": true
+        },
+        {
+          "name": "weekly_coupon_send_match_all_raw",
+          "passed": true
+        },
+        {
+          "name": "20000_customer_experiment_rows",
+          "passed": true
+        },
+        {
+          "name": "fixed_1to1_randomized_arms",
+          "passed": true
+        },
+        {
+          "name": "actual_sending_matches_assignment",
+          "passed": true
+        },
+        {
+          "name": "no_public_posthoc_truth",
+          "passed": true
+        },
+        {
+          "name": "paired_rollouts_private_directory",
+          "passed": true
+        },
+        {
+          "name": "paired_rollouts_explicit_private_flag_and_seed",
+          "passed": true
+        },
+        {
+          "name": "latent_truth_private_directory",
+          "passed": true
+        },
+        {
+          "name": "latent_truth_explicit_private_flag_and_seed",
+          "passed": true
+        },
+        {
+          "name": "no_purchase_definition_separate",
+          "passed": true
+        }
+      ],
+      "dataset_id": "cosmetics-source-v10-six-event-checkout-tianchi-joint-timing-full-24m-seed42-n20000-c713dd57fe000bb0-28d",
+      "rows": {
+        "weekly_panel": 2120000,
+        "experiment_log": 20000,
+        "no_purchase_labels": 20000,
+        "paired_rollouts": 640000,
+        "latent_truth": 20000
+      },
+      "weekly_full_period_sums": {
+        "purchases": 21364,
+        "gross_revenue_minor": 91235070,
+        "redemption_discount_cost_minor": 46607,
+        "net_revenue_minor": 91188463,
+        "coupons_sent": 10000,
+        "reviews": 180020
+      },
+      "unobserved_customer_weeks": 807038,
+      "export_manifest_sha256": "d86f35af8ab0c2254cf9dcf168927c151a4349d327742d9d76f57be6b09a3c33",
+      "scope": "All export file hashes/rows, complete2.12M customer-week coverage/NULL/money/event sums and all private evaluation flags; no refitting or new observations."
+    },
+    "full_24month_features": {
+      "passed": true,
+      "checks": [
+        {
+          "name": "20000_unique_feature_rows",
+          "passed": true
+        },
+        {
+          "name": "exact_39_predictor_registry",
+          "passed": true
+        },
+        {
+          "name": "exact_feature_versions",
+          "passed": true
+        },
+        {
+          "name": "removed_fields_absent",
+          "passed": true
+        },
+        {
+          "name": "private_truth_fields_absent",
+          "passed": true
+        },
+        {
+          "name": "feature_source_model_and_dataset_bound",
+          "passed": true
+        },
+        {
+          "name": "40_profiles_selected_features_independent_SQL_match",
+          "passed": true
+        }
+      ],
+      "check_count": 7,
+      "feature_path": "results/full_native_v4/feature_store.parquet",
+      "feature_sha256": "2d022338a2481c27439385b0dcf8fe6e367eeb08c40aed15d525cdad588b1558",
+      "feature_rows": 20000,
+      "registered_predictors": 39,
+      "physical_columns": 87,
+      "sampled_profiles": 40,
+      "independent_feature_columns": [
+        "review_count_30d",
+        "mean_review_rating_30d",
+        "review_last_order_mean_rating",
+        "review_recency_days",
+        "review_non5_share_30d",
+        "cart_adds_per_nonpurchase_session_30d",
+        "cart_removes_per_nonpurchase_session_30d",
+        "session_count_30d",
+        "view_count_30d",
+        "purchase_count_30d",
+        "net_spend_30d",
+        "mean_net_order_value_30d",
+        "purchased_qty_30d",
+        "unique_purchase_products_30d",
+        "mean_basket_qty_30d",
+        "cart_qty_current",
+        "cart_sku_current",
+        "cart_gross_value_current",
+        "coupon_uses_30d",
+        "coupon_discount_amount_30d",
+        "coupon_redemption_recency_days"
+      ],
+      "independent_SQL_cells": 840,
+      "maximum_error": 5.551115123125783e-17,
+      "samples": [
+        {
+          "customer_id": "U0000001",
+          "event_count_past": 3
+        },
+        {
+          "customer_id": "U0000002",
+          "event_count_past": 1
+        },
+        {
+          "customer_id": "U0000003",
+          "event_count_past": 3
+        },
+        {
+          "customer_id": "U0000004",
+          "event_count_past": 15
+        },
+        {
+          "customer_id": "U0000005",
+          "event_count_past": 1
+        },
+        {
+          "customer_id": "U0000006",
+          "event_count_past": 1
+        },
+        {
+          "customer_id": "U0000007",
+          "event_count_past": 335
+        },
+        {
+          "customer_id": "U0000008",
+          "event_count_past": 6
+        },
+        {
+          "customer_id": "U0000009",
+          "event_count_past": 146
+        },
+        {
+          "customer_id": "U0000010",
+          "event_count_past": 1
+        },
+        {
+          "customer_id": "U0000011",
+          "event_count_past": 4
+        },
+        {
+          "customer_id": "U0000012",
+          "event_count_past": 27
+        },
+        {
+          "customer_id": "U0000013",
+          "event_count_past": 33
+        },
+        {
+          "customer_id": "U0000014",
+          "event_count_past": 2
+        },
+        {
+          "customer_id": "U0000015",
+          "event_count_past": 4
+        },
+        {
+          "customer_id": "U0011842",
+          "event_count_past": 305
+        },
+        {
+          "customer_id": "U0007884",
+          "event_count_past": 1808
+        },
+        {
+          "customer_id": "U0004557",
+          "event_count_past": 278
+        },
+        {
+          "customer_id": "U0003285",
+          "event_count_past": 1136
+        },
+        {
+          "customer_id": "U0009956",
+          "event_count_past": 2071
+        },
+        {
+          "customer_id": "U0005774",
+          "event_count_past": 817
+        },
+        {
+          "customer_id": "U0009001",
+          "event_count_past": 1293
+        },
+        {
+          "customer_id": "U0003922",
+          "event_count_past": 1480
+        },
+        {
+          "customer_id": "U0008763",
+          "event_count_past": 948
+        },
+        {
+          "customer_id": "U0012341",
+          "event_count_past": 499
+        },
+        {
+          "customer_id": "U0015106",
+          "event_count_past": 441
+        },
+        {
+          "customer_id": "U0000450",
+          "event_count_past": 498
+        },
+        {
+          "customer_id": "U0008513",
+          "event_count_past": 487
+        },
+        {
+          "customer_id": "U0001789",
+          "event_count_past": 460
+        },
+        {
+          "customer_id": "U0014391",
+          "event_count_past": 175
+        },
+        {
+          "customer_id": "U0008514",
+          "event_count_past": 13
+        },
+        {
+          "customer_id": "U0005234",
+          "event_count_past": 91
+        },
+        {
+          "customer_id": "U0015527",
+          "event_count_past": 23
+        },
+        {
+          "customer_id": "U0017633",
+          "event_count_past": 2
+        },
+        {
+          "customer_id": "U0004525",
+          "event_count_past": 24
+        },
+        {
+          "customer_id": "U0002881",
+          "event_count_past": 6
+        },
+        {
+          "customer_id": "U0013780",
+          "event_count_past": 1
+        },
+        {
+          "customer_id": "U0019076",
+          "event_count_past": 1
+        },
+        {
+          "customer_id": "U0005948",
+          "event_count_past": 1
+        },
+        {
+          "customer_id": "U0016458",
+          "event_count_past": 18
+        }
+      ],
+      "scope": "All20k feature rows checked for registry/source/privacy; deterministic40-profile sample enriched for review/cart/removal extremes independently recomputed from strictly past SQLite rows. This does not claim all39 values for every customer were recalculated."
+    },
+    "full_24month_CDF_and_identity": {
+      "passed": true,
+      "check_count": 18,
+      "checks": [
+        {
+          "name": "all_parent_non_bank_fields_equal",
+          "passed": true
+        },
+        {
+          "name": "all_non_latent_shopping_fields_equal",
+          "passed": true
+        },
+        {
+          "name": "all_forecast_validation_unchanged",
+          "passed": true
+        },
+        {
+          "name": "synthesis_scope_explicit",
+          "passed": true
+        },
+        {
+          "name": "parent_model_sha",
+          "passed": true
+        },
+        {
+          "name": "original_shopping_code_snapshot_sha",
+          "passed": true
+        },
+        {
+          "name": "all_numeric_training_policy_AST_unchanged",
+          "passed": true
+        },
+        {
+          "name": "all_20000_analytic_CDF_and_probability_products_exact",
+          "passed": true
+        },
+        {
+          "name": "expected_control_churn_is_CDF_guarded",
+          "passed": true
+        },
+        {
+          "name": "expected_treatment_churn_is_CDF_guarded",
+          "passed": true
+        },
+        {
+          "name": "expected_factual_churn_uses_actual_arm",
+          "passed": true
+        },
+        {
+          "name": "generation_input_fingerprint_reproduced",
+          "passed": true
+        },
+        {
+          "name": "dataset_ID_includes_N_and_fingerprint",
+          "passed": true
+        },
+        {
+          "name": "clock_source_basegraph",
+          "passed": true
+        },
+        {
+          "name": "clock_model_metadata_sha",
+          "passed": true
+        },
+        {
+          "name": "clock_runtime_hash",
+          "passed": true
+        },
+        {
+          "name": "actual_default_cap782",
+          "passed": true
+        },
+        {
+          "name": "tail_cap_declaration_known_total",
+          "passed": true
+        }
+      ],
+      "maximum_CDF_probability_error": 0.0,
+      "recomputed_generation_fingerprint": "c713dd57fe000bb0c3629ceb0affb726b3e99c7b59c5ef7eb5a1b477fc146dd0",
+      "trait_model_sha256": "a52a5b27ad190675de84f8c0c224d31c418e1ea14d7d732b82af8d51558d4f38",
+      "timing_model_sha256": "c45cc76bb15f9adb2ea15ffe2cfc954cbb160bc3b059974c80e3edf2f9ef666a",
+      "source_support_limit": "known-total valid is not fully observed matching-SKU history",
+      "scope": "Independent frozen parameter/validation equality, numeric AST preservation, empirical-CDF guard, input identity and source-derived cap checks."
+    }
+  },
+  "final_regression": {
+    "path": "docs/audit/simulator/native_v4_final_tests.xml",
+    "sha256": "453f67d0fcf17dee84e14366b4b868bec50ac9dbd6764dd961c74f94e389a0c5",
+    "suites": [
+      {
+        "name": "pytest",
+        "errors": "0",
+        "failures": "0",
+        "skipped": "0",
+        "tests": "318",
+        "time": "18.596",
+        "timestamp": "2026-11-15T02:26:34.207115",
+        "hostname": "gimdaewon-ui-MacBookAir.local"
+      }
+    ],
+    "passed_tests": 318,
+    "deselected_by_scope": 1,
+    "excluded_scope": "downstream production-model scoring/training test; simulator task does not refit those models"
+  },
+  "independent_timing_traits_bootstrap_regression": {
+    "log_path": "/tmp/capstone_native_v4_independent_tests.log",
+    "log_sha256": "f093b5d0f65980179320226d09a042196c54bfd1590dade7cdcc9ec06482d91c",
+    "passed_tests": 62
+  },
+  "artifact_sha256": {
+    "config/simulator_config.yaml": "05347dfbc036726ab3e07ff6a8c8ec66bcb25eb8d2ecf13866aacf6e0988a890",
+    "src/simulator/engine.py": "ab06ccd726c93acdba311e2731c4e39099a93756f534460d073de9a6a2146532",
+    "data/models/shopping_joint_latent_source_traits.json": "a52a5b27ad190675de84f8c0c224d31c418e1ea14d7d732b82af8d51558d4f38",
+    "data/models/visit_timing_v4.json": "c45cc76bb15f9adb2ea15ffe2cfc954cbb160bc3b059974c80e3edf2f9ef666a",
+    "data/models/review_events_six_v4.json": "55312c03a7b1b33757002315c5a5a59ca255f0d2dbe7355fc08b937d63d36e1e",
+    "src/irl/fit_visit_timing.py": "faecc11645c8acd4d8568c890799cf7391344ebe73c636679c5b0640de4ff9d6",
+    "src/irl/fit_latent_shopping.py": "ba6646d02d4c049767a74b6f0ab7ebededed75c80e560a9e6a01e4de2403a6b9",
+    "src/irl/fit_joint_latent_shopping.py": "5b67b60357d22504aec1c4164b9786721fa365d2e96df9b4660ad3d2d507ce2e",
+    "src/irl/reconstruct_latent_traits.py": "04945c1df50b9f7d54231c1460dce15eec202ed451aa525e9a46e0bc6ea498a5",
+    "src/simulator/outcomes.py": "846774678cc25e1a1727a5e27646e79f075286830a1a9b9fe9542ab80ecb8028",
+    "src/data/make_dataset.py": "ae597ebc7e8bdf27310e629a9d90f5c02b96d8acec71c6e2348b8cc62e5b4d81",
+    "src/data/experiment_exports.py": "90f3613f9aab26ad8d0a7399252d5b2609f32d53f08e4c5648b413216266e6d4",
+    "src/data/weekly.py": "741e3c48f942d24b35f2fbef4dce529cf420d1ddc8a70bbc7a5c6f266cd2365f",
+    "src/prd/pipeline.py": "2864b6b680b10182e9af079144e9be9fb289a09b3344814ac311ef2cc81abb9f",
+    "src/prd/behavior_features.py": "7a085c2c7d5149c7a79756b7a09fbb76d93834977611cf34bcee6819345469ea",
+    "docs/feature_registry_events_v2.json": "3c9ea1e29e686c997fa42a12c27f85b8d2bd1afc3baebddab0817ca8ea8b2520",
+    "docs/audit/simulator/native_782_precision_comparison.json": "47962eafb9dbe92b57f6ec81ab6fc6d9f06f10a27db4a862a58e103f72ac05e5",
+    "docs/audit/simulator/source_supported_tail_cap_v4.json": "c2de2aca4ddd6a7876713af4f2639d797fd589c27fcff26a930b213a519b20ff",
+    "docs/audit/simulator/joint_latent_source_traits.json": "48151881955a7c77e3aeff179c60711d9ef10884ff2dcc6f7736ab87b5a81963"
+  },
+  "preserved_prior_audits": {
+    "docs/audit/simulator/v4_training_independent_review.json": "c3acaac00129bdae03b1fe9f9cb92869b47b25b28bad122200ec0ba822dc3fa7",
+    "docs/audit/simulator/irl_source_length_independent_review.json": "98c356001d4687cc1a43c503602bebe96f18b7ef0065be2bac459764dec7519a"
+  },
+  "quality_interpretation": {
+    "same_clock_cap782_primary3_and_pre30_pass": true,
+    "precision_protocol": "5000 generated customers per seed, fresh fixed seeds3109/3163; aggregate arithmetic independently reproduced.",
+    "original_pipeline_comparison_also_changes_clock_and_cap": true,
+    "material_original_pipeline_regressions": [
+      "Session item-proxy length KS .0239583→.0385710",
+      "Purchased price KS .0338214→.0549377",
+      "Pre30 session length KS .0188321→.0436147"
+    ],
+    "further_tuning_after_precision_declared": false,
+    "claim_all_metrics_improved": false,
+    "claim_independent_real_person_forecast_generalization": false
+  },
+  "limitations": [
+    "The donor trait bank uses all completed supported reference-source observations, including parent heldout periods/users. It is synthesis-only source-population reconstruction, forbidden as a heldout/live forecast posterior. Original strict prequential validation and numerical parameters were verified unchanged.",
+    "Same-clock/cap actor improvement and whole-pipeline improvement are different comparisons. Original length/price regressions remain visible; no all-metric improvement or real-customer generalization claim follows.",
+    "The782 cap is781 observed checkout decisions plus one END query under known-total support. This is not proof of fully observed SKU inventory. Generated SKU-ledger physics was independently checked at every event prefix.",
+    "Raw full SQL integrity, all stock/accounting/review records, all28d labels/revenues and10000 matureControl12m targets were checked exhaustively. All export hashes/rows/weekly sums/coverage and private-evaluation flags were checked. Full scalar feature values were independently recomputed for40 enriched profiles×21 fields(840 cells);500-person seven-feature checks add3500 cells. This is not a claim that every39-value row was independently recalculated.",
+    "All entry/regular native timing banks and frequencies were independently reconstructed from raw session starts, and4240 conditional-CDF cells exactly checked. Native timing is an empirical conditional schedule, not newly identified visit reward or a28d hazard fit.",
+    "Five source months are extrapolated over24 simulated months. Actual signup, opening inventory, latent psychological truth and cross-source person/product identity are not observed.",
+    "Review/rating native refit reproduces earlier numeric components exactly; no new review-to-purchase causal effect is identified. Coupon uptake/visit response transport and highest-price-unit policy remain explicit scenario assumptions.",
+    "NominalK4 has a nearly empty component and all eightMsteps hit their100-iteration cap. Original Bellman/gradient and monotone-GEM checks establish numerical consistency, not global optimum or discovery of four human personality types."
+  ],
+  "PDF_check": "PDF numerical/text cross-check will be reported separately to avoid circular PDF/audit checksums."
+}

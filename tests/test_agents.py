@@ -17,7 +17,7 @@ def test_all_agents_accept_binary_transition():
         assert agent.act(state, training=False) in (0, 1)
 
 
-def test_weekly_episode_updates_only_after_each_seven_day_feedback_window():
+def test_weekly_episode_updates_only_after_each_seven_day_feedback_window(legacy_session_artifacts):
     class Policy:
         def __init__(self):
             self.updates = []

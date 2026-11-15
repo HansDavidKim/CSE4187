@@ -1,0 +1,48 @@
+{
+  "passed": true,
+  "scope": "config/data-loader responsibility refactor; no policy/formula changes",
+  "ast_retained_feature_functions_exact": [
+    "_utc",
+    "_canonical",
+    "_prepared",
+    "_groups",
+    "_divide",
+    "_label_rows",
+    "build_features"
+  ],
+  "ast_moved_helpers_exact": [
+    "_utc",
+    "_outcome_days",
+    "_validate_sidecar",
+    "load_config"
+  ],
+  "preserved_public_aliases": [
+    "simulate.v4.cli.DEFAULT_CONFIG",
+    "simulate.v4.cli.load_config",
+    "simulate.v4.features.load_tables",
+    "simulate.v4.features._outcome_days"
+  ],
+  "new_shared_integrity": "CLI validate, feature loader and independent assessment all verify declared sidecar hashes",
+  "fresh_same_seed_generation": {
+    "customers": 500,
+    "months": 6,
+    "seed": 20261115,
+    "all_business7_tables_exact": true,
+    "rows": {
+      "customers": 500,
+      "products": 26116,
+      "sessions": 3268,
+      "events": 13947,
+      "orders": 127,
+      "order_items": 1417,
+      "coupons": 250
+    },
+    "feature_cells_exact": 19500,
+    "weekly_and_experiment_exact_except_dataset_provenance": true,
+    "old_dataset_id": "cosmetics-source-v10-six-event-checkout-tianchi-joint-timing-small-6m-seed20261115-n500-a1593209757062a2-28d",
+    "new_dataset_id": "cosmetics-source-v10-six-event-checkout-tianchi-joint-timing-small-6m-seed20261115-n500-3844f4869a7915e8-28d",
+    "new_runtime_fingerprint_expected": true
+  },
+  "weights_retrained_for_refactor": false,
+  "weights_note": "Prior new integrated training is retained; this structural refactor changes no learned policy or fitted coefficients."
+}

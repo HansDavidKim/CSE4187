@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from simulate.campaign import DailyCouponEnv
 
@@ -10,6 +11,13 @@ ROOT = Path(__file__).parents[1]
 
 
 def models():
+    paths = (
+        ROOT / "artifacts/cosmetics-shop-persona-quadratic-irl/gap_token_irl_model.json",
+        ROOT / "artifacts/tianchi-uplift-model/model.json",
+    )
+    missing = [str(path) for path in paths if not path.is_file()]
+    if missing:
+        pytest.skip("requires local trained legacy artifacts: " + ", ".join(missing))
     gap = json.loads((ROOT / "artifacts/cosmetics-shop-persona-quadratic-irl/gap_token_irl_model.json").read_text())
     uplift = json.loads((ROOT / "artifacts/tianchi-uplift-model/model.json").read_text())
     return gap, uplift

@@ -1,0 +1,758 @@
+{
+  "passed": true,
+  "fresh_training": [
+    "joint_latent_shopping_IRL",
+    "source_trait_posterior",
+    "native_visit_timing",
+    "review_heads",
+    "tianchi_coupon_response"
+  ],
+  "frozen_dependencies": [
+    "Cosmetics checkout/MNL/donor prior",
+    "source base return logit"
+  ],
+  "source_prepared_rows": 216093,
+  "joint_training": {
+    "action_records": 152793,
+    "activity_records": 8764,
+    "states": 148,
+    "internal_encoder_features": 40,
+    "em_iterations": 8,
+    "m_step_budget": 100,
+    "all_m_steps_converged": false,
+    "penalized_marginal_monotone": true,
+    "initial_penalized_marginal": -1.137586784009547,
+    "final_penalized_marginal": -0.73302975036279,
+    "mixture_weights": [
+      0.45585733351070823,
+      0.5009253134944599,
+      3.257625748043404e-23,
+      0.0432173529948012
+    ],
+    "validation": {
+      "train": {
+        "action": {
+          "records": 152793,
+          "users": 10435,
+          "prequential_nll": 0.7556378692864409,
+          "customer_macro_prequential_nll": 0.5030810009798994,
+          "median_available_action_activity_evidence_before_first_record": [
+            0.0,
+            0.0
+          ],
+          "observed_action_share": {
+            "view": 0.39800907109618894,
+            "cart": 0.23031159804441304,
+            "remove": 0.15265751703284836,
+            "purchase": 0.0070422074309686965,
+            "end": 0.21197960639558094
+          },
+          "predicted_action_share": {
+            "view": 0.3973635287029055,
+            "cart": 0.23154779544478232,
+            "remove": 0.1539012075422911,
+            "purchase": 0.007123840154298693,
+            "end": 0.21006362815581586
+          },
+          "encoder_fallback_records": 0
+        },
+        "activity": {
+          "records": 8764,
+          "users": 5635,
+          "prequential_nll": 0.2926298506663108,
+          "customer_macro_prequential_nll": 0.3000077916336611,
+          "median_available_action_activity_evidence_before_first_record": [
+            3.0,
+            0.0
+          ],
+          "observed_activity_rate": 0.11958010041077134,
+          "mean_probability": 0.12009665667853489,
+          "brier": 0.08362501945765645,
+          "fixed_base_nll": 0.2934813370456315
+        },
+        "posterior_clock": "population prior; action target (including END last+30m) and activity window_end strictly before each prediction; no static heldout posterior"
+      },
+      "user_holdout": {
+        "action": {
+          "records": 38921,
+          "users": 2637,
+          "prequential_nll": 0.8126911062164509,
+          "customer_macro_prequential_nll": 0.5114201901220111,
+          "median_available_action_activity_evidence_before_first_record": [
+            0.0,
+            0.0
+          ],
+          "observed_action_share": {
+            "view": 0.40371521800570387,
+            "cart": 0.24079545746512165,
+            "remove": 0.15654787903702372,
+            "purchase": 0.00652603992703168,
+            "end": 0.19241540556511907
+          },
+          "predicted_action_share": {
+            "view": 0.3986511241409127,
+            "cart": 0.24270237639193057,
+            "remove": 0.156781311155844,
+            "purchase": 0.007590491120842525,
+            "end": 0.19427469719051602
+          },
+          "encoder_fallback_records": 10
+        },
+        "activity": {
+          "records": 2258,
+          "users": 1446,
+          "prequential_nll": 0.2781043971305755,
+          "customer_macro_prequential_nll": 0.2809300782190509,
+          "median_available_action_activity_evidence_before_first_record": [
+            3.0,
+            0.0
+          ],
+          "observed_activity_rate": 0.10894596988485385,
+          "mean_probability": 0.11410254381920487,
+          "brier": 0.07856511637593912,
+          "fixed_base_nll": 0.2778606106077759
+        },
+        "posterior_clock": "population prior; action target (including END last+30m) and activity window_end strictly before each prediction; no static heldout posterior"
+      },
+      "time_holdout": {
+        "action": {
+          "records": 45168,
+          "users": 3458,
+          "prequential_nll": 0.764103970486906,
+          "customer_macro_prequential_nll": 0.5003425848411039,
+          "median_available_action_activity_evidence_before_first_record": [
+            0.0,
+            0.0
+          ],
+          "observed_action_share": {
+            "view": 0.39344226000708465,
+            "cart": 0.23459086078639746,
+            "remove": 0.1619287991498406,
+            "purchase": 0.005844845908607864,
+            "end": 0.20419323414806942
+          },
+          "predicted_action_share": {
+            "view": 0.3908478140482708,
+            "cart": 0.24202333919845265,
+            "remove": 0.16587108638869313,
+            "purchase": 0.007259532293385687,
+            "end": 0.1939982280712087
+          },
+          "encoder_fallback_records": 0
+        },
+        "activity": {
+          "records": 10471,
+          "users": 10471,
+          "prequential_nll": 0.20112964269440112,
+          "customer_macro_prequential_nll": 0.20112964269440112,
+          "median_available_action_activity_evidence_before_first_record": [
+            3.0,
+            1.0
+          ],
+          "observed_activity_rate": 0.07344093209817591,
+          "mean_probability": 0.07852144043975068,
+          "brier": 0.05394012147923259,
+          "fixed_base_nll": 0.2011515324924798
+        },
+        "posterior_clock": "population prior; action target (including END last+30m) and activity window_end strictly before each prediction; no static heldout posterior"
+      },
+      "user_and_time_holdout": {
+        "action": {
+          "records": 11119,
+          "users": 801,
+          "prequential_nll": 0.7958539223804542,
+          "customer_macro_prequential_nll": 0.4853659546944177,
+          "median_available_action_activity_evidence_before_first_record": [
+            0.0,
+            0.0
+          ],
+          "observed_action_share": {
+            "view": 0.3860059357855922,
+            "cart": 0.22115298138321793,
+            "remove": 0.192103606439428,
+            "purchase": 0.0062055940282399495,
+            "end": 0.1945318823635219
+          },
+          "predicted_action_share": {
+            "view": 0.3929340130704973,
+            "cart": 0.22798432410770933,
+            "remove": 0.19081584634439414,
+            "purchase": 0.007704041530798849,
+            "end": 0.1805617749466073
+          },
+          "encoder_fallback_records": 6
+        },
+        "activity": {
+          "records": 2649,
+          "users": 2649,
+          "prequential_nll": 0.18685749868088097,
+          "customer_macro_prequential_nll": 0.18685749868088097,
+          "median_available_action_activity_evidence_before_first_record": [
+            3.0,
+            1.0
+          ],
+          "observed_activity_rate": 0.06757266893167233,
+          "mean_probability": 0.07971254538859655,
+          "brier": 0.0486657308251256,
+          "fixed_base_nll": 0.18493436512858472
+        },
+        "posterior_clock": "population prior; action target (including END last+30m) and activity window_end strictly before each prediction; no static heldout posterior"
+      }
+    },
+    "single_reward_control": {
+      "fit": {
+        "converged": false,
+        "message": "STOP: TOTAL NO. of ITERATIONS REACHED LIMIT",
+        "iterations": 400,
+        "penalized_negative_log_likelihood_per_modeled_observation": 0.7569196974115823,
+        "gradient_max_abs": 8.869541564136922e-06,
+        "bellman_residual": 8.953993102522873e-11
+      },
+      "validation": {
+        "train": {
+          "action": {
+            "records": 152793,
+            "users": 10435,
+            "prequential_nll": 0.7676349188929896,
+            "customer_macro_prequential_nll": 0.5087555842547474,
+            "median_available_action_activity_evidence_before_first_record": [
+              0.0,
+              0.0
+            ],
+            "observed_action_share": {
+              "view": 0.39800907109618894,
+              "cart": 0.23031159804441304,
+              "remove": 0.15265751703284836,
+              "purchase": 0.0070422074309686965,
+              "end": 0.21197960639558094
+            },
+            "predicted_action_share": {
+              "view": 0.3973066857820537,
+              "cart": 0.23100603169269646,
+              "remove": 0.15391060111459612,
+              "purchase": 0.010179426641843969,
+              "end": 0.2075972547687282
+            },
+            "encoder_fallback_records": 0
+          },
+          "activity": {
+            "records": 8764,
+            "users": 5635,
+            "prequential_nll": 0.2930792524098348,
+            "customer_macro_prequential_nll": 0.30057465749845735,
+            "median_available_action_activity_evidence_before_first_record": [
+              3.0,
+              0.0
+            ],
+            "observed_activity_rate": 0.11958010041077134,
+            "mean_probability": 0.11955928175281276,
+            "brier": 0.08394483127043612,
+            "fixed_base_nll": 0.2934813370456315
+          },
+          "posterior_clock": "population prior; action target (including END last+30m) and activity window_end strictly before each prediction; no static heldout posterior"
+        },
+        "user_holdout": {
+          "action": {
+            "records": 38921,
+            "users": 2637,
+            "prequential_nll": 0.8227315777743531,
+            "customer_macro_prequential_nll": 0.5165853438404296,
+            "median_available_action_activity_evidence_before_first_record": [
+              0.0,
+              0.0
+            ],
+            "observed_action_share": {
+              "view": 0.40371521800570387,
+              "cart": 0.24079545746512165,
+              "remove": 0.15654787903702372,
+              "purchase": 0.00652603992703168,
+              "end": 0.19241540556511907
+            },
+            "predicted_action_share": {
+              "view": 0.3974533953720122,
+              "cart": 0.24172380392806508,
+              "remove": 0.15639105549332383,
+              "purchase": 0.010665901211801018,
+              "end": 0.19376584399479294
+            },
+            "encoder_fallback_records": 10
+          },
+          "activity": {
+            "records": 2258,
+            "users": 1446,
+            "prequential_nll": 0.2779123835246017,
+            "customer_macro_prequential_nll": 0.28027898734693785,
+            "median_available_action_activity_evidence_before_first_record": [
+              3.0,
+              0.0
+            ],
+            "observed_activity_rate": 0.10894596988485385,
+            "mean_probability": 0.11339702024033782,
+            "brier": 0.0784815663271034,
+            "fixed_base_nll": 0.2778606106077759
+          },
+          "posterior_clock": "population prior; action target (including END last+30m) and activity window_end strictly before each prediction; no static heldout posterior"
+        },
+        "time_holdout": {
+          "action": {
+            "records": 45168,
+            "users": 3458,
+            "prequential_nll": 0.7787950322353131,
+            "customer_macro_prequential_nll": 0.506161755242993,
+            "median_available_action_activity_evidence_before_first_record": [
+              0.0,
+              0.0
+            ],
+            "observed_action_share": {
+              "view": 0.39344226000708465,
+              "cart": 0.23459086078639746,
+              "remove": 0.1619287991498406,
+              "purchase": 0.005844845908607864,
+              "end": 0.20419323414806942
+            },
+            "predicted_action_share": {
+              "view": 0.3910020586306941,
+              "cart": 0.23954052552922456,
+              "remove": 0.16467808032303188,
+              "purchase": 0.010060995354333618,
+              "end": 0.1947183401627395
+            },
+            "encoder_fallback_records": 0
+          },
+          "activity": {
+            "records": 10471,
+            "users": 10471,
+            "prequential_nll": 0.20135830196881982,
+            "customer_macro_prequential_nll": 0.20135830196881982,
+            "median_available_action_activity_evidence_before_first_record": [
+              3.0,
+              1.0
+            ],
+            "observed_activity_rate": 0.07344093209817591,
+            "mean_probability": 0.07818538467391041,
+            "brier": 0.054031480721775195,
+            "fixed_base_nll": 0.2011515324924798
+          },
+          "posterior_clock": "population prior; action target (including END last+30m) and activity window_end strictly before each prediction; no static heldout posterior"
+        },
+        "user_and_time_holdout": {
+          "action": {
+            "records": 11119,
+            "users": 801,
+            "prequential_nll": 0.8079039053081359,
+            "customer_macro_prequential_nll": 0.4928363455394034,
+            "median_available_action_activity_evidence_before_first_record": [
+              0.0,
+              0.0
+            ],
+            "observed_action_share": {
+              "view": 0.3860059357855922,
+              "cart": 0.22115298138321793,
+              "remove": 0.192103606439428,
+              "purchase": 0.0062055940282399495,
+              "end": 0.1945318823635219
+            },
+            "predicted_action_share": {
+              "view": 0.3898559714001115,
+              "cart": 0.22803828853085195,
+              "remove": 0.1920385172140005,
+              "purchase": 0.010479765515252287,
+              "end": 0.17958745733977713
+            },
+            "encoder_fallback_records": 6
+          },
+          "activity": {
+            "records": 2649,
+            "users": 2649,
+            "prequential_nll": 0.18584774740994364,
+            "customer_macro_prequential_nll": 0.18584774740994364,
+            "median_available_action_activity_evidence_before_first_record": [
+              3.0,
+              1.0
+            ],
+            "observed_activity_rate": 0.06757266893167233,
+            "mean_probability": 0.07937412411448715,
+            "brier": 0.048484810238262156,
+            "fixed_base_nll": 0.18493436512858472
+          },
+          "posterior_clock": "population prior; action target (including END last+30m) and activity window_end strictly before each prediction; no static heldout posterior"
+        }
+      }
+    }
+  },
+  "reproduction": {
+    "joint_all_nonprovenance_fields_exact": true,
+    "joint_fields_checked": [
+      "schema_version",
+      "type",
+      "actions",
+      "discount",
+      "regularization",
+      "state_count",
+      "feature_names",
+      "context_keys",
+      "encoder",
+      "action_mask",
+      "transition_csr",
+      "mixture_weights",
+      "component_count",
+      "common_reward",
+      "component_offsets",
+      "component_policies",
+      "component_values",
+      "profile_posteriors",
+      "posterior_bank_scope",
+      "return_activity",
+      "fit",
+      "source_audit",
+      "dynamics_audit",
+      "split_audit",
+      "training",
+      "validation",
+      "single_reward_control",
+      "choice_unit",
+      "history_clock",
+      "runtime_latent",
+      "method_references",
+      "limitations"
+    ],
+    "trait_all_nonprovenance_fields_exact": true,
+    "timing_all_nonprovenance_fields_exact": true,
+    "review_learned_parameters_banks_validation_exact": true,
+    "review_seed_current": 42,
+    "review_seed_upstream": 7,
+    "coupon_entire_parsed_artifact_exact": true
+  },
+  "review_validation": {
+    "product_stars": {
+      "time_cutoff": "2021-05-21T20:12:18.612000+00:00",
+      "user_holdout_rule": "sha256(source user) modulo 5 equals 0; source IDs never cross datasets",
+      "label_window_purge_days": 0,
+      "purged_between_training_and_time_holdout": 0,
+      "train": {
+        "records": 402236,
+        "nll": 1.193460360779868,
+        "frequency_baseline_nll": 1.1959041441936746,
+        "observed_class_share": [
+          0.13424705894052247,
+          0.060981612784534456,
+          0.08036326932447618,
+          0.11426873775594427,
+          0.6101393211945226
+        ],
+        "predicted_class_share": [
+          0.1596055257007554,
+          0.06318020400308047,
+          0.07868196878073483,
+          0.09640412912901565,
+          0.6021281723865288
+        ]
+      },
+      "user_holdout": {
+        "records": 100638,
+        "nll": 1.1922071962153613,
+        "frequency_baseline_nll": 1.194291008477064,
+        "observed_class_share": [
+          0.1327530356326636,
+          0.06010652039984896,
+          0.0808044674973668,
+          0.11505594308312964,
+          0.611280033386991
+        ],
+        "predicted_class_share": [
+          0.15967099729301557,
+          0.06321546600724619,
+          0.07870589601088686,
+          0.09641367905135595,
+          0.6019939616373399
+        ]
+      },
+      "time_holdout": {
+        "records": 100560,
+        "nll": 1.254215084016339,
+        "frequency_baseline_nll": 1.2577288262220998,
+        "observed_class_share": [
+          0.20671241050119332,
+          0.06974940334128878,
+          0.08097653142402546,
+          0.08405926809864757,
+          0.5585023866348449
+        ],
+        "predicted_class_share": [
+          0.16028226952108698,
+          0.06397971792167753,
+          0.07926997431509758,
+          0.09645933404057253,
+          0.6000087042014132
+        ]
+      },
+      "user_and_time_holdout": {
+        "records": 25022,
+        "nll": 1.2526468045317554,
+        "frequency_baseline_nll": 1.2555484692514085,
+        "observed_class_share": [
+          0.20685796499080808,
+          0.06969866517464632,
+          0.0782911038286308,
+          0.08580449204699864,
+          0.5593477739589161
+        ],
+        "predicted_class_share": [
+          0.16013335427716527,
+          0.06387587103712218,
+          0.07918008594986989,
+          0.09644759164531319,
+          0.6003630970903341
+        ]
+      }
+    },
+    "order_survey": {
+      "time_cutoff": "2018-05-24T14:20:48",
+      "user_holdout_rule": "sha256(source user) modulo 5 equals 0; source IDs never cross datasets",
+      "label_window_purge_days": 28,
+      "purged_between_training_and_time_holdout": 6899,
+      "train": {
+        "records": 58121,
+        "nll": 0.35648447016489815,
+        "frequency_baseline_nll": 0.3566704152975627,
+        "observed_class_share": [
+          0.11491543504069097,
+          0.885084564959309
+        ],
+        "predicted_class_share": [
+          0.11493828097573648,
+          0.8850617190250849
+        ],
+        "brier": 0.10167190388192265
+      },
+      "user_holdout": {
+        "records": 14495,
+        "nll": 0.3584648099043429,
+        "frequency_baseline_nll": 0.35854370560250176,
+        "observed_class_share": [
+          0.11583304587788892,
+          0.8841669541221111
+        ],
+        "predicted_class_share": [
+          0.11496641379112373,
+          0.8850335862091842
+        ],
+        "brier": 0.10238885175304552
+      },
+      "time_holdout": {
+        "records": 15929,
+        "nll": 0.1937386356176314,
+        "frequency_baseline_nll": 0.19384260050452568,
+        "observed_class_share": [
+          0.035156004771172075,
+          0.9648439952288279
+        ],
+        "predicted_class_share": [
+          0.1149122769296541,
+          0.8850877230707039
+        ],
+        "brier": 0.04029414302332461
+      },
+      "user_and_time_holdout": {
+        "records": 3937,
+        "nll": 0.18395048850320334,
+        "frequency_baseline_nll": 0.18377818482590436,
+        "observed_class_share": [
+          0.030226060452120906,
+          0.969773939547879
+        ],
+        "predicted_class_share": [
+          0.1150929739169376,
+          0.8849070260830285
+        ],
+        "brier": 0.03654451123048997
+      }
+    }
+  },
+  "review_source_quality": {
+    "amazon": {
+      "raw_reviews": 701528,
+      "excluded_not_verified_purchase": 66559,
+      "excluded_invalid_timestamp": 0,
+      "excluded_duplicate_user_item_time_rating": 6513,
+      "included_verified_reviews": 628456,
+      "users": 584592
+    },
+    "olist": {
+      "orders": 99441,
+      "review_rows": 99224,
+      "reviewed_orders_any_observed_delay": 98673,
+      "answer_before_purchase_rows": 63,
+      "excluded_orders_without_valid_review_time": 60,
+      "excluded_not_mature_28d_or_bad_purchase_clock": 4,
+      "included_orders": 99381,
+      "included_review_within28d": 89892,
+      "responses_outside28d_not_lifetime_nonresponse": 8721,
+      "capture_end_proxy_naive_source_clock": "2018-10-29T12:27:35",
+      "last_observed_survey_creation_naive_source_clock": "2018-08-31T00:00:00",
+      "capture_end_is_official_extract_time": false,
+      "clock_policy": "Source clock has no timezone. Only same-source elapsed times and order are used; no UTC interpretation is asserted.",
+      "projection": "Earliest valid answer per order; later observed answers do not create multiple synthetic reviews."
+    }
+  },
+  "coupon_groups": {
+    "pooled": {
+      "receipts": 5948,
+      "redeemed": 427,
+      "response_probability": 0.07178883658372562,
+      "redemption_delay_summary_days": {
+        "records": 427,
+        "min": 0,
+        "max": 13,
+        "mean": 0.4379391100702576
+      }
+    },
+    "no_observed_purchase": {
+      "receipts": 4619,
+      "redeemed": 246,
+      "response_probability": 0.05325828101320632,
+      "redemption_delay_summary_days": {
+        "records": 246,
+        "min": 0,
+        "max": 2,
+        "mean": 0.2926829268292683
+      }
+    },
+    "purchased_within_28d": {
+      "receipts": 997,
+      "redeemed": 136,
+      "response_probability": 0.13640922768304914,
+      "redemption_delay_summary_days": {
+        "records": 136,
+        "min": 0,
+        "max": 2,
+        "mean": 0.6764705882352942
+      }
+    },
+    "lapsed_purchase": {
+      "receipts": 332,
+      "redeemed": 45,
+      "response_probability": 0.1355421686746988,
+      "redemption_delay_summary_days": {
+        "records": 45,
+        "min": 0,
+        "max": 13,
+        "mean": 0.5111111111111111
+      }
+    }
+  },
+  "coupon_source_quality": {
+    "rows": 1754884,
+    "users": 539438,
+    "coupon_receipt_rows": 1053282,
+    "ordinary_purchase_rows": 701602,
+    "coupon_purchase_rows": 75382,
+    "missing_purchase_date_rows": 977900,
+    "receipt_date_without_coupon_id_rows": 0,
+    "exact_duplicate_extra_rows": 37893,
+    "exact_duplicate_participating_rows": 74200,
+    "repeated_receipt_key_extra_rows": 41292,
+    "eligible_exact_duplicate_extra_rows": 11,
+    "invalid_dates": 0,
+    "purchase_before_receipt_rows": 0,
+    "direct_10pct_receipts_before_window_exclusions": 8085,
+    "excluded_nonmatching_discount_receipts": 1045197,
+    "excluded_insufficient_global_history_receipts": 1881,
+    "excluded_incomplete_30d_followup_receipts": 256,
+    "eligible_receipts": 5948,
+    "eligible_observed_purchase_outside_30d": 0,
+    "duplicates_dropped": 0
+  },
+  "native_timing_training": {
+    "user_rule": "sha256(seed:user_id).digest()[0] < 205",
+    "source_train_partition_users": 13155,
+    "source_training_users": 8012,
+    "entry_complete_windows": 8012,
+    "entry_active_windows": 8012,
+    "entry_session_starts": 20332,
+    "entry_duplicate_start_clocks": 81,
+    "entry_templates_with_ties": 41,
+    "regular_complete_windows": 8851,
+    "regular_active_windows": 1045,
+    "regular_session_starts": 6500,
+    "regular_duplicate_start_clocks": 43,
+    "regular_templates_with_ties": 18,
+    "regular_active_previous30_1_windows": 922,
+    "regular_active_previous30_0_windows": 123,
+    "max_window_end_at": "2020-01-28T00:00:00+00:00",
+    "entry_profile_coverage": 8012,
+    "regular_profile_coverage": 843,
+    "active_window_count_summary": {
+      "entry": {
+        "mean": 2.5376934598102845,
+        "max": 1134,
+        "p99": 23.0
+      },
+      "regular": {
+        "mean": 6.220095693779904,
+        "max": 455,
+        "p99": 66.55999999999995
+      }
+    },
+    "pooled_first_offset_lt_28d_share": {
+      "entry": 1.0,
+      "regular": 0.9732057416267943
+    }
+  },
+  "assets": {
+    "shopping_joint_latent_source_traits.json": {
+      "sha256": "481007cfa8e968c69692a8db51105895612fe178ebb45c5128a777876f9de48e",
+      "bytes": 34451255,
+      "freshly_refitted": true
+    },
+    "shopping_joint_latent_irl_candidate.json": {
+      "sha256": "70d5a168c1eb2f6b57bc3d681d69e362ff98acf12cf254f92d94cd906e7f23dc",
+      "bytes": 33846364,
+      "freshly_refitted": true
+    },
+    "visit_timing_v4.json": {
+      "sha256": "53ffdc6718f107fb68a9c2e7823fd01d87662a10172eb4de1073fb7b80d53697",
+      "bytes": 1614174,
+      "freshly_refitted": true
+    },
+    "review_events_six_v4.json": {
+      "sha256": "ac09219e1e0e6276d808d79a3399fced7c5a09e2ad0d03ef6537b7231de2c126",
+      "bytes": 5533133,
+      "freshly_refitted": true
+    },
+    "tianchi_coupon_response.json": {
+      "sha256": "7dd10e9deb126967704ffceb49e7f3322c95235d64480d5da01cdcb2b14ef370",
+      "bytes": 8380,
+      "freshly_refitted": true
+    },
+    "return_model.json": {
+      "sha256": "753ce260d8eb4b883a8fd23a68ab490c95b80503f304849376effec6356ae6b5",
+      "bytes": 65501,
+      "freshly_refitted": false
+    },
+    "shopping_profiles_aligned_v6.json": {
+      "sha256": "00a14d5c7f89bc62d9649d8ee5b176062bc4b69b056a1a90e490af38a910ea22",
+      "bytes": 32558000,
+      "freshly_refitted": false
+    },
+    "shopping_policy_aligned_v6.json": {
+      "sha256": "b44a87b1d1da06cb0f57f045f16ad21e8b8fb34d45b7a274699ada8320087535",
+      "bytes": 32552486,
+      "freshly_refitted": false
+    },
+    "shopping_profiles_checkout.json": {
+      "sha256": "4143974689541b85c47a93f6f79472b370f9ff74d82509c0ab4ea44445e64604",
+      "bytes": 32537109,
+      "freshly_refitted": false
+    }
+  },
+  "limitations": [
+    "GEM stopped at8x100 iteration budgets; no global optimum/convergence claim.",
+    "Latent component prior has nearly empty component; not four identified psychological types.",
+    "Full source posterior only supplies hidden traits to distinct synthetic people; no real new-customer generalization claim.",
+    "Olist user+time holdout survey NLL is slightly worse than its frequency baseline; native response head is not uniformly superior.",
+    "Tianchi response is descriptive and does not identify individual causal coupon uplift.",
+    "39public predictors are not the40-dimensional internal IRL encoder.",
+    "Base return and checkout dependency artifacts preserved rather than retrained."
+  ]
+}

@@ -1,6 +1,7 @@
 import json
 
 import numpy as np
+import pytest
 
 from scripts.run_agent_benchmark import load_environment
 from simulate.domain import sample_domain_user
@@ -8,6 +9,9 @@ from utils.paths import PROJECT_ROOT
 
 
 def test_domain_gmm_samples_supported_personas():
+    path = PROJECT_ROOT / "artifacts/domain-simulator-profiles/model.json"
+    if not path.is_file():
+        pytest.skip(f"requires local trained legacy artifact: {path}")
     model = json.loads((
         PROJECT_ROOT / "artifacts/domain-simulator-profiles/model.json"
     ).read_text())
@@ -18,7 +22,7 @@ def test_domain_gmm_samples_supported_personas():
         assert all(len(row["domain_latent"]) == len(adapter["features"]) for row in rows)
 
 
-def test_cost_models_preserve_behavior_and_change_only_accounting():
+def test_cost_models_preserve_behavior_and_change_only_accounting(legacy_session_artifacts):
     send = load_environment(14, "cosmetics", "send_cost")
     discount = load_environment(14, "cosmetics", "redemption_discount")
     send.reset(17)

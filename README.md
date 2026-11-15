@@ -1,5 +1,85 @@
 # eCommerce-Sim
 
+현재 KIT 시뮬레이터의 실행 경로는 **`python -m cli v4`**다. `daewon`의 분석·정책
+실험을 보존하면서, 검증된 v4 생성기·학습 레시피·39개 피처·SQLite를
+`simulate.v4`로 통합했다. v4 설계 원본은
+[LaTeX](output/pdf/KIT_feature_simulator_design_v4.tex), 구체적인 통합 범위·검증은
+[분석 기록](analysis.md#v4-integration)에 있다.
+컴파일된 PDF와 이미지 파일은 로컬에 보관하고 Git에서 제외한다.
+
+`main`의 실제 구현과 계획을 비교한 결과는 [통합 기록](docs/main_integration.md)에
+있다. 동일한 기존 코드는 중복하지 않고, 공통 요구사항·ERD·팀별 입력 계약을
+현재 시뮬레이터에 맞춰 반영했다. 설정 해석은 `configuration.py`, 데이터·sidecar
+검증은 `data/loader.py`, 피처 계산은 `features.py`가 담당한다.
+
+```bash
+python -m pip install -e ".[dev]"
+# 학습된 v4 data/models를 가진 디렉터리. 생략하면 현재 저장소를 사용한다.
+ecommerce-sim v4 generate --assets-root /path/to/v4-assets --mode small \
+  --n-customers 500 --months 6 --seed 42 --output artifacts/v4/small
+ecommerce-sim v4 validate --data artifacts/v4/small/raw.sqlite
+ecommerce-sim v4 features --data artifacts/v4/small --output artifacts/v4/features
+```
+
+설치 전 저장소에서 실행할 때는 `PYTHONPATH=src python -m cli v4 ...`도 가능하다.
+학습된 가중치와 원자료는 Git에 포함하지 않는다. 모델이 없으면 필요한 경로를
+표시하며, 실제 원자료를 준비한 뒤 `generate --fit-missing`으로 누락된 구성요소를
+학습할 수 있다. 기본 레시피와 원자료 경로는
+[번들 설정](src/simulate/v4/config/simulator.yaml)에 있다. 설정을 바꾸려면
+`--config`를 지정한다. 기존 데이터·모델·출력은 덮어쓰지 않는다.
+
+| 현재 v4 계약 | 구현 |
+|---|---|
+| 6종 이벤트 | `view`, `cart`, `remove_from_cart`, `purchase`, `coupon_usage`, `review`; 검색·CS 생성 없음 |
+| 실제 구매 회계 | 정수 최소 화폐 단위, 주문·상품별 수량, 세션 간 장바구니 원장 |
+| 쿠폰 | 고객별 고정 1:1 배정, 결정/발송/사용 분리, 구매한 최고 단가 상품 한 개 10% 할인, 30일 유효 |
+| 별점 | 실제 구매한 상품별 최대 한 번, 비동기 1–5점; 같은 상품 재구매는 별도 구매로 취급 |
+| 학습 | Cosmetics 잠재 혼합 MaxEnt IRL·재방문, 원자료 방문 횟수/시각 은행, Tianchi 구매 반응, Amazon/Olist 별점 head |
+| 생애주기·이탈 | ENTRY→HOME→EXIT, 28일 미방문; 피처의 과거 30일 창·쿠폰 유효기간과 별개 |
+| 피처 | KIT32 + 리뷰·장바구니7 =39, 시점 이전 관측만 사용, 잠재 성향·배정·정답 제외 |
+| SQLite | 불변 `raw.sqlite` 업무7테이블 + 별도 `features.sqlite`의 피처·주간·실험·정답 테이블 |
+
+피처 이름·수식·논문 근거는 [레지스트리](paper/simulator_v4/feature_registry_events_v2.json),
+[사전](paper/simulator_v4/feature_dictionary.md), [주간 계약](paper/simulator_v4/weekly_experiment_contract.md)을 따른다.
+`features.sqlite`의 `feature_registry`에는 39개 피처 순서와 버전이 저장된다.
+`features`에는 식별자·출처와 39개 예측값만 있으며, `labels`·`treatments`·
+`experiment_log`는 별도 테이블이다. [SQL 예시](scripts/query_v4.sql)로 업무 DB와
+파생 DB를 연결할 수 있다. sidecar가 없는 `raw.sqlite`도 `features --as-of-at
+2024-06-02T15:00:00Z`처럼 명시한 시점의 피처를 만들 수 있지만, 배정 기록을
+추측해서 실험·주간 로그를 만들지는 않는다.
+
+평가 전용 잠재 반응 결과는 다음과 같이 별도 경로로 내보낸다.
+
+```bash
+ecommerce-sim v4 export-experiment --data artifacts/v4/small \
+  --output artifacts/v4/experiment \
+  --evaluation-output artifacts/evaluation_only/v4-small --repetitions 32
+```
+
+같은 고객·seed의 조건부 재방문 확률을 공유 난수로 비교하는 평가다. 전체 구매
+경로의 반사실 재실행이나 실제 개인 인과효과의 식별을 뜻하지 않는다. 실데이터
+일반화와 하위 예측 모델 학습은 이 통합의 검증 범위에 포함되지 않는다.
+
+원자료와의 정합성을 별도로 확인하려면 다음 모듈을 사용한다. `validation`은
+원장·별점·쿠폰·정답을 독립 대조하며, `quality`는 같은 원자료/달력으로 생성
+분포를 비교한다. `--source-cache`는 원본 파일 이력과 일치할 때만 재사용한다.
+
+```bash
+PYTHONPATH=src python -m simulate.v4.validation --data-dir artifacts/v4/small \
+  --source-cache artifacts/v4/source_sample.parquet --output artifacts/v4/source-audit.json
+PYTHONPATH=src python -m simulate.v4.quality --source-cache artifacts/v4/source_sample.parquet \
+  --customers 5000 --seeds 3109 3163 --output artifacts/v4/fidelity.json
+```
+
+최종 검증은571개 통과·기존 학습 파일이 없는5개 명시적 skip이다. 독립 설치
+검사114개도 통과했고, 기존2만 명×39개 피처780,000셀은 결측치까지 일치했다.
+리팩토링 전후의 같은 seed 실행에서도 업무7테이블·39피처·주간/실험 값이
+[동일함을 확인](paper/simulator_v4/daewon_refactor_audit.json)했다.
+
+아래의 `run`·Starbucks 및 기존 `campaign` 정책 실험은 이전 연구 경로다.
+그 환경의 13/19개 상태값, 고정 구매가·42일 쿠폰 및 30일 이탈 설정은 보존하며,
+v4의 39개 공개 피처·실제 SKU 회계·28일 이탈과 혼용하지 않는다.
+
 Electronics·Cosmetics의 행동 이질성과 세션 간격을 재현하고, Tianchi의 쿠폰 반응을
 참고하여 개입 시나리오를 실험하기 위한 사용자 시뮬레이터 연구 프로젝트다.
 최종 목표는 페르소나별 MaxEnt IRL, 세션 종료 및 확률적 재방문, 쿠폰 개입을
@@ -12,7 +92,7 @@ Electronics·Cosmetics의 행동 이질성과 세션 간격을 재현하고, Tia
 생성한다. 세부 근거와 한계는 [analysis.md](analysis.md)를 기준으로 읽는다.
 
 최종 KSC 원고는 [paper.docx](paper.docx), 검증된 3페이지 PDF는
-[output/pdf/paper-docx.pdf](output/pdf/paper-docx.pdf)에 있다.
+로컬 `output/pdf/paper-docx.pdf`에 있다. PDF·이미지는 Git에 포함하지 않는다.
 
 ## 구조
 
@@ -45,7 +125,7 @@ output/pdf/       # 기존 논문 PDF
 
 ```bash
 python -m pip install -e ".[dev]"
-python -m pytest -q
+PYTHONPATH=src python -m pytest -q
 python -m cli --help
 ```
 
@@ -54,6 +134,9 @@ python -m cli --help
 ```bash
 python -m pip install -e ".[dev,analysis]"
 ```
+
+기존 정책 테스트 중 학습 산출물 JSON이 필요한 5개는 해당 파일이 없으면 경로를
+명시해 건너뛴다. 그 외 원자료 없이 실행하는 테스트와 v4 회계·피처 검증은 계속 실행된다.
 
 ## 현재 연구 경로
 

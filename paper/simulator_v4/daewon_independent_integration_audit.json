@@ -1,0 +1,101 @@
+{
+  "base_commit": "3e551b11b86231ceaff413705309d712563573b4",
+  "independent_review": true,
+  "package_build": {
+    "clean_source_tree": true,
+    "working_directory_outside_repo": true,
+    "source_project_not_on_pythonpath": true,
+    "bundled_configs": true,
+    "wheel_members": 86,
+    "trained_assets_reused": true,
+    "new_training": false
+  },
+  "installed_cli_end_to_end": {
+    "customers": 20,
+    "months": 3,
+    "seed": 9901,
+    "events_by_type": {
+      "cart": 62,
+      "purchase": 2,
+      "remove_from_cart": 15,
+      "review": 6,
+      "view": 108
+    },
+    "generate": true,
+    "validate": true,
+    "features": true
+  },
+  "sqlite": {
+    "raw_tables": [
+      "coupons",
+      "customers",
+      "events",
+      "order_items",
+      "orders",
+      "products",
+      "sessions"
+    ],
+    "raw_integrity": "ok",
+    "foreign_key_violations": 0,
+    "features_tables": [
+      "experiment_log",
+      "feature_registry",
+      "features",
+      "labels",
+      "metadata",
+      "treatments",
+      "weekly_panel"
+    ],
+    "feature_integrity": "ok",
+    "feature_rows": 20,
+    "predictor_count": 39,
+    "predictor_columns": [
+      "visit_recency_days",
+      "purchase_recency_days",
+      "observed_tenure_days",
+      "session_count_30d",
+      "view_count_30d",
+      "purchase_count_30d",
+      "net_spend_30d",
+      "mean_net_order_value_30d",
+      "mean_session_duration_minutes_30d",
+      "views_per_session_30d",
+      "orders_per_session_30d",
+      "mean_purchase_gap_days",
+      "intervisit_start_gap_mean_days_90d",
+      "intervisit_start_gap_cv_90d",
+      "unique_purchase_products_30d",
+      "purchased_qty_30d",
+      "mean_basket_qty_30d",
+      "cart_qty_current",
+      "cart_sku_current",
+      "cart_gross_value_current",
+      "last_session_min_viewed_price",
+      "last_session_max_viewed_price",
+      "last_session_start_hour",
+      "last_session_start_weekday",
+      "coupon_uses_30d",
+      "coupon_redemption_recency_days",
+      "coupon_discount_amount_30d",
+      "orders_delta_30d",
+      "net_spend_delta_30d",
+      "mean_net_order_value_delta_30d",
+      "unique_purchase_products_delta_30d",
+      "purchased_qty_delta_30d",
+      "review_count_30d",
+      "mean_review_rating_30d",
+      "cart_adds_per_nonpurchase_session_30d",
+      "cart_removes_per_nonpurchase_session_30d",
+      "review_last_order_mean_rating",
+      "review_recency_days",
+      "review_non5_share_30d"
+    ],
+    "private_feature_columns": [],
+    "duplicate_snapshot_keys": 0
+  },
+  "limitations": [
+    "Wheel smoke snapshot predates final source-cache bootstrap repair and sidecar-provenance tightening; rebuild the release wheel after those changes.",
+    "This20-customer run verifies packaging and storage, not population fidelity. Native coupon/redemption/review edge semantics require the dedicated regression suite.",
+    "Legacy trained-artifact integration cases skip only when exact local files are unavailable; no legacypolicy models retrained."
+  ]
+}

@@ -9,6 +9,8 @@ from simulate.pipeline import EcommercePipeline, load_starbucks_panel
 def main() -> None:
     parser = argparse.ArgumentParser(description="Intervention-aware e-commerce simulator")
     sub = parser.add_subparsers(dest="command", required=True)
+    from simulate.v4.cli import add_parser as add_v4_parser, run as run_v4
+    add_v4_parser(sub)
 
     fetch = sub.add_parser("fetch", help="download the selected Kaggle dataset")
     fetch.add_argument("--dataset", default="blacktile/starbucks-app-customer-reward-program-data")
@@ -19,7 +21,7 @@ def main() -> None:
     uplift.add_argument("--segments", type=int, default=6)
     uplift.add_argument("--synthetic-rows", type=int, default=100_000)
 
-    run = sub.add_parser("run", help="fit discovery/GMM/IRL and generate a synthetic panel")
+    run = sub.add_parser("run", help="legacy Starbucks discovery/GMM/IRL panel (use v4 for KIT39)")
     run.add_argument("--data", type=Path, default=Path("data/raw/starbucks"))
     run.add_argument("--output", type=Path, default=Path("artifacts/starbucks-run"))
     run.add_argument("--max-users", type=int, default=2000)
@@ -30,6 +32,9 @@ def main() -> None:
     run.add_argument("--periods", type=int, default=30)
 
     args = parser.parse_args()
+    if args.command == "v4":
+        run_v4(args)
+        return
     if args.command == "fetch":
         import kagglehub
 

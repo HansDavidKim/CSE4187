@@ -1,5 +1,105 @@
 # 사용자 행동 페르소나와 쿠폰 반응: 분석 결과 및 시뮬레이터 가정
 
+<a id="v4-integration"></a>
+
+## v4 통합: 시뮬레이터·KIT39·SQLite (2026-11-15)
+
+`daewon`의 `3e551b11`을 기반으로 v4를 통합했다. 아래 기존 §0 이후의 연구
+기록은 당시 결과로 보존하며, 현행 KIT 데이터 생성·피처 계약은 이 절과
+`simulate.v4`를 기준으로 한다. 분석·군집·정책 코드를 v4 생성기로 덮어쓰지 않았다.
+
+| 통합 항목 | 현행 실행·정합성 계약 |
+|---|---|
+| 진입점 | `python -m cli v4 generate / validate / features / export-experiment`; 설치 후 `ecommerce-sim v4` |
+| 이벤트 | 조회·장바구니 추가·제거·주문 구매·쿠폰 사용·상품 별점6종. 검색·CS 생성/학습 없음 |
+| 원장 | 세션 간 장바구니 유지, 보유량 음수 금지, 주문 헤더와 상품별 수량 분리, 정수 최소 화폐 단위 |
+| 구매/쿠폰/별점 | 한 구매에 여러 상품, 쿠폰은 구매한 최고 단가 상품 한 개에10%·half-up·동률 최소 line, 별점은 실제 구매한 SKU당 최대1회 |
+| 생애주기 | 첫 관측 세션 ENTRY, 재방문 HOME, 마지막 방문28일 후 EXIT, 재방문 시 HOME 복귀. 비동기 별점은 방문 시계를 리셋하지 않음 |
+| 실험 | 고객별 Treatment/Control1:1 고정, 배정 확률0.5; 결정·실제 발송·사용·할인·발송비 구분, Control 미발송 |
+| 관측/정답 | 기본 정답은 미래28일 미방문, 적격성은 과거30일 활동. 미구매 정답은 별도 definition. 관측 부족은0으로 만들지 않음 |
+| 피처 | `kit39-review-cart-v2`: KIT32+리뷰·장바구니7. 엄격한 과거시점, 주문별 동일 가중 별점, 잠재 성향/배정/미래 정답 제외 |
+| SQLite | 불변 `raw.sqlite` 업무7테이블과 별도 `features.sqlite`; 피처39·레지스트리·주간·실험·배정·정답의 분리 저장 |
+| 재현성 | 데이터 ID에 설정/모델/코드/입력 fingerprint; raw SHA·FK·금액·장바구니 검증; 새 생성분은 모든 sidecar의 SHA를 manifest에 결합 |
+
+업무 DB는 customers, products, sessions, events, orders, order_items, coupons만
+포함한다. 파생 DB의 features에는 식별자/출처와39개 공개 예측값만 들어간다.
+labels·treatments·experiment_log는 별도 테이블이며, diagnostics/잠재 반응 유형은
+피처 저장 단계에서 읽지 않는다. raw만 있는 경우 명시한 시점으로 피처를 만들 수
+있지만, 배정 sidecar가 없는 실험·주간 로그는 발명하지 않는다. 기존 sidecar에
+없는 암호학적 결합을 소급해 주장하지 않으며 키·시점·horizon을 구조적으로 검사한다.
+
+v4의 학습 코드도 같은 패키지로 이식하고 실제 원자료로 다시 실행했다. Cosmetics
+152,793개 행동/END와8,764개 성숙 활동창으로148상태·K=4 공동 MaxEnt IRL을
+학습했고, 학습된 보상·정책·혼합값·검증 수치는 이전 v4와 정확히 같았다. 서로 다른
+합성 사용자에게 부여하는 source posterior 성향과 원자료 방문 횟수/시각 은행도
+다시 구성했다. Amazon628,456개 구매확인 별점과 Olist99,381개 성숙 주문으로
+별점/응답 head를 재학습했고, Tianchi1,754,884행에서 직접10% 할인·완전 관측
+조건에 맞는5,948개 수령 기록으로 쿠폰 반응을 다시 적합했다. 이전 checkout/MNL/
+donor와 base return 모형은 고정 의존성으로 유지했다. 원자료·가중치는 Git에
+포함하지 않고 모델 SHA·학습/검증 요약을
+[학습 감사 기록](paper/simulator_v4/daewon_training_audit.json)에 남긴다.
+
+IRL의 내부 상태 인코더40차원과 공개 예측 피처39개는 역할이 다르다. Cosmetics에
+별점이 공동 관측되지 않으므로39개 피처 전체가 하나의 IRL 보상에서 공동 학습됐다고
+주장하지 않는다. 별점은 구매에 연결한 별도 관측 기반 head다. GEM은8×100 반복
+예산으로 종료했으며 전역 최적 수렴을 주장하지 않는다. 거의 빈 잠재 성분을
+네 심리 유형의 발견으로 해석하지 않는다. Olist의 사용자+시간 holdout에서는
+단순 빈도 baseline보다 응답 NLL이 조금 나쁜 구간도 있다. Tianchi 관측 반응을
+합성 가정으로 사용하는 것이며 실제 개인 CATE를 식별한 결과가 아니다.
+
+기존 `campaign`의13/19개 상태값과 고정 구매가·42일 쿠폰·30일 이탈은 호환성을
+위한 이전 정책 환경으로 남는다. v4의28일 정답·SKU 원장·공개39피처와 혼용하지
+않는다. 기존 코드에서 누락돼 테스트 수집이 실패하던19개 소스는 Git에 이미 있던
+build 사본에서 바이트 단위로 복구했다. 복구 내역과 원래 테스트의 실패를
+[기준 감사](paper/simulator_v4/daewon_baseline_audit.json)에 기록했다. 중복 build와
+이미지 압축 사본은 Git 추적에서만 제외하고 로컬에 보존했다.
+
+명세·논문 근거는 [v4 LaTeX](output/pdf/KIT_feature_simulator_design_v4.tex),
+[피처 레지스트리](paper/simulator_v4/feature_registry_events_v2.json),
+[피처 사전](paper/simulator_v4/feature_dictionary.md),
+[주간 실험 계약](paper/simulator_v4/weekly_experiment_contract.md)을 따른다.
+원본 PDF/LaTeX는 로컬에 보존하며 PDF·이미지는 Git에서 제외한다. 문서의 코드 경로를 통합 패키지로 매핑한
+이력은 `paper/simulator_v4/upstream_provenance.json`에 있다. 이전 전체 시스템
+비교의 세션 길이·단가 거리 악화와 실서비스 일반화 미검증 한계도 보존한다.
+
+최종 회귀 검사는571개 통과·기존 정책의 로컬 학습 파일이 필요한5개만 명시적
+skip이다. 독립 검토자는 소스 트리 밖에 설치한 wheel에서 생성→업무 SQLite→
+39피처 SQLite→평가 분리까지 실행하고114개 핵심 회귀 검사를 추가 확인했다.
+이전 전체2만 명 v4 피처의780,000셀은 값·결측치까지 정확히 일치했다.
+[전체 피처 대조](paper/simulator_v4/feature_alignment_audit.json)와
+[독립 최종 감사](paper/simulator_v4/daewon_final_independent_audit.json)에 근거가 있다.
+
+통합 코드의 재학습 IRL과 동일 방문 시계의 MNL을 각각5,000명·seed3109/3163으로
+다시 생성해 비교했다. 아래는5개월 무신규쿠폰 비교의 두 seed 평균이며,
+행동/전이/길이는 과거30일 비교에서도 두 seed 모두 개선됐다. 가격 및 일부
+제거 후 반응·다양성 지표의 악화는 제외하지 않고
+[상세 비교](paper/simulator_v4/daewon_fidelity_comparison.json)에 남겼다.
+
+| 원자료와의 거리(작을수록 가까움) | 동일 시계 MNL | 재학습 IRL |
+|---|---:|---:|
+| 행동 비율 L1 | 0.27537 | 0.11531 |
+| 전이 L1 | 0.20212 | 0.10738 |
+| 세션 길이 KS | 0.08946 | 0.03857 |
+| 방문 간격 KS | 0.05815 | 0.02658 |
+| 구매 단가 KS | 0.02958 | 0.05494 |
+
+발행 전 원자료·모델·SQLite/Parquet·인증 파일을 ignore 대상으로 확인했다.
+이미 추적되던 OS 메타데이터·중복 빌드·PDF 검수 임시파일·압축 사본은 로컬을
+보존한 채 Git 추적만 해제했다. 개인 Ch10 과제는 별도 작업공간 산출물이며
+이 브랜치에 포함하지 않는다. 기존 Git 이력은 다시 쓰지 않았다.
+
+후속 리팩토링으로 설정 해석과 데이터 로딩·sidecar 검증을 분리했고, CLI·피처·
+독립 대조가 같은 검증 함수를 사용한다. 이전 공개 import는 유지했다. 같은500명·
+seed 실행의 업무7테이블과39피처19,500셀, 주간·실험 값이 모두 동일했으며,
+함수 AST와 [실행 결과](paper/simulator_v4/daewon_refactor_audit.json)로 확인했다.
+이 구조 정리를 위해 보상·정책을 다시 바꾸거나 재학습하지 않았다.
+
+`main`의 `f5f8d6f`도 비교했다. 기존 소스28개·테스트48개·스크립트14개는 daewon과
+같고, 새 설정8개는 빈 파일이었다. 따라서 공통 문서·요구사항·ERD·후속 모델
+입력 계약을 가져와 현재 동작에 맞추고, 동일 코드·빈 설정·이미지·PDF는 추가하지
+않았다. [main 통합 기록](docs/main_integration.md)에 원본 revision과 구현/계획
+구분을 남겼으며, 이 비교만으로 후속 팀 모델이 구현됐다고 주장하지 않는다.
+
 ## 0. 프로젝트 목표와 현재 구현 상태
 
 `AGENTS.md`의 최종 목표는 행동 페르소나, 개입 반응, 세션 내 선택과 세션 간

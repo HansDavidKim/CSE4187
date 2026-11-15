@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ecommerce-sim"
-version = "0.1.0"
+version = "0.4.0"
 description = "Intervention-aware e-commerce panel simulator"
 requires-python = ">=3.10"
 dependencies = [
@@ -17,6 +17,8 @@ dependencies = [
   "scipy>=1.7.3",
   "joblib>=1.4.0",
   "threadpoolctl>=3.5.0",
+  "pyarrow>=10",
+  "PyYAML>=6",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +33,9 @@ py-modules = ["cli"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"simulate.v4" = ["config/*.yaml", "config/*.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
