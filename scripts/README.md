@@ -19,8 +19,7 @@ python -m analysis.uplift.observed reactivation
 Raw data, saved embeddings and previous artifacts must be supplied separately.
 The external-code column marks direct dependencies on the separate capstone
 `src.irl` or `src.analysis` modules. Put that project on `PYTHONPATH` and set
-`ECOMMERCE_CAPSTONE_ROOT` to its data root. Analytical and causal limitations
-remain in [analysis.md](../analysis.md) including historical reports in its appendix.
+`ECOMMERCE_CAPSTONE_ROOT` to its data root.
 
 ## Behavior and data analysis
 

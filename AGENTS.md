@@ -17,52 +17,33 @@
 15) Determine goal or objective for the task : Reference other simulator papers, and determine one.
 16) Make scripts for running various RL agents : Lin-UCB, Lin-TS, TS, UCB, PPO, SAC.
 
-**Project Tree (Current, Simplified)**
+**Tracked Project Tree**
 ```text
 .
 ├── AGENTS.md
 ├── README.md
-├── analysis.md
 ├── pyproject.toml
-├── data/raw/                   # local datasets
-├── artifacts/                  # local experiment outputs
 ├── src/
-│   ├── analysis/
-│   │   ├── irl/
-│   │   │   └── history.py      # history-based IRL experiments
-│   │   ├── persona/
-│   │   │   ├── sequence.py     # sequence representation and masked GRU
-│   │   │   ├── cluster.py      # clustering, K-sweep, stability
-│   │   │   └── behavior.py     # behavior, session gaps, heterogeneity
-│   │   ├── uplift/
-│   │   │   ├── canonical.py    # assumption-dependent response bounds
-│   │   │   ├── observed.py     # descriptive coupon analyses
-│   │   │   └── sequence.py     # observational sequence prediction
-│   │   ├── eda.py              # data audits, inactivity, session returns, causal features
-│   │   └── feature_selection.py # past-only feature selection and session structure exploration
+│   ├── analysis/             # existing research functions
+│   ├── models/               # existing learning and policy code
 │   ├── preprocessing/
-│   ├── models/
-│   │   └── agents.py           # UCB, TS, LinUCB, LinTS, PPO, discrete SAC
 │   ├── simulate/
-│   │   ├── latent_session_model.py
-│   │   └── campaign.py         # daily capped coupon-policy environment
+│   │   └── v4/               # configuration, simulator, IRL, data, features and validation
 │   ├── utils/
 │   └── cli.py
-├── scripts/
-├── tests/
-├── img/
-├── external/
-├── paper/
-└── output/
+├── scripts/                  # necessary entry points and SQL examples
+└── tests/
 ```
 
-As you can see, current repository is messed up. After refactoring, and summarize important analysis, and result of each goal into analysis.md., delete unnecessary python files for testing, and analysis (This must be cleaned up)
+Raw data, models, generated outputs, reports, notebooks, environments and caches
+stay local and are excluded from Git. Preserve these local files when changing
+repository tracking. Keep required runtime configuration under `src/`.
 
 **Working Rules**
 
 - Organize code by domain and reusable function, not by dataset or one-off experiment. Keep persona sequence, clustering, and behavior code together under `src/analysis/persona/`; avoid unnecessary nested project-name packages.
 - Keep scripts as necessary entry points. Consolidate redundant analysis scripts and reusable utilities, and update callers, tests, and documentation when refactoring.
-- Keep analysis results, assumptions, and limitations in `analysis.md`; place figures in `img/` rather than creating a separate research documentation tree.
+- Keep experiment results, reports and figures in ignored local directories. Keep concise runtime instructions in `README.md`; do not commit generated research documentation.
 - Distinguish observed patterns, simulation assumptions, and identified causal effects. Separate interventions from user actions, prevent future-information leakage, and do not treat missing observations as zero outcomes or confirmed inactivity.
 - Persona clusters do not identify canonical response types or individual counterfactuals. State the assumptions and limitations of any uplift or IRL-based model explicitly.
 - Preserve user data and useful reproducibility; verify changes and report what was not tested. Check dataset usage and redistribution rights before publication.
