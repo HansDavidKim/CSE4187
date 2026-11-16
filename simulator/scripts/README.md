@@ -1,8 +1,8 @@
 # Script index
 
-Run from the repository root after installing the project. The listed entry points are retained for the current workflow. Use `python -m scripts.<name>` for
+Run from `simulator/` after installing the project. The listed entry points are retained for the current workflow. Use `python -m scripts.<name>` for
 commands that import other scripts; direct `python scripts/<name>.py` commands
-may also require the repository root on `PYTHONPATH`, as in the original setup.
+may also require `simulator/` on `PYTHONPATH`, as in the original setup.
 
 Argparse commands support `--help`; scripts with positional dataset names use
 their final execution block instead. Examples:
