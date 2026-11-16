@@ -357,6 +357,7 @@ def test_source_trait_recipe_reconstructs_and_guards_the_exact_parent(tmp_path, 
     ("fit_joint_latent_shopping", "--source-cache", "prepared cache.parquet"),
     ("fit_visit_timing", "--source-cache", "prepared cache.parquet"),
     ("reconstruct_latent_traits", "--source-cache", "prepared cache.parquet"),
+    ("fit_gaussian_rewards", "--source-cache", "prepared cache.parquet"),
 ])
 def test_portable_source_paths_reach_fitter_without_shell_parsing(name, option, path):
     simulator = SimpleNamespace(settings={"cosmetics_source": "raw cosmetics",
@@ -382,3 +383,41 @@ def test_checkout_bootstrap_supplies_the_required_training_report(tmp_path, monk
     command, = calls
     assert command[2] == "simulate.v4.irl.fit_checkout_transition"
     assert command[command.index("--report") + 1] == str(output.with_suffix(".training.json"))
+
+
+def test_gaussian_rewards_fit_once_after_source_traits_without_refitting_parent(tmp_path, monkeypatch):
+    import hashlib
+    from simulate.v4.irl import fit_latent_shopping as latent
+
+    parent, traits, returning, gaussian = [tmp_path / name for name in (
+        "parent.json", "traits.json", "return.json", "gaussian.json")]
+    parent.write_text(json.dumps({"latent_shopping": {}}))
+    returning.write_text("frozen return")
+    traits.write_text(json.dumps({"latent_shopping": {
+        "profile_posterior_assignment_scope": "source_observation_trait_posterior",
+        "trait_reconstruction": {"parent_model_sha256": hashlib.sha256(parent.read_bytes()).hexdigest()}}}))
+    monkeypatch.setattr(latent, "validate_model", lambda model: None)
+    calls = []
+
+    def fit(command, **kwargs):
+        calls.append(command)
+        gaussian.write_text("fitted Gaussian")
+
+    monkeypatch.setattr(make_dataset.subprocess, "run", fit)
+    simulator = SimpleNamespace(model_path=traits, settings={
+        "latent_trait_base_model_path": str(parent), "return_model_path": str(returning),
+        "gaussian_reward_model_path": str(gaussian), "prepared_source_cache": "source cache.parquet"})
+    make_dataset.ensure_source_models(simulator)
+    make_dataset.ensure_source_models(simulator)
+    assert len(calls) == 1
+    assert calls[0][1:] == ["-m", "simulate.v4.irl.fit_gaussian_rewards",
+        "--source-cache", "source cache.parquet", "--base", str(traits), "--return-model", str(returning),
+        "--output", str(gaussian), "--report", str(gaussian.with_suffix(".training.json"))]
+
+
+def test_gaussian_fitting_requires_the_return_model(tmp_path):
+    model = tmp_path / "shopping.json"
+    model.touch()
+    with pytest.raises(ValueError, match="requires a fitted return model"):
+        make_dataset.ensure_source_models(SimpleNamespace(model_path=model, settings={
+            "gaussian_reward_model_path": str(tmp_path / "gaussian.json")}))

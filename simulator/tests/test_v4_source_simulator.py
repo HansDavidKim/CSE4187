@@ -35,6 +35,7 @@ def source_config(tmp_path_factory):
     config = load_config()
     config["churn"]["target_rate"] = .2
     config["source_simulation"]["model_path"] = str(model_path)
+    config["source_simulation"]["gaussian_reward_model_path"] = None
     config["source_simulation"].update(retention_mode="target", signup_mode="legacy_bounded_uniform")
     config["source_simulation"]["return_model_path"] = None
     config["source_simulation"]["coupon_response_model_path"] = None

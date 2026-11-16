@@ -9,6 +9,7 @@ from simulate.v4.cli import DEFAULT_CONFIG, load_config, run
 def test_bundled_config_resolves_models_and_calibrations_separately(tmp_path):
     config = load_config(assets_root=tmp_path)
     assert config["source_simulation"]["model_path"] == str(tmp_path / "data/models/shopping_joint_latent_source_traits.json")
+    assert config["source_simulation"]["gaussian_reward_model_path"] == str(tmp_path / "data/models/shopping_gaussian_rewards.json")
     assert config["source_simulation"]["outcome_days"] == 28
     assert config["source_simulation"]["max_events_per_session"] == 782
     assert Path(config["toy"]["message_model_path"]).is_file()

@@ -51,6 +51,16 @@ ecommerce-sim v4 features --data artifacts/small --output artifacts/features
 사용한다. 가중치가 없으면 필요한 경로를 표시하며, 실제 원자료를 준비한 뒤
 `generate --fit-missing`으로 누락 모형을 학습한다. 기존 출력·모형은 덮어쓰지 않는다.
 
+기본 v4는 `shopping_gaussian_rewards.json`의 Gaussian 분포에서 고객별 행동 보상
+offset 4개와 재방문 logit offset을 한 번 뽑는다. 뽑은 값으로 IRL 정책을 계산해
+고객의 전체 이력에 지속 적용한다. Gaussian 평균·분산은 원자료의 고객별 MAP
+추정치에서 맞추며, 기존 성향 배정과 공통 보상·전이행렬은 유지한다.
+이는 고정된 성향 배정을 사용하는 두 단계 합성 모형이며, 기존 모형의 예측 검증
+점수를 확장 모형의 검증 점수로 사용하지 않는다. 기본 적합은 계산량을 제한하기
+위해 seed로 고른 최대 256명을 사용하며, `simulate.v4.irl.fit_gaussian_rewards`의
+`--max-users`로 표본을 늘릴 수 있다. 기존 이산 모형으로 실행하려면 설정의
+`gaussian_reward_model_path`를 `null`로 둔다.
+
 업무 기록은 `raw.sqlite`의 고객·상품·세션·이벤트·주문·주문상품·쿠폰 7개 관계에
 저장한다. `features.sqlite`는 공개 이력의 39개 피처와 배정·정답·주간/실험 테이블을
 분리한다. 피처 이름과 순서는 [features.py](src/simulate/v4/features.py)의

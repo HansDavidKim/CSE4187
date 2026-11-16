@@ -720,7 +720,7 @@ def validate_model(model):
     _validate_trait_bank(b)
 
 
-def policy(model, context, component_id):
+def policy(model, context, component_id, probabilities=None):
     b = _block(model)
     if isinstance(component_id, bool) or not isinstance(component_id, (int, np.integer)) or not 0 <= component_id < len(b["mixture_weights"]):
         raise ValueError("component_id must be the persistent private customer draw")
@@ -733,7 +733,7 @@ def policy(model, context, component_id):
             tuple(np.asarray(tree[name]) for name in ("left", "right", "feature", "threshold")))
         if len(_RUNTIME) >= 4:_RUNTIME.clear()
         _RUNTIME[id(b)] = cache
-    _, mapping, keys, means, scale, probabilities, tree = cache
+    _, mapping, keys, means, scale, component_policies, tree = cache
     x = context_vector(context);xf = x.astype(np.float32);left, right, feature, threshold = tree
     node = 0
     while left[node] >= 0:node = left[node] if xf[feature[node]] <= threshold[node] else right[node]
@@ -743,7 +743,7 @@ def policy(model, context, component_id):
         candidates = np.flatnonzero(keys[:, 1] == group)
         if not len(candidates):raise ValueError("no source state supports runtime cart/START group")
         state = int(candidates[np.argmin(np.square((means[candidates] - x) / scale).sum(axis=1))])
-    values = probabilities[int(component_id), state].copy()
+    values = (component_policies[int(component_id), state] if probabilities is None else probabilities[state]).copy()
     if context.get("session_decision_count", 0) == 0:values[4] = 0
     if context.get("cart_total_quantity", 0) == 0:values[2] = 0
     values /= values.sum()
