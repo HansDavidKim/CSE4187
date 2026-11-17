@@ -26,7 +26,7 @@ KIT_FEATURES = (
     "unique_purchase_products_delta_30d", "purchased_qty_delta_30d",
 )
 EXPANDED_FEATURES = (*KIT_FEATURES, *BEHAVIOR_FEATURES)
-EXPANDED_FEATURE_VERSION = "kit39-review-cart-v2"
+EXPANDED_FEATURE_VERSION = "kit39-review-cart-v3"
 
 def _utc(value):
     return pd.to_datetime(value, utc=True, errors="raise")
@@ -58,6 +58,8 @@ def _divide(a, b):
 
 def _label_rows(tables, as_of_at=None):
     customers = tables["customers"]
+    if as_of_at is not None:
+        return pd.DataFrame({"customer_id": customers.customer_id, "as_of_at": _utc(as_of_at)})
     if "labels" in tables:
         labels = tables["labels"].copy()
         aliases = {"user_id": "customer_id", "snapshot_at": "as_of_at"}
@@ -82,13 +84,11 @@ def _label_rows(tables, as_of_at=None):
         if {"clv_outcome_end_at", "observation_end_at", "future_revenue_12m"} <= set(labels):
             labels.loc[_utc(labels.clv_outcome_end_at).gt(_utc(labels.observation_end_at)), "future_revenue_12m"] = np.nan
         return labels
-    if as_of_at is None:
-        raise ValueError("Supply as_of_at or explicit labels sidecar")
-    return pd.DataFrame({"customer_id": customers.customer_id, "as_of_at": _utc(as_of_at)})
+    raise ValueError("Supply as_of_at or explicit labels sidecar")
 
 
 def build_features(tables: dict[str, Any], as_of_at=None) -> pd.DataFrame:
-    """Compute KIT32 from strict past records; keep sequences and PRD extensions separate."""
+    """Compute KIT39 from strict past records; an explicit snapshot does not select labels."""
     if as_of_at is not None and (pd.isna(pd.Timestamp(as_of_at)) or pd.Timestamp(as_of_at).tzinfo is None):
         raise ValueError("Feature as_of_at must be a timezone-aware timestamp")
     if not _canonical(tables):
@@ -121,7 +121,7 @@ def build_features(tables: dict[str, Any], as_of_at=None) -> pd.DataFrame:
     behavior_by_snapshot = behavior.set_index(["customer_id", "as_of_at"]).to_dict("index")
     products = raw["products"].set_index("product_id").unit_price_minor.to_dict()
     customers = raw["customers"].set_index("customer_id")
-    observation_start = tables.get("_metadata", {}).get("observation_start_at")
+    observation_start = _utc(metadata.get("observation_start_at"))
     rows = []
     for t0, snapshots in labels.groupby("as_of_at", sort=True):
         snapshot_ids = snapshots.set_index("customer_id")["snapshot_id"].to_dict() if "snapshot_id" in snapshots else {}
@@ -139,7 +139,8 @@ def build_features(tables: dict[str, Any], as_of_at=None) -> pd.DataFrame:
             o30, prior = uod.loc[uod.event_at.ge(t30)], uod.loc[uod.event_at.ge(t60) & uod.event_at.lt(t30)]
             item30 = pd.concat([ig[k] for k in o30.order_id], ignore_index=True) if len(o30) else raw["order_items"].iloc[:0]
             itemprior = pd.concat([ig[k] for k in prior.order_id], ignore_index=True) if len(prior) else raw["order_items"].iloc[:0]
-            complete = uss.loc[uss.started_at.ge(t30) & uss.ended_at.lt(t0)].sort_values("ended_at")
+            completed = uss.loc[uss.ended_at.lt(t0)]
+            complete = completed.loc[completed.started_at.ge(t30)].sort_values("ended_at")
             r["visit_recency_days"] = (t0 - uss.started_at.max()).total_seconds() / 86400 if len(uss) else np.nan
             r["purchase_recency_days"] = (t0 - uod.event_at.max()).total_seconds() / 86400 if len(uod) else np.nan
             r["observed_tenure_days"] = (t0 - uss.started_at.min()).total_seconds() / 86400 if len(uss) else np.nan
@@ -167,10 +168,11 @@ def build_features(tables: dict[str, Any], as_of_at=None) -> pd.DataFrame:
             r["cart_qty_current"] = sum(cart.values())
             r["cart_sku_current"] = sum(qty > 0 for qty in cart.values())
             r["cart_gross_value_current"] = sum(qty * products[pid] for pid, qty in cart.items())
-            last_views = uev.loc[uev.session_id.eq(complete.iloc[-1].session_id) & uev.event_type.eq("view")] if len(complete) else uev.iloc[:0]
+            last = completed.sort_values(["ended_at", "started_at", "session_id"]).iloc[-1] if len(completed) else None
+            last_views = uev.loc[uev.session_id.eq(last.session_id) & uev.event_type.eq("view")] if last is not None else uev.iloc[:0]
             r["last_session_min_viewed_price"] = last_views.unit_price_minor.min()
             r["last_session_max_viewed_price"] = last_views.unit_price_minor.max()
-            local_start = complete.iloc[-1].started_at.tz_convert("Asia/Seoul") if len(complete) else None
+            local_start = last.started_at.tz_convert("Asia/Seoul") if last is not None else None
             r["last_session_start_hour"] = local_start.hour if local_start is not None else np.nan
             r["last_session_start_weekday"] = local_start.weekday() if local_start is not None else np.nan
             redeemed = uod.loc[uod.coupon_id.notna()]
@@ -226,9 +228,15 @@ def build_features(tables: dict[str, Any], as_of_at=None) -> pd.DataFrame:
             r["expanded_feature_set_version"] = EXPANDED_FEATURE_VERSION
             r["intervention_policy_id"] = metadata.get("generation_policy_id", metadata.get("policy_id", "one_coupon_valid30d_no_further_send"))
 
-            if observation_start and _utc(observation_start) > t60 and customers.loc[uid].signed_up_at < _utc(observation_start):
+            signup = customers.loc[uid].signed_up_at
+            if signup >= t0:
+                r.update(dict.fromkeys(EXPANDED_FEATURES, np.nan))
+            elif observation_start is not None and signup < observation_start:
+                # A capture that starts after signup cannot establish the initial cart.
                 for field in KIT_FEATURES:
-                    if field.endswith("30d") or "delta" in field or field.startswith("cart_"):
+                    if (field.startswith("cart_")
+                            or (field.endswith("_30d") and observation_start > (t60 if "_delta_" in field else t30))
+                            or (field.endswith("_90d") and observation_start > t90)):
                         r[field] = np.nan
             rows.append(r)
     out = pd.DataFrame(rows).merge(labels.drop(columns=["user_id", "snapshot_id", "snapshot_at"], errors="ignore"), on=["customer_id", "as_of_at"], how="left", validate="one_to_one")

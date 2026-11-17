@@ -1,6 +1,7 @@
 """Canonical SQLite, past-only KIT39 and isolated factual export contracts."""
 import hashlib
 import json
+from pathlib import Path
 import sqlite3
 
 import pandas as pd
@@ -68,7 +69,7 @@ def test_registered_features_use_strict_event_prefix_and_product_reviews(dataset
     tables = load_tables(dataset / "raw.sqlite")
     row = build_features(tables, as_of_at=T0).set_index("customer_id").loc["u"]
     assert len(EXPANDED_FEATURES) == 39 and len(set(EXPANDED_FEATURES)) == 39
-    assert row.expanded_feature_set_version == EXPANDED_FEATURE_VERSION == "kit39-review-cart-v2"
+    assert row.expanded_feature_set_version == EXPANDED_FEATURE_VERSION == "kit39-review-cart-v3"
     assert row.review_count_30d == 1 and row.mean_review_rating_30d == 1
     assert row.review_last_order_mean_rating == 1 and row.review_non5_share_30d == 1
     assert row.cart_adds_per_nonpurchase_session_30d == 1 and row.cart_removes_per_nonpurchase_session_30d == 0
@@ -77,6 +78,53 @@ def test_registered_features_use_strict_event_prefix_and_product_reviews(dataset
     later = build_features(tables, as_of_at=T0 + pd.Timedelta(nanoseconds=1)).set_index("customer_id").loc["u"]
     assert later.review_count_30d == 2 and later.review_last_order_mean_rating == 3
     assert later.review_non5_share_30d == .5
+
+
+def test_last_completed_session_and_explicit_snapshot_ignore_recent_window_and_future_labels(dataset):
+    add_sidecars(dataset)
+    tables = load_tables(dataset)
+    snapshot = T0 + pd.Timedelta(days=31)
+    tables["sessions"].loc[tables["sessions"].session_id.eq("edit"), "ended_at"] = snapshot
+    frame = build_features(tables, as_of_at=snapshot)
+    assert frame.as_of_at.eq(snapshot).all() and "churn" not in frame
+    row = frame.set_index("customer_id").loc["u"]
+    assert row.last_session_min_viewed_price == 100 and row.last_session_max_viewed_price == 200
+    assert row.last_session_start_hour == 19 and row.last_session_start_weekday == 5
+    assert pd.isna(row.mean_session_duration_minutes_30d)
+
+
+def test_feature_coverage_is_per_window_and_cart_needs_the_signup_prefix(dataset):
+    tables = load_tables(dataset)
+    tables["_metadata"]["observation_start_at"] = (T0 - pd.Timedelta(days=45)).isoformat()
+    row = build_features(tables, as_of_at=T0).set_index("customer_id").loc["u"]
+    assert row.view_count_30d == 2 and row.net_spend_30d == 300
+    assert row.review_count_30d == 1 and row.cart_adds_per_nonpurchase_session_30d == 1
+    assert row[["orders_delta_30d", "cart_qty_current", "cart_sku_current", "cart_gross_value_current"]].isna().all()
+
+    tables["_metadata"]["observation_start_at"] = (T0 - pd.Timedelta(days=27)).isoformat()
+    row = build_features(tables, as_of_at=T0).set_index("customer_id").loc["u"]
+    assert row[["view_count_30d", "review_count_30d", "review_non5_share_30d",
+                "cart_adds_per_nonpurchase_session_30d", "cart_removes_per_nonpurchase_session_30d"]].isna().all()
+
+    signup = pd.Timestamp("2024-01-01", tz="UTC")
+    tables["_metadata"]["observation_start_at"] = signup.isoformat()
+    at_signup = build_features(tables, as_of_at=signup)
+    assert at_signup[list(EXPANDED_FEATURES)].isna().all().all()
+
+
+def test_optional_cart_conversion_sql_uses_completed_sessions_and_observed_window(dataset):
+    sql = (Path(__file__).resolve().parents[1] / "scripts/query_v4.sql").read_text()
+    query = sql[sql.index("WITH first_carts AS"):].strip()
+    params = {"customer_id": "u", "as_of_at": T0.isoformat(timespec="nanoseconds"),
+              "window_start_at": (T0 - pd.Timedelta(days=30)).isoformat(timespec="nanoseconds"),
+              "observation_start_at": "2024-01-01T00:00:00.000000000+00:00"}
+    boundary = pd.Timestamp("2024-02-20T10:10:00Z")
+    with sqlite3.connect(dataset / "raw.sqlite") as conn:
+        assert conn.execute(query, params).fetchone() == (0.5,)
+        assert conn.execute(query, {**params, "as_of_at": boundary.isoformat(timespec="nanoseconds"),
+                                   "window_start_at": (boundary - pd.Timedelta(days=30)).isoformat(timespec="nanoseconds")}).fetchone() == (1.0,)
+        assert conn.execute(query, {**params, "customer_id": "v"}).fetchone() == (None,)
+        assert conn.execute(query, {**params, "observation_start_at": params["as_of_at"]}).fetchone() == (None,)
 
 
 def test_bare_sqlite_materializes_only_known_facts_without_inventing_assignments(dataset, tmp_path):
@@ -188,11 +236,6 @@ def test_uplift_reader_aligns_assignment_inputs_and_preserves_censoring(dataset,
     add_sidecars(dataset)
     features = tmp_path / "features"
     materialize_features(dataset, features)
-    experiment_path = features / "experiment_log.parquet"
-    experiment = pd.read_parquet(experiment_path)
-    experiment.loc[experiment.customer_id.eq("v"), "outcome_observed"] = False
-    experiment.to_parquet(experiment_path, index=False)
-
     customers, weekly, cart = load_uplift_inputs(features)
     assert set(customers) == {"customer_id", "w0", "treatment"}
     assert customers.w0.eq(T0.tz_convert("Asia/Seoul")).all()
@@ -203,19 +246,31 @@ def test_uplift_reader_aligns_assignment_inputs_and_preserves_censoring(dataset,
     assert pd.api.types.is_integer_dtype(weekly.net_revenue)
     assert weekly.sessions.dtype == float and weekly.purchases.dtype == float
     future = weekly.loc[weekly.reference_week.ge(T0)]
-    assert future.loc[future.customer_id.eq("u"), "purchases"].eq(0).all()
-    assert future.loc[future.customer_id.eq("v"), "purchases"].isna().all()
+    assert future.purchases.eq(0).all()
     assert set(cart) == {"customer_id", "cart_qty", "cart_sku", "cart_gross_value"}
     assert cart.set_index("customer_id").loc["u", "cart_gross_value"] == 100
     assert customers.attrs == weekly.attrs == cart.attrs == {
         "dataset_id": "v4-contract", "currency": "SOURCE_UNSPECIFIED", "amount_unit": "0.01", "seed": 3,
     }
-    cart_path = features / "feature_store.parquet"
-    featured = pd.read_parquet(cart_path)
-    featured.loc[featured.customer_id.eq("u"), "snapshot_id"] = "wrong snapshot"
-    featured.to_parquet(cart_path, index=False)
-    with pytest.raises(ValueError, match="share one dataset and the assignment snapshots"):
+    weekly_path = features / "weekly_panel.parquet"
+    pd.read_parquet(weekly_path).assign(purchases=1).to_parquet(weekly_path, index=False)
+    with pytest.raises(ValueError, match="weekly_panel.parquet differs from its manifest"):
         load_uplift_inputs(features)
+
+    raw_manifest = dataset / "raw.manifest.json"
+    manifest = json.loads(raw_manifest.read_text())
+    manifest["metadata"]["observation_end_at"] = (T0 + pd.Timedelta(days=8)).isoformat()
+    raw_manifest.write_text(json.dumps(manifest))
+    label_path = dataset / "labels.parquet"
+    pd.read_parquet(label_path).assign(is_censored=True, churn=pd.NA).to_parquet(label_path, index=False)
+    immature = tmp_path / "immature"
+    materialize_features(dataset, immature)
+    _, weekly, _ = load_uplift_inputs(immature)
+    assert weekly.loc[weekly.reference_week.ge(T0), "purchases"].isna().all()
+    later = tmp_path / "later"
+    materialize_features(dataset, later, as_of_at=T0 + pd.Timedelta(days=1))
+    with pytest.raises(ValueError, match="share one dataset and the assignment snapshots"):
+        load_uplift_inputs(later)
 
 
 def test_feature_database_is_closed_before_publication(dataset, tmp_path, monkeypatch):

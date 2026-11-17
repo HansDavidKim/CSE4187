@@ -101,6 +101,21 @@ def load_tables(directory: str | Path = "data/processed") -> dict[str, Any]:
     return tables
 
 
+def _read_materialized_parquet(path, manifest, name, columns, *, filters=None):
+    file = path / name
+    checksum = manifest.get("file_sha256", {}).get(name)
+    if checksum is None or not file.is_file():
+        raise ValueError(f"Feature input {name} is missing from the materialized output")
+    digest = hashlib.sha256()
+    with file.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+        if digest.hexdigest() != checksum:
+            raise ValueError(f"Feature input {name} differs from its manifest")
+        stream.seek(0)
+        return pd.read_parquet(stream, columns=columns, filters=filters)
+
+
 def load_retention_inputs(
     feature_directory: str | Path,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
@@ -109,7 +124,8 @@ def load_retention_inputs(
 
     path = Path(feature_directory)
     manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
-    if (manifest.get("feature_set_version") != EXPANDED_FEATURE_VERSION
+    version = manifest.get("feature_set_version")
+    if (version not in ("kit39-review-cart-v2", EXPANDED_FEATURE_VERSION)
             or manifest.get("predictors") != list(EXPANDED_FEATURES)):
         raise ValueError("Retention requires the registered KIT39 predictors in canonical order")
     keys = ["customer_id", "as_of_at", "snapshot_id"]
@@ -120,11 +136,7 @@ def load_retention_inputs(
     feature_fields = [*keys, *identity, *units, "expanded_feature_set_version", *EXPANDED_FEATURES]
     frames = []
     for name, columns in (("feature_store.parquet", feature_fields), ("labels.parquet", [*keys, *label_fields])):
-        checksum = manifest["file_sha256"].get(name)
-        file = path / name
-        if checksum is None or not file.is_file() or hashlib.sha256(file.read_bytes()).hexdigest() != checksum:
-            raise ValueError(f"Retention input {name} is missing or differs from its manifest")
-        frame = pd.read_parquet(file, columns=columns)
+        frame = _read_materialized_parquet(path, manifest, name, columns)
         if frame[keys].isna().any().any() or frame.duplicated(keys).any():
             raise ValueError(f"Retention input {name} requires unique, known snapshot keys")
         if not isinstance(frame.as_of_at.dtype, pd.DatetimeTZDtype):
@@ -135,7 +147,7 @@ def load_retention_inputs(
         declared = manifest.get(name)
         if not isinstance(declared, str) or not declared or not features[name].eq(declared).fillna(False).all():
             raise ValueError(f"Retention feature {name} differs from its manifest")
-    if not features.expanded_feature_set_version.eq(EXPANDED_FEATURE_VERSION).fillna(False).all():
+    if not features.expanded_feature_set_version.eq(version).fillna(False).all():
         raise ValueError("Retention feature rows require the registered KIT39 version")
     if features[units].isna().any().any() or len(features[units].drop_duplicates()) != 1:
         raise ValueError("Retention feature rows require a common currency and amount unit")
@@ -167,11 +179,12 @@ def load_uplift_inputs(feature_directory: str | Path) -> tuple[pd.DataFrame, pd.
     dataset identity and experiment seed travel in each frame's attrs.
     """
     path = Path(feature_directory)
+    manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
     provenance_columns = ["dataset_id", "currency", "amount_unit"]
     keys = ["customer_id", "as_of_at", "snapshot_id", *provenance_columns]
-    assignments = pd.read_parquet(
-        path / "experiment_log.parquet",
-        columns=[*keys, "seed", "assigned_at", "treatment", "outcome_end_at", "outcome_observed"],
+    assignments = _read_materialized_parquet(
+        path, manifest, "experiment_log.parquet",
+        [*keys, "seed", "assigned_at", "treatment", "outcome_end_at", "outcome_observed"],
     )
     if assignments.empty or assignments.customer_id.duplicated().any():
         raise ValueError("Uplift input requires one assignment per customer")
@@ -185,12 +198,12 @@ def load_uplift_inputs(feature_directory: str | Path) -> tuple[pd.DataFrame, pd.
     if not assignments.assigned_at.eq(w0).all() or not assignments.outcome_end_at.eq(end).all():
         raise ValueError("Uplift requires assignment at w0 and a four-week outcome")
     weekly_columns = ["sessions", "purchases", "net_revenue_minor", "views", "session_seconds"]
-    weekly = pd.read_parquet(
-        path / "weekly_panel.parquet", columns=[*keys, "seed", "reference_week", *weekly_columns],
+    weekly = _read_materialized_parquet(
+        path, manifest, "weekly_panel.parquet", [*keys, "seed", "reference_week", *weekly_columns],
         filters=[("reference_week", ">=", start), ("reference_week", "<", end)],
     )
     cart_columns = {f"{name}_current": name for name in ("cart_qty", "cart_sku", "cart_gross_value")}
-    cart = pd.read_parquet(path / "feature_store.parquet", columns=[*keys, *cart_columns])
+    cart = _read_materialized_parquet(path, manifest, "feature_store.parquet", [*keys, *cart_columns])
     provenance = assignments.iloc[0][provenance_columns].to_dict()
     by_customer = assignments.set_index("customer_id")
     snapshots = by_customer.snapshot_id

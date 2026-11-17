@@ -107,8 +107,11 @@ ecommerce-sim v4 export-experiment --data artifacts/small \
 
 ### Retention 입력
 
-v5의 공통 입력은 v4 설계서의 `kit39-review-cart-v2`다. 방문·구매·세션의
-산식과 30일/90일 피처 창은 [피처 구현](src/simulate/v4/features.py)을 따른다.
+v5의 공통 입력 `kit39-review-cart-v3`는 v4 사전의 39개 컬럼과 순서를
+따른다. F21–24는 기준시점 전에 끝난 마지막 세션을 전체 관측 이력에서 찾는다.
+30일 집계, 두 30일 창의 차이, 90일 방문 간격은 각자 필요한 구간이 관측된
+경우만 계산한다. 가입 이후 장바구니 이력이 일부 빠지면 현재 장바구니는
+결측으로 둔다. 기존 `kit39-review-cart-v2` 산출물은 기록된 버전으로 읽는다.
 미방문 정답은 배정 직전 28일 적격 고객의 배정 후 28일을 관측해서 계산한다.
 
 ```python
@@ -125,7 +128,11 @@ snapshots, X, y = load_retention_inputs("artifacts/features")
 
 추가 분석은 [기준 시점 이전 세션·주문 조회](scripts/query_v4.sql)에서 시작한다.
 raw DB의 UTC 시각은 `2025-01-05T15:00:00.000000000+00:00` 형식으로 바인딩한다.
-새 피처 정의에는 관련 연구, 관측 창, 분모와 결측 규칙을 함께 기록한다.
+조회 전용 장바구니 전환율은 최근 30일 완료 세션 중 담기가 있었던 세션을 분모로
+하고, 첫 담기 뒤 같은 세션에서 주문한 비율이다. 관측 창이 불완전하거나 분모가
+0이면 NULL이다. 장바구니 이후 구매라는 구성개념은
+[Esmeli와 Gokce (2025)](https://www.mdpi.com/0718-1876/20/1/28)를 참고했다.
+30일 집계는 프로젝트의 산식이며 모델 피처 채택에는 별도 검증이 필요하다.
 
 ### Uplift 입력
 
@@ -142,6 +149,11 @@ training = build_dataset(customers, weekly, cart)
 `w0`는 서울 월요일 00시의 배정 시점이다. 주간 `session_minutes`는 초를 분으로
 환산하고, `net_revenue`와 장바구니 금액은 원천 최소 단위로 유지한다. 각 입력의
 `attrs`에는 dataset ID, seed, 통화와 금액 단위가 있다.
+Retention과 Uplift 로더는 피처 디렉터리의 manifest 체크섬으로 각 입력 파일을
+검증한다.
+`weekly_panel.session_seconds`는 관측을 마친 뒤의 주간 합계다. 배정 시점에
+열려 있던 세션이 있다면 종료 확인 여부가 과거 주간값에 영향을 줄 수 있다.
+검증한 v5 1,000명 자료에서 배정 시점을 가로지르는 세션은 0건이었다.
 
 ## 검증
 

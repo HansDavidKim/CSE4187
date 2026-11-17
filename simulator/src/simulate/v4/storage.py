@@ -58,12 +58,9 @@ def materialize_features(dataset, output, as_of_at=None):
         raise FileExistsError(f"feature output must be new or empty: {output}")
     tables = load_tables(dataset)
     metadata = tables.get("_metadata", {})
-    feature_tables = tables
-    if as_of_at is not None:
-        feature_tables = {name: frame for name, frame in tables.items() if name != "labels"}
-    elif "labels" not in tables:
+    if as_of_at is None and "labels" not in tables:
         as_of_at = metadata.get("as_of_at")
-    features = build_features(feature_tables, as_of_at=as_of_at)
+    features = build_features(tables, as_of_at=as_of_at)
     features = features[[*FEATURE_KEYS, *EXPANDED_FEATURES]]
     if features.duplicated(["customer_id", "as_of_at"]).any():
         raise ValueError("feature snapshots must be unique per customer/time")

@@ -39,3 +39,27 @@ FROM events AS e
 JOIN orders AS o ON o.purchase_event_id = e.event_id
 WHERE e.customer_id = :customer_id AND e.event_type = 'purchase' AND e.event_at < :as_of_at
 ORDER BY e.event_at, e.event_id;
+
+-- Candidate cart conversion measure based on Esmeli and Gokce (2025).
+-- Bind :window_start_at = as_of_at minus 30 days, and the manifest's
+-- :observation_start_at, as UTC ISO timestamps with nine fractional digits.
+-- Raw event IDs follow event time and disambiguate equal timestamps.
+WITH first_carts AS (
+    SELECT s.session_id, MIN(c.event_id) AS first_cart_id
+    FROM sessions AS s
+    JOIN events AS c ON c.customer_id = s.customer_id AND c.session_id = s.session_id
+                    AND c.event_at >= s.started_at AND c.event_at <= s.ended_at AND c.event_type = 'cart'
+    WHERE s.customer_id = :customer_id
+      AND s.started_at >= :window_start_at AND s.ended_at < :as_of_at
+    GROUP BY s.session_id
+)
+SELECT CASE WHEN signed_up_at < :as_of_at
+              AND :observation_start_at <= MAX(signed_up_at, :window_start_at)
+       THEN (SELECT AVG(EXISTS (
+            SELECT 1 FROM events AS p
+            WHERE p.customer_id = :customer_id AND p.session_id = f.session_id AND p.event_type = 'purchase'
+              AND p.event_at >= :window_start_at AND p.event_at < :as_of_at AND p.event_id > f.first_cart_id
+       )) FROM first_carts AS f)
+       END AS cart_to_purchase_same_session_share_30d
+FROM customers
+WHERE customer_id = :customer_id;
