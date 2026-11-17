@@ -44,6 +44,47 @@ def _run(config, count=12):
     return EcommerceSimulator(config).generate(months=3,seed=17,customers=_customers(count))
 
 
+def test_contact_support_matches_visit_lift_at_source_horizon():
+    from scipy.special import expit
+
+    from simulate.v4.simulator.coupon_calibration import calibrate_contact_support
+
+    logits = np.array([-1.4, -.3, .8])
+    timing_shares = np.array([.5, .75, .9])
+    support = np.array([1., 0., -.6])
+    weights = np.array([.25, .6, .15])
+    for target in (-.03, 0., .06):
+        adjusted = calibrate_contact_support(logits, timing_shares, support, weights, target)
+        treated = expit(logits[:, None] + adjusted) @ weights
+        assert np.mean(timing_shares * (treated - expit(logits))) == pytest.approx(target)
+    assert np.array_equal(calibrate_contact_support(logits, timing_shares, support, weights, 0.), [0., 0., 0.])
+    with pytest.raises(ValueError, match="outside the fitted visit clock"):
+        calibrate_contact_support(logits, timing_shares, support, weights, .99)
+
+
+def test_calibrated_redemption_cannot_create_a_purchase(checkout_fixture, tmp_path, monkeypatch):
+    from simulate.v4.irl import fit_visit_timing as timing
+
+    config = _config(checkout_fixture, tmp_path)
+    settings = config["source_simulation"]
+    model = json.loads(Path(settings["model_path"]).read_text())
+    clock_path = tmp_path / "timing.json"
+    clock_path.write_text(json.dumps({"source": model["source"], "type": "fixture"}))
+    settings.update(visit_timing_model_path=str(clock_path), coupon_effect_calibration={
+        "contact_days": 14, "contact_visit_lift": .1, "induced_purchase_log_odds": 1.,
+        "price_days": 12, "price_purchase_log_odds": 1., "redemption_odds_multiplier": 1.,
+    })
+    monkeypatch.setattr(timing, "validate_model", lambda model: None)
+    monkeypatch.setattr(timing, "sample_session_offsets", lambda *args: ([86400., 86400. * 5], "fixture"))
+    monkeypatch.setattr(timing, "first_session_share", lambda *args: 1.)
+    result = _run(config)
+    diagnostics = result.tables["coupon_response_diagnostics"]
+    assert diagnostics.loc[diagnostics.treatment.eq(1), "response_selected"].all()
+    assert result.tables["sessions"].started_at.ge(pd.Timestamp(result.metadata["as_of_at"])).any()
+    assert result.tables["orders"].empty
+    assert not diagnostics.coupon_used.any()
+
+
 def test_coupon_day_histogram_replays_ordered_delays(checkout_fixture, tmp_path):
     from simulate.v4.simulator.coupon_response import sample_coupon_response, validate_response_model
 
@@ -62,6 +103,29 @@ def test_coupon_day_histogram_replays_ordered_delays(checkout_fixture, tmp_path)
     for seed in range(16):
         assert sample_coupon_response(original, seed, "customer", timestamp, None) == sample_coupon_response(
             aggregate, seed, "customer", timestamp, None)
+
+
+def test_redemption_odds_change_selection_without_redrawing_noise_or_delay(checkout_fixture, tmp_path):
+    from simulate.v4.simulator.coupon_response import sample_coupon_response, scale_redemption_probability
+
+    config = _config(checkout_fixture, tmp_path, redeemed=1, delay=8)
+    model = json.loads(Path(config["source_simulation"]["coupon_response_model_path"]).read_text())
+    timestamp = pd.Timestamp("2024-05-01T00:00:00Z")
+    crossed_threshold = False
+    for seed in range(16):
+        original = sample_coupon_response(model, seed, "customer", timestamp, None)
+        scaled = sample_coupon_response(model, seed, "customer", timestamp, None, odds_multiplier=3.)
+        assert original["response_probability"] == .25
+        assert scaled["response_probability"] == .5
+        assert original["response_uniform"] == scaled["response_uniform"]
+        assert scaled["response_selected"] == (original["response_uniform"] < .5)
+        crossed_threshold |= scaled["response_selected"] and not original["response_selected"]
+        if original["response_selected"]:
+            assert scaled["source_delay_days"] == original["source_delay_days"] == 8
+    assert crossed_threshold
+    assert scale_redemption_probability(1., 0.) == 0.
+    with pytest.raises(ValueError, match="nonnegative odds"):
+        scale_redemption_probability(.25, -1.)
 
 
 def _pre_send_cohorts(result):

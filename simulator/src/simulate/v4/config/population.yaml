@@ -22,5 +22,12 @@ source_simulation:
   max_events_per_session: 782
   coupon_discount: 0.1
   coupon_send_cost_minor: 100
+  coupon_effect_calibration:
+    contact_days: 14
+    contact_visit_lift: 0.06088195726098464
+    induced_purchase_log_odds: -0.12
+    price_days: 12
+    price_purchase_log_odds: 0.2509314922644025
+    redemption_odds_multiplier: 2.9609030250900616
 toy:
   message_model_path: message_response_model.json

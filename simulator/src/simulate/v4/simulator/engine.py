@@ -383,6 +383,19 @@ class EcommerceSimulator:
             else:
                 high = coefficient
         response_weights = weights
+        coupon_effects = settings.get("coupon_effect_calibration")
+        if coupon_effects is not None:
+            from . import coupon_calibration
+            from simulate.v4.irl.fit_visit_timing import first_session_share
+
+            if purchase_response is None or visit_timing_model is None:
+                raise ValueError("coupon effect calibration requires coupon redemption and visit timing models")
+            coupon_calibration.validate_effect_calibration(coupon_effects, coupon_validity_days)
+            runtime_hashes["coupon_calibration"] = hashlib.sha256(Path(coupon_calibration.__file__).read_bytes()).hexdigest()
+            contact_until = t0 + pd.Timedelta(days=coupon_effects["contact_days"])
+            price_until = t0 + pd.Timedelta(days=coupon_effects["price_days"])
+            induced_purchase_weight = math.exp(np.clip(coupon_effects["induced_purchase_log_odds"], -40, 40))
+            price_purchase_weight = math.exp(np.clip(coupon_effects["price_purchase_log_odds"], -40, 40))
         coupon_use = float(coupon_model["groups"]["baseline"]["coupon_use_probability"]) if coupon_model else 0.0
         send_cost = int(settings.get("coupon_send_cost_minor", 100))
         if send_cost < 0:
@@ -563,13 +576,17 @@ class EcommerceSimulator:
                     heapq.heappush(state["review_queue"], (at, len(state["review_diagnostics"]), detail))
             state["prior_orders"].append(purchased_at)
 
-        def user_segment(uid, profile, signed, lower, upper, probability, state, local, treatment=False):
+        def user_segment(uid, profile, signed, lower, upper, probability, state, local, treatment=False,
+                         baseline_probability=None):
             """Thirty-day activity with observed conditional session timing and choice."""
             flush_reviews(uid, state, local, lower)
-            active = rng.random() < probability
+            activity_draw = rng.random()
+            active = activity_draw < probability
+            induced_visit = baseline_probability is not None and activity_draw >= baseline_probability
             if lower <= signed < upper:
                 active = True
-            if not active:
+            baseline_active = baseline_probability is not None and activity_draw < baseline_probability
+            if not (active or baseline_active):
                 flush_reviews(uid, state, local, upper)
                 return
             scheduled = None
@@ -583,7 +600,9 @@ class EcommerceSimulator:
                 scheduled = [anchor + pd.Timedelta(seconds=value) for value in offsets]
                 scheduled = [at for at in scheduled if max(lower, signed) <= at < upper]
                 count = len(scheduled)
-                if not count:
+                # The contact changes the activity gate only for a potential first visit during the trial horizon.
+                if not count or (baseline_probability is not None and
+                                 not (active if scheduled[0] < contact_until else baseline_active)):
                     flush_reviews(uid, state, local, upper)
                     return
                 when = scheduled[0]
@@ -692,10 +711,16 @@ class EcommerceSimulator:
                         probabilities["remove"] = 0.0
                     if causal_policy is None or termination_mode == "source_length":
                         probabilities["end"] = 0.0
+                    if (coupon_effects is not None and treatment and t0 <= when < coupon_expires_at
+                            and (state["last_purchase"] is None or state["last_purchase"] < t0)):
+                        if induced_visit and when < contact_until:
+                            probabilities["purchase"] *= induced_purchase_weight
+                        if when < price_until:
+                            probabilities["purchase"] *= price_purchase_weight
                     actions = list(probabilities)
                     p = np.array(list(probabilities.values()))
                     response_record = state.get("coupon_response")
-                    response_ready = (purchase_response is not None and treatment and not state["coupon_used"]
+                    response_ready = (coupon_effects is None and purchase_response is not None and treatment and not state["coupon_used"]
                                       and response_record["response_selected"]
                                       and response_record["response_ready_at"] <= when < coupon_expires_at)
                     if not p.sum() and not response_ready:
@@ -717,8 +742,9 @@ class EcommerceSimulator:
                     when, prior_gap = next_time, gap
                     if (purchase_response is not None and treatment and not state["coupon_used"]
                             and response_record["response_selected"]
-                            and response_record["response_ready_at"] <= when < coupon_expires_at):
-                        # shortcut: O2O rates transfer to shopping opportunities, replace with coupon RCT calibration when available.
+                            and response_record["response_ready_at"] <= when < coupon_expires_at
+                            and (coupon_effects is None or action == "purchase")):
+                        # shortcut: legacy O2O draws substitute the action; use coupon_effect_calibration for a propensity-based purchase.
                         response_record.update(opportunity_at=when, baseline_action=action,
                                                promoted_purchase=action != "purchase")
                         action = "purchase"
@@ -897,11 +923,25 @@ class EcommerceSimulator:
             raise ValueError("unable to populate the eligible active-customer panel")
         snapshot_logits = np.array([source_return_logit(local, index, t0, state) for _, index, _, _, state, local in donors])
         outcome_shift = _calibration(snapshot_logits, target) if target is not None else 0.
+        if coupon_effects is not None:
+            contact_keys = [profile["home_group"] if population is not None else profile["profile_id"]
+                            for _, _, profile, _, _, _ in donors]
+            contact_shares = {key: first_session_share(visit_timing_model, key, True, coupon_effects["contact_days"])
+                              for key in sorted(set(contact_keys))}
+            support = coupon_calibration.calibrate_contact_support(
+                snapshot_logits + outcome_shift, np.array([contact_shares[key] for key in contact_keys]),
+                support, response_weights, coupon_effects["contact_visit_lift"])
         assignments = np.array([1] * (n_customers // 2) + [0] * (n_customers - n_customers // 2))
         rng.shuffle(assignments)
         for treatment, (uid, index, profile, signed, state, local), snapshot_logit in zip(assignments, donors, snapshot_logits):
+            if coupon_effects is not None:
+                rng = auxiliary_rng(uid, "coupon-calibrated-outcome")
             if purchase_response is not None:
-                record = sample_coupon_response(purchase_response, seed, uid, t0, state["last_purchase"])
+                if coupon_effects is None:
+                    record = sample_coupon_response(purchase_response, seed, uid, t0, state["last_purchase"])
+                else:
+                    record = sample_coupon_response(purchase_response, seed, uid, t0, state["last_purchase"],
+                                                    odds_multiplier=coupon_effects["redemption_odds_multiplier"])
                 record.update(treatment=int(treatment), coupon_id=f"{uid}:C1" if treatment else None)
                 state["coupon_response"] = record
                 coupon_response_rows.append(record)
@@ -922,18 +962,27 @@ class EcommerceSimulator:
                 upper = min(window + pd.Timedelta(days=30), end)
                 baseline_logit = snapshot_logit if window == t0 else source_return_logit(local, index, window, state)
                 probability = float(_sigmoid(baseline_logit + outcome_shift + (shift if treatment and window == t0 else 0)))
-                user_segment(uid, profile, signed, window, upper, probability, state, local, bool(treatment))
+                baseline_probability = (float(_sigmoid(baseline_logit + outcome_shift))
+                                        if coupon_effects is not None and treatment and window == t0 else None)
+                user_segment(uid, profile, signed, window, upper, probability, state, local, bool(treatment),
+                             baseline_probability=baseline_probability)
                 window = upper
             flush_reviews(uid, state, local, end)
             frames["customers"].append({"customer_id": uid, "signed_up_at": signed})
             for key in local:
                 frames[key].extend(local[key])
             review_diagnostic_rows.extend(state["review_diagnostics"])
+            response_type = response if coupon_effects is None else (0 if shift > 0 else 2 if shift < 0 else 1)
+            baseline_return = float(_sigmoid(snapshot_logit + outcome_shift))
+            coupon_return = float(_sigmoid(snapshot_logit + outcome_shift + shift))
+            if coupon_effects is not None:
+                key = profile["home_group"] if population is not None else profile["profile_id"]
+                coupon_return = baseline_return + (coupon_return - baseline_return) * contact_shares[key]
             diagnostic_rows.append({"customer_id": uid, "source_profile_id": profile["profile_id"],
                 "home_persona": profile["home_group"],
-                "response_type": ("P" if response == 0 else "SD" if response == 2 else "ST" if snapshot_logit > np.median(snapshot_logits) else "LC"),
-                "no_coupon_return_probability_30d": float(_sigmoid(snapshot_logit + outcome_shift)),
-                "coupon_return_probability_30d": float(_sigmoid(snapshot_logit + outcome_shift + shift)),
+                "response_type": ("P" if response_type == 0 else "SD" if response_type == 2 else "ST" if snapshot_logit > np.median(snapshot_logits) else "LC"),
+                "no_coupon_return_probability_30d": baseline_return,
+                "coupon_return_probability_30d": coupon_return,
                 "intervention_logit_shift": shift})
             if latent_sampler is not None:
                 diagnostic_rows[-1].update(latent_reward_component=state["latent_reward_component"],
@@ -1154,12 +1203,26 @@ class EcommerceSimulator:
                  if population is not None else
                  "active windows use source joint count/time templates; five-month patterns extrapolate to longer runs"
                  if visit_timing_model is not None else "active-window timing is bounded observed idle gaps; five-month patterns extrapolate to longer runs"),
-                "email-to-coupon, 14d-to-30d and individual response decomposition are scenarios", "send cost is declared policy cost, not a measured source cost"],
+                ("experimental contact and price contrasts are transferred scenarios; direct effects end at the respective study horizons"
+                 if coupon_effects is not None else "email-to-coupon, 14d-to-30d and individual response decomposition are scenarios"),
+                "send cost is declared policy cost, not a measured source cost"],
             "table_rows": {name: len(frame) for name, frame in tables.items()}}
         if population is not None:
             metadata["profile_generation"] = "synthetic_population"
+        if coupon_effects is not None:
+            metadata["coupon_effect_calibration"] = {**coupon_effects, "visit_logit_shifts": support.tolist()}
+            metadata["marketing_effect_source"] = "Hillstrom randomized contact risk difference, transferred to the configured contact horizon"
+            metadata["coupon_purchase_response"].update(
+                mechanism="calibrated shopping purchase odds, with separate Tianchi redemption draws on generated purchases",
+                probability_scope="Tianchi purchase-history odds and delay shape, scaled to trial redemption among buyers",
+                response_type_scope="visit shifts remain a latent scenario; no identified purchase effect types",
+            )
         if purchase_response is not None:
-            metadata["coupon_takeup_source"] = "Tianchi O2O observed 30d redemption by purchase history; scenario transfer, not causal uplift"
+            metadata["coupon_takeup_source"] = (
+                "Tianchi timing and recency odds scaled to a trial redemption share among purchasers"
+                if coupon_effects is not None else
+                "Tianchi O2O observed 30d redemption by purchase history; scenario transfer, not causal uplift"
+            )
             metadata["coupon_model_sha256"] = hashlib.sha256(response_bytes).hexdigest()
         if gmm_path:
             metadata["reward_gmm"] = {

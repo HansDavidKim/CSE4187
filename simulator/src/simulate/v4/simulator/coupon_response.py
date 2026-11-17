@@ -2,6 +2,7 @@
 import hashlib
 import json
 import math
+from numbers import Real
 
 import numpy as np
 import pandas as pd
@@ -48,19 +49,34 @@ def sample_redemption_delay(group, rng):
     return int(rng.choice(group["redemption_delay_days"]))
 
 
-def sample_coupon_response(model, seed, customer_id, as_of, last_purchase):
+def scale_redemption_probability(probability, odds_multiplier):
+    """Apply the scenario multiplier to the observed cohort's redemption odds."""
+    if (isinstance(probability, bool) or not isinstance(probability, Real) or not 0 <= probability <= 1
+            or isinstance(odds_multiplier, bool) or not isinstance(odds_multiplier, Real)
+            or not math.isfinite(odds_multiplier) or odds_multiplier < 0):
+        raise ValueError("coupon redemption requires a probability in [0,1] and finite nonnegative odds multiplier")
+    if odds_multiplier == 1:
+        return probability
+    if odds_multiplier == 0:
+        return 0.
+    adjusted = probability * odds_multiplier
+    return adjusted / (1 - probability + adjusted)
+
+
+def sample_coupon_response(model, seed, customer_id, as_of, last_purchase, *, odds_multiplier=1.):
     """Use history at sending and keyed noise; never resample after a rejection."""
     cohort = ("no_observed_purchase" if last_purchase is None else
               "purchased_within_28d" if as_of - last_purchase <= pd.Timedelta(days=28) else "lapsed_purchase")
     scope = cohort if model["groups"][cohort]["receipts"] else "pooled"
     group = model["groups"][scope]
+    probability = scale_redemption_probability(group["response_probability"], odds_multiplier)
     key = json.dumps(["tianchi-coupon-response-v1", int(seed), customer_id, as_of.isoformat()]).encode()
     rng = np.random.default_rng(int.from_bytes(hashlib.sha256(key).digest()[:8], "big"))
     uniform = float(rng.random())
-    selected = uniform < group["response_probability"]
+    selected = uniform < probability
     delay = sample_redemption_delay(group, rng) if selected else None
     return {"customer_id": customer_id, "as_of_at": as_of, "history_cohort": cohort,
-            "source_cohort": scope, "response_probability": group["response_probability"],
+            "source_cohort": scope, "response_probability": probability,
             "response_uniform": uniform, "response_selected": selected,
             "source_delay_days": delay,
             "response_ready_at": as_of + pd.Timedelta(days=delay) if selected else pd.NaT,

@@ -124,14 +124,22 @@ def redefine_outcomes(tables, metadata, outcome_days=28, shopping_model=None, vi
 
     if "diagnostics" in tables:
         diagnostics = tables["diagnostics"].copy()
+        contact_days = (metadata.get("coupon_effect_calibration") or {}).get("contact_days")
+        if contact_days is not None and visit_timing_model is None:
+            raise ValueError("calibrated return probabilities require the fitted visit clock")
         profiles = {str(profile["profile_id"]): profile for profile in (shopping_model or {}).get("profiles", [])}
         groups = (shopping_model or {}).get("home_groups", {})
         timing_key = ("home_persona" if (visit_timing_model or {}).get("profile_key_scope") == "synthetic_home_group"
                       else "source_profile_id")
-        shares, fallbacks = [], 0
+        shares, short_contact_fractions, fallbacks = [], [], 0
         for row in diagnostics.itertuples():
             if visit_timing_model is not None:
-                shares.append(first_session_share(visit_timing_model, str(getattr(row, timing_key, "")), True, int(outcome_days)))
+                key = str(getattr(row, timing_key, ""))
+                share = first_session_share(visit_timing_model, key, True, int(outcome_days))
+                shares.append(share)
+                if contact_days is not None and outcome_days < contact_days:
+                    contact_share = first_session_share(visit_timing_model, key, True, contact_days)
+                    short_contact_fractions.append(share / contact_share if contact_share else 0.)
                 continue
             profile = profiles.get(str(getattr(row, "source_profile_id", "")), {})
             group_name = profile.get("home_group", getattr(row, "home_persona", None))
@@ -146,7 +154,12 @@ def redefine_outcomes(tables, metadata, outcome_days=28, shopping_model=None, vi
                 probability = pd.to_numeric(diagnostics[original], errors="raise").astype(float)
                 if probability.isna().any() or not probability.between(0, 1).all():
                     raise ValueError("Original analytic return probabilities must be in [0,1]")
-                diagnostics[f"{prefix}_return_probability_{int(outcome_days)}d"] = probability * np.asarray(shares)
+                marginal = probability * np.asarray(shares)
+                if prefix == "coupon" and contact_days is not None:
+                    baseline = diagnostics["no_coupon_return_probability_30d"]
+                    fraction = np.asarray(short_contact_fractions) if outcome_days < contact_days else 1.
+                    marginal = (baseline * np.asarray(shares) + (probability - baseline) * fraction).clip(0., 1.)
+                diagnostics[f"{prefix}_return_probability_{int(outcome_days)}d"] = marginal
         result["diagnostics"] = diagnostics
         required = {f"no_coupon_return_probability_{int(outcome_days)}d", f"coupon_return_probability_{int(outcome_days)}d"}
         if required <= set(diagnostics):
@@ -174,6 +187,10 @@ def redefine_outcomes(tables, metadata, outcome_days=28, shopping_model=None, vi
             "one_second_fallback_customers": fallbacks,
             "interpretation": "analytic query of original 30d activity law; not newly learned 28d coefficients",
         })
+        if contact_days is not None:
+            new_metadata["analytic_outcome_view"]["formula"] = (
+                "p0(days)=p0(30)*F(days); p1(days)=p0(days)+(p1(30)-p0(30))*F(min(days,contact_days))/F(contact_days)"
+            )
     if "_metadata" in tables:
         result["_metadata"] = new_metadata
     return result, new_metadata

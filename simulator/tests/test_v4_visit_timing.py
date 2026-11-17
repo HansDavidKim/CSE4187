@@ -163,3 +163,20 @@ def test_shorter_outcome_uses_exact_sampler_bank_and_preserves_factual_records(s
     legacy, original = redefine_outcomes(tables, metadata, shopping_model=old_model)
     assert 'positive_idle_gap' in original['analytic_outcome_view']['formula']
     assert legacy['diagnostics'].first_session_within_28d_share.tolist() != shares.tolist()
+
+
+def test_calibrated_return_view_preserves_contact_horizon(source):
+    from simulate.v4.simulator.outcomes import redefine_outcomes
+    from test_v4_outcome_definitions import outcome_fixture
+
+    tables, metadata, _ = outcome_fixture()
+    timing = _fit(source[0])
+    timing['regular_profile_banks']['pA'] = {'1': _pack(Counter({(day * 86400.,): 1 for day in (1, 7, 20, 29)}))}
+    metadata['coupon_effect_calibration'] = {'contact_days': 14}
+    diagnostics = tables['diagnostics']
+    diagnostics['coupon_return_probability_30d'] = diagnostics.no_coupon_return_probability_30d
+    profile = diagnostics.source_profile_id.eq('pA')
+    diagnostics.loc[profile, ['no_coupon_return_probability_30d', 'coupon_return_probability_30d']] = [.4, .5]
+    for days, expected in ((3, .15), (14, .3), (28, .4), (30, .5)):
+        view, _ = redefine_outcomes(tables, metadata, outcome_days=days, visit_timing_model=timing)
+        assert view['diagnostics'].loc[profile, f'coupon_return_probability_{days}d'].item() == pytest.approx(expected)
