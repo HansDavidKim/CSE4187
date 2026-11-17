@@ -62,18 +62,22 @@ def trained(raw_dir, tmp_path_factory):
 
 def test_training_registry_and_reports(trained):
     output, registry = trained
-    assert registry["model_status"] == {"baseline": "trained", "bgnbd_gg": "trained", "xgboost": "trained"}
+    assert registry["model_status"] == {"baseline": "trained", "bgnbd_gg": "trained", "xgboost": "trained",
+                                        "xgboost_two_part": "trained"}
     assert registry["final_model"] in registry["trained_models"]
     assert registry["provenance"]["currency"] == "SOURCE_UNSPECIFIED"
     assert sum(registry["split_counts"].values()) == registry["dataset"]["labelled_customers"]
     for name in ("registry.json", "splits.csv", "models/baseline.json", "models/bgnbd_gg.json",
-                 "models/xgboost/xgboost_model.json", "models/xgboost/xgboost_meta.json", "reports/evaluation.json",
+                 "models/xgboost/xgboost_model.json", "models/xgboost/xgboost_meta.json",
+                 "models/xgboost_two_part/classifier.json", "models/xgboost_two_part/regressor.json",
+                 "models/xgboost_two_part/two_part_meta.json", "reports/evaluation.json",
                  "reports/validation.json", "reports/eligible_cutoffs.csv", "reports/deciles_test.csv",
                  "reports/top20_test.csv", "reports/labelled_predictions.csv"):
         assert (output / name).is_file(), name
     evaluation = json.loads((output / "reports" / "evaluation.json").read_text())
     test = evaluation["test"]
-    assert set(test["models"]) == {"baseline", "bgnbd_gg", "xgboost"}
+    assert set(test["models"]) == {"baseline", "bgnbd_gg", "xgboost", "xgboost_two_part"}
+    assert 0 <= test["two_part_classifier"]["auc"] <= 1
     # 모든 모델의 평가 인원이 같고 Test 고객 수와도 같다.
     assert len({value["n"] for value in test["models"].values()}) == 1 == len({test["customers"]})
     assert "by_assignment_group" in test
@@ -150,33 +154,40 @@ def test_api_run_and_cli(raw_dir, tmp_path, capsys):
 
 
 def test_history_segments_use_the_same_customer_split(trained, raw_dir):
-    """이력 완전·미완전 고객은 하나의 분할을 나눠 쓴다. 완전 구간 지표는 기본 Test 지표와 같다."""
+    """기본 설정은 정답 고객 전체로 학습하고, 이력 완전·미완전 고객은 하나의 분할을 나눠 쓴다."""
     output, registry = trained
+    assert registry["training_population"] == "all labelled customers"
+    assert registry["split_counts"] == registry["split_counts_all_labelled"]
     evaluation = json.loads((output / "reports" / "evaluation.json").read_text())
     segments = evaluation["by_history"]["test"]
     assert segments["complete"]["customers"] + segments["incomplete"]["customers"] == \
-        registry["split_counts_all_labelled"]["test"]
-    assert segments["incomplete"]["customers"] > 1 and registry["split_counts"]["test"] == segments["complete"]["customers"]
-    for name in registry["trained_models"]:
-        assert segments["complete"]["models"][name]["mae"] == pytest.approx(evaluation["test"]["models"][name]["mae"])
-        assert registry["test_metrics_by_history"]["incomplete"][name]["n"] == segments["incomplete"]["customers"]
+        registry["split_counts_all_labelled"]["test"] == evaluation["test"]["customers"]
+    assert segments["incomplete"]["customers"] > 1
+    for segment in ("complete", "incomplete"):
+        for name in registry["trained_models"]:
+            assert registry["test_metrics_by_history"][segment][name]["n"] == segments[segment]["customers"]
     splits = pd.read_csv(output / "splits.csv", dtype={"customer_id": str})
-    assert {"history_complete", "training_population"} <= set(splits.columns)
+    assert {"history_complete", "training_population"} <= set(splits.columns) and splits["training_population"].all()
     assert len(splits) == sum(registry["split_counts_all_labelled"].values())
     report = evaluate(raw_dir / "features", raw_dir / "dataset", output)
     assert report["by_history"]["incomplete"]["customers"] == segments["incomplete"]["customers"]
 
 
-def test_all_history_training_keeps_the_same_split(trained, raw_dir, tmp_path):
-    """require_complete_history=False여도 고객 분할은 같고, 학습 대상만 정답 고객 전체로 넓어진다."""
+def test_complete_history_only_training_keeps_the_same_split(trained, raw_dir, tmp_path):
+    """require_complete_history=True여도 고객 분할은 같고, 학습 대상과 기본 지표만 이력 완전 고객으로 좁혀진다."""
     output, registry = trained
-    wide = train(raw_dir / "features", raw_dir / "dataset", tmp_path / "wide",
-                 CLVConfig.from_dict({**FAST, "require_complete_history": False}))
-    narrow_splits = pd.read_csv(output / "splits.csv", dtype={"customer_id": str})
-    wide_splits = pd.read_csv(tmp_path / "wide" / "splits.csv", dtype={"customer_id": str})
+    narrow = train(raw_dir / "features", raw_dir / "dataset", tmp_path / "narrow",
+                   CLVConfig.from_dict({**FAST, "require_complete_history": True}))
+    wide_splits = pd.read_csv(output / "splits.csv", dtype={"customer_id": str})
+    narrow_splits = pd.read_csv(tmp_path / "narrow" / "splits.csv", dtype={"customer_id": str})
     pd.testing.assert_series_equal(narrow_splits["split"], wide_splits["split"])
-    assert wide_splits["training_population"].all()
-    assert wide["split_counts"] == wide["split_counts_all_labelled"] == registry["split_counts_all_labelled"]
+    assert narrow_splits["training_population"].equals(narrow_splits["history_complete"])
+    assert narrow["split_counts_all_labelled"] == registry["split_counts_all_labelled"]
+    evaluation = json.loads((tmp_path / "narrow" / "reports" / "evaluation.json").read_text())
+    complete = evaluation["by_history"]["test"]["complete"]
+    assert narrow["split_counts"]["test"] == complete["customers"] == evaluation["test"]["customers"]
+    for name in narrow["trained_models"]:
+        assert complete["models"][name]["mae"] == pytest.approx(evaluation["test"]["models"][name]["mae"])
 
 
 def test_baseline_ratios_and_bgnbd_sensitivity_report(trained):
@@ -215,3 +226,13 @@ def test_bgnbd_violating_a_required_condition_is_rejected(raw_dir, tmp_path, mon
     evaluation = json.loads((tmp_path / "clv" / "reports" / "evaluation.json").read_text())
     assert "bgnbd_gg" not in evaluation["test"]["models"]
     assert not (tmp_path / "clv" / "reports" / "bgnbd_sensitivity.csv").exists()
+
+
+def test_two_part_prediction_csv_has_components(trained, raw_dir):
+    """두 파트 모델로 예측하면 CLV = 구매 확률 × 구매 시 기대 결제액이고, 두 값이 보조 열로 붙는다."""
+    output, _ = trained
+    predictions = predict(raw_dir / "features", raw_dir / "dataset", output, model="xgboost_two_part")
+    assert predictions["model_name"].eq("xgboost_two_part").all()
+    assert predictions["purchase_probability_52w"].between(0, 1).all()
+    np.testing.assert_allclose(predictions["predicted_clv_12m"],
+                               predictions["purchase_probability_52w"] * predictions["expected_amount_if_purchase"])

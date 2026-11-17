@@ -135,3 +135,202 @@ class XGBoostCLV:
             raise ValueError("saved booster feature order differs from its metadata")
         model.best_params, model.grid_results = meta["best_params"], meta["grid_results"]
         return model
+
+
+TWO_PART_NAME = "xgboost_two_part"
+# 두 파트 모델의 최소 학습 인원. 구매 고객이 너무 적으면 금액 파트를 학습하지 않는다.
+MIN_TWO_PART_BUYERS = 20
+PROBABILITY_EPSILON = 1e-15
+
+
+def _logloss(actual, probability) -> float:
+    """이진 로그 손실. 확률을 (ε, 1 - ε)로 잘라 log(0)을 막는다."""
+    y = np.asarray(actual, dtype=float)
+    p = np.clip(np.asarray(probability, dtype=float), PROBABILITY_EPSILON, 1 - PROBABILITY_EPSILON)
+    return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
+
+
+def classification_metrics(actual, probability) -> dict:
+    """구매 여부 예측의 AUC(동점은 평균 순위), 로그 손실, Brier 점수, 실제 구매율."""
+    y = np.asarray(actual, dtype=bool)
+    p = np.asarray(probability, dtype=float)
+    positives, negatives = int(y.sum()), int((~y).sum())
+    auc = None
+    if positives and negatives:
+        # Mann-Whitney U로 계산한 AUC: 무작위 구매 고객의 확률이 무작위 비구매 고객보다 높을 확률
+        order = pd.Series(p).rank(method="average").to_numpy()
+        auc = float((order[y].sum() - positives * (positives + 1) / 2) / (positives * negatives))
+    return {"n": int(len(y)), "buyer_share": float(y.mean()) if len(y) else None, "auc": auc,
+            "logloss": _logloss(y, p), "brier": float(np.mean((p - y) ** 2))}
+
+
+def _search(make, grid: dict, fixed: dict, data: tuple, score, metric: str):
+    """그리드 조합마다 검증 분할 조기 종료로 트리 수를 찾고, ``metric``이 가장 낮은 조합으로 다시 학습한다.
+
+    Returns:
+        (최종 모델, 고른 설정, 그리드 결과 목록). 최종 모델은 조기 종료 없이 학습 분할에서만 학습한다.
+    """
+    X_train, y_train, X_validation, y_validation = data
+    keys = sorted(grid)
+    results = []
+    for values in itertools.product(*(grid[key] for key in keys)):
+        params = {**fixed, **dict(zip(keys, values))}
+        model = make(params, params["n_estimators"], params.get("early_stopping_rounds"))
+        model.fit(X_train, y_train, eval_set=[(X_validation, y_validation)], verbose=False)
+        trees = int(model.best_iteration) + 1
+        results.append({**dict(zip(keys, values)), "n_estimators": trees,
+                        **{f"validation_{name}": value for name, value in score(model, trees).items()}})
+    # 점수가 같으면 먼저 나온 조합을 고른다.
+    best = min(range(len(results)), key=lambda index: (results[index][f"validation_{metric}"], index))
+    chosen = results[best]
+    params = {**fixed, **{key: chosen[key] for key in keys}, "n_estimators": chosen["n_estimators"]}
+    params.pop("early_stopping_rounds", None)
+    final = make(params, chosen["n_estimators"], None)
+    final.fit(X_train, y_train, verbose=False)
+    return final, params, results
+
+
+class TwoPartXGBoostCLV:
+    """두 파트(hurdle) XGBoost: CLV = P(52주 안에 구매) × E[52주 결제액 | 구매].
+
+    1파트는 모든 학습 고객으로 구매 여부(``actual_clv_12m > 0``)를 분류하고, 2파트는 구매한 학습 고객만으로
+    결제액을 회귀한다. 두 파트는 각자 검증 분할(1파트 로그 손실, 2파트 구매 고객 RMSE)로 설정을 고른다.
+    예측 변수 계약(이름·순서·float64)은 ``XGBoostCLV``와 같다.
+    """
+
+    name = TWO_PART_NAME
+
+    def __init__(self, seed: int = 42, classifier_grid: dict | None = None, regressor_grid: dict | None = None,
+                 fixed: dict | None = None, feature_names=PREDICTOR_FEATURES):
+        from .config import DEFAULT_TWO_PART_CLASSIFIER_GRID, DEFAULT_TWO_PART_REGRESSOR_GRID, DEFAULT_XGB_FIXED
+
+        self.feature_names = list(feature_names)
+        check_predictors(self.feature_names)
+        self.seed = int(seed)
+        self.classifier_grid = {key: list(value) for key, value in
+                                (classifier_grid or DEFAULT_TWO_PART_CLASSIFIER_GRID).items()}
+        self.regressor_grid = {key: list(value) for key, value in
+                               (regressor_grid or DEFAULT_TWO_PART_REGRESSOR_GRID).items()}
+        self.fixed = dict(fixed or DEFAULT_XGB_FIXED)
+        self.classifier = self.regressor = None
+        self.best_params: dict = {}
+        self.grid_results: dict = {}
+        self.train_counts: dict = {}
+        self.last_clipped = 0
+
+    def matrix(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """예측 변수를 저장된 순서와 자료형(float64)으로 뽑는다. 빠진 열이 있으면 오류를 낸다."""
+        missing = [name for name in self.feature_names if name not in frame]
+        if missing:
+            raise ValueError(f"XGBoost input is missing features: {missing}")
+        return frame.loc[:, self.feature_names].astype(FEATURE_DTYPE)
+
+    def _make(self, kind: str):
+        """고정 seed로 분류기(``classifier``) 또는 회귀기(``regressor``)를 만드는 함수를 반환한다."""
+        import xgboost as xgb
+
+        def make(params: dict, n_estimators: int, early_stopping: int | None):
+            settings = {key: value for key, value in params.items()
+                        if key not in ("n_estimators", "early_stopping_rounds")}
+            if kind == "classifier":
+                settings.pop("objective", None)
+                return xgb.XGBClassifier(n_estimators=int(n_estimators), early_stopping_rounds=early_stopping,
+                                         objective="binary:logistic", eval_metric="logloss",
+                                         random_state=self.seed, **settings)
+            return xgb.XGBRegressor(n_estimators=int(n_estimators), early_stopping_rounds=early_stopping,
+                                    eval_metric="rmse", random_state=self.seed, **settings)
+        return make
+
+    def fit(self, train: pd.DataFrame, y_train, validation: pd.DataFrame, y_validation) -> "TwoPartXGBoostCLV":
+        """1파트(구매 분류)와 2파트(구매 고객 결제액 회귀)를 각각 검증 분할로 고르고 학습한다."""
+        X_train, X_validation = self.matrix(train), self.matrix(validation)
+        y_train, y_validation = np.asarray(y_train, dtype=float), np.asarray(y_validation, dtype=float)
+        bought_train, bought_validation = y_train > 0, y_validation > 0
+        self.train_counts = {"train_customers": int(len(y_train)), "train_buyers": int(bought_train.sum()),
+                             "validation_customers": int(len(y_validation)),
+                             "validation_buyers": int(bought_validation.sum())}
+        if bought_train.sum() < MIN_TWO_PART_BUYERS or bought_train.all():
+            raise ValueError(f"two-part XGBoost needs at least {MIN_TWO_PART_BUYERS} buyers and some non-buyers in train")
+        if bought_validation.sum() < 2 or bought_validation.all():
+            raise ValueError("two-part XGBoost needs buyers and non-buyers in validation")
+
+        def classifier_score(model, trees):
+            probability = model.predict_proba(X_validation, iteration_range=(0, trees))[:, 1]
+            return classification_metrics(bought_validation, probability)
+
+        self.classifier, classifier_params, classifier_results = _search(
+            self._make("classifier"), self.classifier_grid, self.fixed,
+            (X_train, bought_train.astype(int), X_validation, bought_validation.astype(int)), classifier_score, "logloss")
+
+        positive_validation = X_validation.loc[bought_validation]
+
+        def regressor_score(model, trees):
+            predicted = np.clip(model.predict(positive_validation, iteration_range=(0, trees)), 0, None)
+            return _errors(y_validation[bought_validation], predicted)
+
+        self.regressor, regressor_params, regressor_results = _search(
+            self._make("regressor"), self.regressor_grid, self.fixed,
+            (X_train.loc[bought_train], y_train[bought_train], positive_validation, y_validation[bought_validation]),
+            regressor_score, "rmse")
+        self.best_params = {"classifier": classifier_params, "regressor": regressor_params}
+        self.grid_results = {"classifier": classifier_results, "regressor": regressor_results}
+        return self
+
+    def predict_parts(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """고객별 구매 확률, 구매 시 기대 결제액, 둘의 곱(``predicted_clv_12m``)을 반환한다."""
+        if self.classifier is None or self.regressor is None:
+            raise RuntimeError("two-part XGBoost model is not fitted")
+        X = self.matrix(frame)
+        probability = self.classifier.predict_proba(X)[:, 1].astype(float)
+        raw = self.regressor.predict(X).astype(float)
+        # 결제액은 음수일 수 없어 음수 금액 예측은 0으로 자르고 건수를 남긴다.
+        self.last_clipped = int((raw < 0).sum())
+        amount = np.clip(raw, 0.0, None)
+        return pd.DataFrame({"purchase_probability_52w": probability, "expected_amount_if_purchase": amount,
+                             "predicted_clv_12m": probability * amount}, index=frame.index)
+
+    def predict(self, frame: pd.DataFrame) -> np.ndarray:
+        """52주 CLV = 구매 확률 × 구매 시 기대 결제액."""
+        return self.predict_parts(frame)["predicted_clv_12m"].to_numpy(dtype=float)
+
+    def summary(self) -> dict:
+        """registry에 남길 설정·그리드 결과·학습 인원."""
+        return {"best_params": self.best_params, "grid_results": self.grid_results, **self.train_counts,
+                "clipped_negative_amounts": self.last_clipped}
+
+    def save(self, directory: str | Path) -> Path:
+        """``classifier.json``, ``regressor.json``과 메타데이터(``two_part_meta.json``)를 저장한다."""
+        import xgboost
+
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        self.classifier.save_model(directory / "classifier.json")
+        self.regressor.save_model(directory / "regressor.json")
+        return write_json(directory / "two_part_meta.json", {
+            "model": TWO_PART_NAME, "feature_names": self.feature_names,
+            "feature_dtypes": {name: FEATURE_DTYPE for name in self.feature_names}, "seed": self.seed,
+            "classifier_grid": self.classifier_grid, "regressor_grid": self.regressor_grid, "fixed": self.fixed,
+            "best_params": self.best_params, "grid_results": self.grid_results, "train_counts": self.train_counts,
+            "combination": "purchase_probability_52w * expected_amount_if_purchase",
+            "negative_prediction_policy": "clip_amount_at_zero", "xgboost_version": xgboost.__version__,
+        })
+
+    @classmethod
+    def load(cls, directory: str | Path) -> "TwoPartXGBoostCLV":
+        """저장된 두 파트를 불러오고 각 booster의 예측 변수 순서가 메타데이터와 같은지 확인한다."""
+        import xgboost as xgb
+
+        directory = Path(directory)
+        meta = read_json(directory / "two_part_meta.json")
+        if meta.get("model") != TWO_PART_NAME:
+            raise ValueError("not a two-part XGBoost CLV model directory")
+        model = cls(meta["seed"], meta["classifier_grid"], meta["regressor_grid"], meta["fixed"], meta["feature_names"])
+        model.classifier, model.regressor = xgb.XGBClassifier(), xgb.XGBRegressor()
+        model.classifier.load_model(directory / "classifier.json")
+        model.regressor.load_model(directory / "regressor.json")
+        for part in (model.classifier, model.regressor):
+            if list(part.get_booster().feature_names or []) != model.feature_names:
+                raise ValueError("saved booster feature order differs from its metadata")
+        model.best_params, model.grid_results = meta["best_params"], meta["grid_results"]
+        model.train_counts = meta.get("train_counts", {})
+        return model

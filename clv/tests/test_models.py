@@ -248,3 +248,56 @@ def test_probabilistic_diagnostics_record_dropout_concentration(orders, labelled
     assert model.diagnostics["dropout_concentration"] == pytest.approx(params["a"] + params["b"])
     assert model.diagnostics["mean_dropout_probability"] == pytest.approx(params["a"] / (params["a"] + params["b"]))
     assert {"checks", "rejections", "warnings"} <= set(model.diagnostics)
+
+
+TWO_PART_GRIDS = {"classifier_grid": {"max_depth": [2, 3], "learning_rate": [0.1]},
+                  "regressor_grid": {"objective": ["reg:squarederror", "reg:gamma"], "max_depth": [2], "learning_rate": [0.1]},
+                  "fixed": {"n_estimators": 200, "early_stopping_rounds": 20, "subsample": 0.8, "tree_method": "hist",
+                            "n_jobs": 1}}
+
+
+def test_two_part_xgboost_combines_probability_and_amount(labelled, tmp_path):
+    """두 파트 XGBoost: 1파트는 구매 여부, 2파트는 구매 고객만으로 학습하고, 예측은 둘의 곱이다.
+    같은 seed면 같은 예측, 저장·재로딩 후에도 같은 예측이 나온다."""
+    pytest.importorskip("xgboost")
+    from clv.xgboost_model import TwoPartXGBoostCLV
+
+    _, rows = labelled
+    train, valid = rows.loc[rows["split"].eq("train")], rows.loc[rows["split"].eq("validation")]
+    model = TwoPartXGBoostCLV(seed=42, **TWO_PART_GRIDS).fit(train, train["actual_clv_12m"], valid,
+                                                              valid["actual_clv_12m"])
+    assert model.train_counts["train_buyers"] == int(train["actual_clv_12m"].gt(0).sum())
+    assert len(model.grid_results["classifier"]) == 2 and len(model.grid_results["regressor"]) == 2
+    parts = model.predict_parts(rows)
+    assert parts["purchase_probability_52w"].between(0, 1).all() and (parts["expected_amount_if_purchase"] >= 0).all()
+    np.testing.assert_allclose(parts["predicted_clv_12m"],
+                               parts["purchase_probability_52w"] * parts["expected_amount_if_purchase"])
+    predicted = model.predict(rows)
+    again = TwoPartXGBoostCLV(seed=42, **TWO_PART_GRIDS).fit(train, train["actual_clv_12m"], valid,
+                                                              valid["actual_clv_12m"])
+    np.testing.assert_array_equal(predicted, again.predict(rows))
+    model.save(tmp_path / "two")
+    reloaded = TwoPartXGBoostCLV.load(tmp_path / "two")
+    np.testing.assert_array_equal(predicted, reloaded.predict(rows[list(reversed(rows.columns))]))
+    with pytest.raises(ValueError, match="missing features"):
+        reloaded.predict(rows.drop(columns=["net_spend_13w"]))
+
+
+def test_two_part_xgboost_needs_buyers(labelled):
+    pytest.importorskip("xgboost")
+    from clv.xgboost_model import TwoPartXGBoostCLV
+
+    _, rows = labelled
+    train, valid = rows.loc[rows["split"].eq("train")], rows.loc[rows["split"].eq("validation")]
+    with pytest.raises(ValueError, match="buyers"):
+        TwoPartXGBoostCLV(**TWO_PART_GRIDS).fit(train, np.zeros(len(train)), valid, valid["actual_clv_12m"])
+
+
+def test_classification_metrics_auc_matches_pairwise_definition():
+    from clv.xgboost_model import classification_metrics
+
+    actual = [1, 0, 1, 0, 0]
+    probability = [0.9, 0.8, 0.4, 0.4, 0.1]
+    # 구매-비구매 쌍 6개 중 구매 쪽 확률이 높은 쌍 4개, 동점 1개(0.5) -> 4.5 / 6
+    assert classification_metrics(actual, probability)["auc"] == pytest.approx(4.5 / 6)
+    assert classification_metrics(actual, probability)["buyer_share"] == pytest.approx(0.4)

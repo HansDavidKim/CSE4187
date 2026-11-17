@@ -12,6 +12,14 @@ DEFAULT_XGB_GRID = {
     "min_child_weight": [1, 5],
     "learning_rate": [0.05],
 }
+# 두 파트 XGBoost: 1파트(구매 여부 분류, 검증 로그 손실로 선택)와 2파트(구매 고객 결제액 회귀, 검증 RMSE로 선택)
+DEFAULT_TWO_PART_CLASSIFIER_GRID = {"max_depth": [3, 5], "min_child_weight": [1, 5], "learning_rate": [0.05]}
+DEFAULT_TWO_PART_REGRESSOR_GRID = {
+    "objective": ["reg:squarederror", "reg:gamma"],
+    "max_depth": [3, 5],
+    "min_child_weight": [1, 5],
+    "learning_rate": [0.05],
+}
 # 모든 그리드 점에 공통인 설정. n_jobs=1로 고정해 같은 입력이면 같은 예측이 나오게 한다.
 DEFAULT_XGB_FIXED = {
     "n_estimators": 1000, "early_stopping_rounds": 50, "subsample": 0.8,
@@ -27,8 +35,9 @@ class CLVConfig:
         seed: 고객 분할과 XGBoost의 난수 seed.
         split_fractions: 학습/검증/테스트 분할의 고객 비율.
         top_fraction: 고가치 고객으로 표시할 상위 비율(기본 상위 20% 고객).
-        require_complete_history: 13주 입력이 모두 완전 관측인 고객만 학습·평가한다.
-            추론은 부분 이력 고객도 예측한다.
+        require_complete_history: True면 13주 입력이 모두 완전 관측인 고객만 학습·평가한다. 기본 False는
+            정답(52주 완전 관측)이 있는 고객 전체로 학습한다. 같은 Test 고객 비교에서 두 이력 구간 모두
+            전체 학습이 나았다(readme 참조). 어느 쪽이든 추론은 부분 이력 고객도 예측한다.
         calibration: BG/NBD 보정 기간. ``feature_window``(다른 모델과 같은 13주) 또는
             ``full_history``(t0 이전 전체 주문).
         transaction_period: BG/NBD 거래 단위. ``D``는 같은 서울 날짜의 주문을 하나로 묶는다.
@@ -41,13 +50,15 @@ class CLVConfig:
         selection_metric: XGBoost 설정과 최종 모델을 고르는 Validation 지표.
         final_model: ``auto``(Validation 지표가 가장 좋은 모델) 또는 모델 이름 하나.
         xgb_grid: Validation으로 탐색할 하이퍼파라미터 그리드.
-        xgb_fixed: 모든 그리드 점에 공통인 XGBoost 설정.
+        xgb_fixed: 모든 그리드 점에 공통인 XGBoost 설정(두 파트 XGBoost도 같이 쓴다).
+        two_part_classifier_grid: 두 파트 XGBoost 1파트(구매 여부 분류) 탐색 그리드.
+        two_part_regressor_grid: 두 파트 XGBoost 2파트(구매 고객 결제액 회귀) 탐색 그리드.
     """
 
     seed: int = 42
     split_fractions: tuple[float, float, float] = (0.6, 0.2, 0.2)
     top_fraction: float = 0.2
-    require_complete_history: bool = True
+    require_complete_history: bool = False
     calibration: str = "feature_window"
     transaction_period: str = "D"
     no_purchase_fallback: str = "zero"
@@ -58,6 +69,10 @@ class CLVConfig:
     final_model: str = "auto"
     xgb_grid: dict = field(default_factory=lambda: {key: list(value) for key, value in DEFAULT_XGB_GRID.items()})
     xgb_fixed: dict = field(default_factory=lambda: dict(DEFAULT_XGB_FIXED))
+    two_part_classifier_grid: dict = field(
+        default_factory=lambda: {key: list(value) for key, value in DEFAULT_TWO_PART_CLASSIFIER_GRID.items()})
+    two_part_regressor_grid: dict = field(
+        default_factory=lambda: {key: list(value) for key, value in DEFAULT_TWO_PART_REGRESSOR_GRID.items()})
 
     def __post_init__(self):
         """비율 범위와 허용 선택지를 검사한다(잘못되면 ValueError)."""
@@ -74,8 +89,8 @@ class CLVConfig:
         for name, allowed in choices.items():
             if getattr(self, name) not in allowed:
                 raise ValueError(f"{name} must be one of {allowed}")
-        if self.final_model not in ("auto", "baseline", "bgnbd_gg", "xgboost"):
-            raise ValueError("final_model must be auto, baseline, bgnbd_gg or xgboost")
+        if self.final_model not in ("auto", "baseline", "bgnbd_gg", "xgboost", "xgboost_two_part"):
+            raise ValueError("final_model must be auto, baseline, bgnbd_gg, xgboost or xgboost_two_part")
 
     def to_dict(self) -> dict:
         """JSON(registry) 저장용 dict. ``split_fractions``는 list로 바꾼다."""

@@ -1,7 +1,7 @@
 # CLV (Customer Lifetime Value)
 
 시뮬레이터 v5 출력의 **과거 13주**로 **미래 52주 실결제금액(CLV)** 을 예측한다.
-비교 모델은 과거 평균 Baseline, BG/NBD + Gamma-Gamma, XGBoost 3종이고,
+비교 모델은 과거 평균 Baseline, BG/NBD + Gamma-Gamma, XGBoost, 두 파트 XGBoost 4종이고,
 최종 결과는 `results/clv_predictions.csv`와 Python API(`clv.api`)로 전략·예산 모듈에 넘긴다.
 PyTorch는 쓰지 않는다.
 
@@ -13,7 +13,7 @@ PyTorch는 쓰지 않는다.
 | 4.2 | 65주(13+52) 구간, 적격 기준시점 탐색, `actual_clv_12m`, 관측 부족 처리, 고객 단위 분할, 누수 방지, 원장 대조 | `dataset.py` |
 | 4.3 | 4주·13주 RFM·행동 Feature 17개 | `features.py` |
 | 4.4 | 평균 Baseline, BG/NBD + Gamma-Gamma(주문 원장 기반, scipy 최우추정) | `baseline.py`, `probabilistic.py` |
-| 4.5 | XGBoost 회귀(Validation 그리드 선택, seed 고정, 저장·재로딩) | `xgboost_model.py` |
+| 4.5 | XGBoost 회귀, 두 파트 XGBoost(구매 확률 × 구매 시 결제액), Validation 그리드 선택, seed 고정, 저장·재로딩 | `xgboost_model.py` |
 | 4.6 | MAE·RMSE·편향·분포·Top-N·10분위·상위 20% 일치율 | `evaluation.py` |
 | 4.7 | 학습/평가/추론 분리, CSV 출력, 외부 API, CLI | `pipeline.py`, `api.py`, `cli.py` |
 
@@ -26,7 +26,7 @@ pip install -r clv/requirements.txt      # numpy, pandas 2.x, pyarrow, scipy, xg
 ```
 
 pandas 3.x에서는 시뮬레이터 `fit_shopping`이 copy-on-write로 실패하므로 공용 환경은 pandas 2.x를 쓴다.
-xgboost가 없으면 XGBoost만 `skipped`로 기록하고 나머지는 계속 실행한다.
+xgboost가 없으면 두 XGBoost 모델만 `skipped`로 기록하고 나머지는 계속 실행한다.
 
 ## 실행 (저장소 루트)
 
@@ -78,7 +78,7 @@ clv = predict_clv("artifacts/features", ledger="artifacts/small/raw.sqlite", mod
 
 * 기준시점 `t0`는 서울 월요일 00:00이다. 출력 `reference_week`는 **예측 기준시점 t0**이며 시뮬레이터 주간 행의 `reference_week`(그 주의 시작)와 다른 개념이다.
 * Feature: `[t0 - 13주, t0)`, 정답: `[t0, t0 + 52주)`의 실결제금액 합 `actual_clv_12m`.
-* 정답은 52주가 모두 완전 관측일 때만 만든다. 기본 학습 대상은 13주 입력도 모두 완전 관측인 고객이다(`require_complete_history=True`). 정답이 있는 고객 전체로 학습하려면 `--config clv/configs/all_history.json`을 쓴다.
+* 정답은 52주가 모두 완전 관측일 때만 만든다. 기본 학습 대상은 정답이 있는 고객 전체다(`require_complete_history=False`). 13주 입력이 모두 완전 관측인 고객만 학습하려면 `--config clv/configs/complete_history_only.json`을 쓴다.
 * 시뮬레이터는 월 단위로 생성하므로 `cutoffs`로 실제 데이터에서 13 + 52주가 들어가는 `t0`를 찾는다. 기본 학습 시점은 적격 고객이 가장 많은 `t0`(동률이면 최신)다. 처음·마지막 주는 부분 관측이어서 최소 67개 달력 주가 필요하다. 24개월 생성(`months>=24`)이면 실험 시점 `as_of_at`도 적격이다.
 * 시뮬레이터 `future_revenue_12m`(달력 12개월, Control만 제공)은 쓰지 않는다.
 * 정답이 있는 모든 고객을 고객 단위로 Train/Validation/Test(기본 0.6/0.2/0.2, seed 42)로 나눈다. 한 고객은 한 분할에만 속한다. 분할이 `require_complete_history`와 무관하므로 두 설정을 같은 Test 고객으로 비교할 수 있다. 학습·모델 선택은 그중 학습 대상 고객만 쓴다.
@@ -114,7 +114,12 @@ clv = predict_clv("artifacts/features", ledger="artifacts/small/raw.sqlite", mod
   * 13주 보정 기간이면 T가 13주 이하로 잘린다(좌측 절단). 생성 과정의 `a`, `b`는 개별 식별이 약하고 `a/(a+b)`는 잘 식별된다(테스트로 확인).
   * Lifetimes 0.11.3과 모수·기대 구매수가 2% 이내로 일치하는지 테스트한다(설치된 경우).
 * **XGBoost**: `objective`(squarederror/tweedie)·`max_depth`·`min_child_weight` 그리드를 Validation RMSE로 고르고(조기 종료), 고른 트리 수로 Train에서 다시 학습한다. seed와 `n_jobs=1`을 고정해 같은 입력이면 같은 예측이 나온다. Feature 이름·순서·자료형은 메타데이터와 대조한다. 음수 예측은 0으로 자르고 그 건수를 기록한다.
-* 최종 모델(`final_model="auto"`)은 Validation RMSE가 가장 낮은 모델이다. Test는 보고에만 쓴다.
+* **두 파트 XGBoost**(`xgboost_two_part`): CLV = P(52주 안에 구매) × E[52주 결제액 | 구매].
+  * 1파트: 학습 고객 전체로 구매 여부(`actual_clv_12m > 0`)를 분류한다(`binary:logistic`, Validation 로그 손실로 선택).
+  * 2파트: 구매한 학습 고객만으로 결제액을 회귀한다(`squarederror`/`gamma`, 구매한 Validation 고객의 RMSE로 선택).
+  * 예측 변수는 XGBoost와 같은 17개다. 학습 구매 고객이 20명 미만이면 `failed`로 기록한다.
+  * 예측 CSV에 `purchase_probability_52w`, `expected_amount_if_purchase` 보조 열을 붙이고, 1파트의 AUC·로그 손실·Brier 점수를 `evaluation.json → two_part_classifier`에 남긴다.
+* 최종 모델(`final_model="auto"`)은 4개 모델 중 Validation RMSE가 가장 낮은 모델이다. Test는 보고에만 쓴다.
 
 ## 평가 (WBS 4.6)
 
@@ -137,11 +142,11 @@ Treatment/Control별 지표와 Baseline 대비 MAE·RMSE 비율(`vs_baseline`, 1
 | `clv_rank`, `model_name`, `horizon_weeks`, `history_complete`, `history_weeks_13w`, `currency`, `amount_unit`, `dataset_id` | 보조 |
 
 상위 20%는 `ceil(0.2·N)`명이고, 동점은 `customer_id` 오름차순으로 정한다. 예측에는 정답이 필요 없다.
-13주 이력이 부족한 고객도 예측하되 `history_complete=False`로 표시한다(기본 설정에서는 완전 이력 고객으로 학습한 모델이다).
+13주 이력이 부족한 고객도 예측하되 `history_complete=False`로 표시한다. 기본 설정은 이런 고객도 학습에 포함한다.
 기본 예측 시점은 패널의 실험 `as_of_at`이 하나일 때 그 값, 아니면 마지막 완전 관측 주의 다음 월요일이다.
 
 학습 산출물(`results/clv/`): `registry.json`(기준시점·계약·설정·모델 상태·최종 모델·지표·경고),
-`splits.csv`(분할, `history_complete`, `training_population`), `models/`(baseline.json, bgnbd_gg.json, xgboost/),
+`splits.csv`(분할, `history_complete`, `training_population`), `models/`(baseline.json, bgnbd_gg.json, xgboost/, xgboost_two_part/),
 `reports/`(validation.json, eligible_cutoffs.csv, evaluation.json, bgnbd_sensitivity.csv, deciles_test.csv,
 top20_test.csv, labelled_predictions.csv).
 
@@ -174,5 +179,16 @@ cd .. && python -m clv run --weekly results/simulator/population-24m-n5000-seed4
 * 실험 시점 이후 52주 정답 구간에는 Treatment 고객의 쿠폰 효과가 들어간다. 학습에는 모두 포함하고, `treatment_in_label_window` 표시와 그룹별 지표를 남긴다. Uplift × CLV 결합 시 이중 계상 여부를 협의해야 한다.
 * 통화가 `SOURCE_UNSPECIFIED`이면 금액은 원천 최소 단위(`amount_unit`)다. KRW 환산은 하지 않는다.
 * `simulator.yaml`(원천 고객별 프로필, `data/models` 필요) 데이터에서는 아직 실행하지 않았다. 동봉 `population.yaml` 데이터와 분포·dataset_id가 다를 수 있다.
-* `population.yaml` 24개월 데이터(5,000명, seed 42)에서 기준시점(2025-01-06) 고객 중 13주 이력이 완전한 고객은 1,601명(32%)이다. 같은 Test 고객 1,000명(완전 329, 미완전 671)으로 비교하면, 정답 고객 전체로 학습한 설정(`configs/all_history.json`)이 두 구간 모두에서 XGBoost MAE가 낮았다(완전 6,498→6,039, 미완전 3,946→2,274). 기본값 변경은 팀 협의 사항이다.
-* 같은 데이터에서 BG/NBD의 `a`, `b`는 표본에 따라 크게 달라졌다(이전 분할 약 19만·96만, 현재 분할 2.3·10.7). `a/(a+b)`는 0.17~0.18로 안정적이고, 벌점 0~0.1에서 Validation 예측 순위상관은 0.995 이상, RMSE는 9,886~11,307이었다.
+* 실데이터 결과(`population.yaml` 24개월, 5,000명, seed 42, 기준시점 2025-01-06). 13주 이력이 완전한 고객은 1,601명(32%)이고,
+  Test 고객 1,000명(완전 329, 미완전 671)은 두 설정에서 같다. MAE / RMSE / 상위 20% 일치율:
+
+  | 학습 대상 | Baseline | BG/NBD+GG | XGBoost | 두 파트 XGBoost | 최종 모델 |
+  |---|---|---|---|---|---|
+  | 정답 고객 전체(기본) | 7,136 / 26,617 / 0.46 | 3,080 / 9,160 / 0.46 | 3,512 / 8,935 / 0.47 | 3,529 / 8,945 / 0.425 | XGBoost |
+  | 이력 완전 고객만(Test 329명) | 10,118 / 23,244 / 0.39 | 6,286 / 13,484 / 0.33 | 6,498 / 12,977 / 0.26 | 6,286 / 13,035 / 0.32 | 두 파트 |
+
+  같은 이력 구간끼리 비교하면 전체 학습 쪽 XGBoost MAE가 완전 6,498→6,039, 미완전 3,946→2,274로 낮았고 Validation에서도 같은 방향이었다.
+  그래서 기본값을 `require_complete_history=False`로 바꿨다. 두 파트 XGBoost는 구매 여부 AUC 0.75(Test)지만 구매 고객
+  518명으로 학습한 금액 파트가 트리 9개에서 멈춰 예측 폭이 좁다. 전체 학습에서는 기존 XGBoost와 비슷했다.
+* BG/NBD의 `a`, `b`는 표본에 따라 크게 달라진다(완전 이력 학습의 이전 분할 약 19만·96만, 현재 분할 2.3·10.7, 전체 학습 22.6·102.1).
+  `a/(a+b)`는 0.17~0.18로 안정적이고, 전체 학습에서 벌점 0~0.1의 Validation 예측 순위상관은 0.999 이상, RMSE는 7,588~8,258이었다.

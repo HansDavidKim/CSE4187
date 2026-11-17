@@ -57,7 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
     _inputs(predict)
     predict.add_argument("--model-dir", type=Path, default=Path("results/clv"))
     predict.add_argument("--reference-week", help="prediction cutoff; default: experiment as_of_at or data end")
-    predict.add_argument("--model", choices=("baseline", "bgnbd_gg", "xgboost"), help="default: registry final model")
+    predict.add_argument("--model", choices=("baseline", "bgnbd_gg", "xgboost", "xgboost_two_part"), help="default: registry final model")
     predict.add_argument("--output", type=Path, default=Path("results/clv_predictions.csv"))
     run = commands.add_parser("run")
     _inputs(run)

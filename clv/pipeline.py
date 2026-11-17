@@ -4,7 +4,8 @@
 
     registry.json            기준시점, 계약, 설정, 모델 상태, 최종 모델
     splits.csv               customer_id -> train/validation/test, 이력 완전 여부, 학습 대상 여부
-    models/                  baseline.json, bgnbd_gg.json, xgboost/{xgboost_model,xgboost_meta}.json
+    models/                  baseline.json, bgnbd_gg.json, xgboost/{xgboost_model,xgboost_meta}.json,
+                             xgboost_two_part/{classifier,regressor,two_part_meta}.json
     reports/                 입력 검증, 적격 기준시점, 평가(이력 구간별 포함), 10분위, Top-N,
                              BG/NBD 벌점 민감도, 정답 포함 예측
 """
@@ -31,9 +32,11 @@ from .schema import (
     HIGH_VALUE_COLUMN, INPUT_WEEKS, LABEL_COLUMN, LABEL_WEEKS, OUTPUT_COLUMNS, PREDICTION_COLUMN, PREDICTOR_FEATURES,
 )
 from .validation import reconcile_orders_with_weekly, validate_orders, validate_weekly
-from .xgboost_model import XGBoostCLV, xgboost_status
+from .xgboost_model import TwoPartXGBoostCLV, XGBoostCLV, classification_metrics, xgboost_status
 
-MODEL_NAMES = ("baseline", "bgnbd_gg", "xgboost")
+MODEL_NAMES = ("baseline", "bgnbd_gg", "xgboost", "xgboost_two_part")
+# 모델 파일을 models/<이름>/ 하위 디렉터리에 두는 모델
+SUBDIRECTORY_MODELS = ("xgboost", "xgboost_two_part")
 # registry.json에 그대로 기록하는 입출력 계약(구간, 정답 정의, 기준시점 의미, 금액 단위)
 CONTRACT = {
     "feature_window": f"[t0 - {INPUT_WEEKS} weeks, t0)",
@@ -112,6 +115,8 @@ def _models_for(model_dir: Path, names) -> dict:
             loaded[name] = ProbabilisticCLV.load(model_dir / "models")
         elif name == "xgboost":
             loaded[name] = XGBoostCLV.load(model_dir / "models" / "xgboost")
+        elif name == "xgboost_two_part":
+            loaded[name] = TwoPartXGBoostCLV.load(model_dir / "models" / "xgboost_two_part")
     return loaded
 
 
@@ -267,10 +272,35 @@ def train(weekly, orders=None, output_dir: str | Path = "results/clv", config: C
         details["xgboost"] = {"version": version, "best_params": booster.best_params, "grid_results": booster.grid_results,
                               "clipped_negative_predictions": booster.last_clipped}
 
+    # 두 파트 XGBoost: 구매 확률 × 구매 시 기대 결제액. 같은 학습/검증 고객과 예측 변수를 쓴다.
+    if not available:
+        status["xgboost_two_part"] = f"skipped: {version}"
+    else:
+        try:
+            two_part = TwoPartXGBoostCLV(config.seed, config.two_part_classifier_grid, config.two_part_regressor_grid,
+                                         config.xgb_fixed)
+            two_part.fit(parts["train"], parts["train"][LABEL_COLUMN], parts["validation"],
+                         parts["validation"][LABEL_COLUMN])
+            components = two_part.predict_parts(everyone)
+            scored["pred_xgboost_two_part"] = components["predicted_clv_12m"].to_numpy(dtype=float)
+            scored["two_part_purchase_probability"] = components["purchase_probability_52w"].to_numpy(dtype=float)
+            scored["two_part_amount_if_purchase"] = components["expected_amount_if_purchase"].to_numpy(dtype=float)
+            status["xgboost_two_part"], models["xgboost_two_part"] = "trained", two_part
+            details["xgboost_two_part"] = {"version": version, **two_part.summary()}
+        except ValueError as error:
+            # 구매 고객이 너무 적으면 실행을 멈추지 않고 failed로 기록한다.
+            status["xgboost_two_part"] = f"failed: {error}"
+
     trained = [name for name in MODEL_NAMES if status.get(name) == "trained"]
     primary = scored["training_population"].astype(bool)
     evaluation = {name: evaluate_predictions(scored.loc[scored["split"].eq(name) & primary], trained, config.top_fraction)
                   for name in ("validation", "test")}
+    # 두 파트 XGBoost 1파트(구매 여부 분류)의 성능도 같은 고객으로 남긴다.
+    if "two_part_purchase_probability" in scored:
+        for name in ("validation", "test"):
+            part = scored.loc[scored["split"].eq(name) & primary]
+            evaluation[name]["two_part_classifier"] = classification_metrics(
+                part[LABEL_COLUMN].gt(0), part["two_part_purchase_probability"])
     # 같은 분할 안에서 13주 이력 완전/미완전 고객을 따로 평가한다(미완전 고객은 학습 대상이 아닐 수 있다).
     evaluation["by_history"] = {name: evaluate_by_history(scored.loc[scored["split"].eq(name)], trained,
                                                           config.top_fraction) for name in ("validation", "test")}
@@ -286,7 +316,7 @@ def train(weekly, orders=None, output_dir: str | Path = "results/clv", config: C
     # 모델, 보고서, 분할, registry를 단계별 파일로 저장한다.
     model_dir = output / "models"
     for name, model in models.items():
-        model.save(model_dir / "xgboost" if name == "xgboost" else model_dir)
+        model.save(model_dir / name if name in SUBDIRECTORY_MODELS else model_dir)
     reports_dir = output / "reports"
     write_json(reports_dir / "validation.json", {report.name: report.to_dict() for report in reports})
     cutoffs.assign(reference_week=cutoffs["reference_week"].map(lambda value: value.isoformat())).to_csv(
@@ -390,7 +420,7 @@ def predict(weekly, orders=None, model_dir: str | Path = "results/clv", referenc
     """``reference_week`` 이전 이력이 있는 모든 고객의 52주 CLV를 예측한다.
 
     정답은 필요 없다. 13주 이력이 일부만 있는 고객도 예측하되 ``history_complete=False``로
-    표시한다(모델은 완전 이력 고객으로 학습했다).
+    표시한다(``require_complete_history=True``로 학습한 모델이면 완전 이력 고객만 학습에 썼다).
     """
     model_dir = Path(model_dir)
     registry = read_json(model_dir / "registry.json")
@@ -405,7 +435,8 @@ def predict(weekly, orders=None, model_dir: str | Path = "results/clv", referenc
     features = build_features(panel, t0).reset_index()
     if features.empty:
         raise ValueError(f"no customer has observed history before {t0.isoformat()}")
-    values = _score(_models_for(model_dir, [name])[name], features, orders, t0)
+    loaded = _models_for(model_dir, [name])[name]
+    values = _score(loaded, features, orders, t0)
     # 상위 20% 표시(ceil)와 순위는 동점일 때 customer_id 오름차순으로 정한다.
     result = pd.DataFrame({
         "customer_id": features["customer_id"], "reference_week": t0.isoformat(), PREDICTION_COLUMN: values,
@@ -416,6 +447,11 @@ def predict(weekly, orders=None, model_dir: str | Path = "results/clv", referenc
         "currency": panel.attrs.get("currency"), "amount_unit": panel.attrs.get("amount_unit"),
         "dataset_id": panel.attrs.get("dataset_id"),
     })
+    # 두 파트 모델이면 구매 확률과 구매 시 기대 결제액도 보조 열로 붙인다.
+    if hasattr(loaded, "predict_parts"):
+        components = loaded.predict_parts(features)
+        for column in ("purchase_probability_52w", "expected_amount_if_purchase"):
+            result[column] = components[column].to_numpy(dtype=float)
     return result.sort_values("clv_rank", kind="mergesort").reset_index(drop=True)
 
 
