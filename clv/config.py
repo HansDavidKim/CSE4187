@@ -1,0 +1,103 @@
+"""CLV 실행 설정(``CLVConfig``)과 JSON/YAML 로더. 구간 길이(13주·52주)는 ``schema`` 계약으로 고정한다."""
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+import json
+from pathlib import Path
+
+# Validation 지표로 고르는 XGBoost 탐색 그리드
+DEFAULT_XGB_GRID = {
+    "objective": ["reg:squarederror", "reg:tweedie"],
+    "max_depth": [3, 5],
+    "min_child_weight": [1, 5],
+    "learning_rate": [0.05],
+}
+# 모든 그리드 점에 공통인 설정. n_jobs=1로 고정해 같은 입력이면 같은 예측이 나오게 한다.
+DEFAULT_XGB_FIXED = {
+    "n_estimators": 1000, "early_stopping_rounds": 50, "subsample": 0.8,
+    "colsample_bytree": 0.8, "reg_lambda": 1.0, "tree_method": "hist", "n_jobs": 1,
+}
+
+
+@dataclass
+class CLVConfig:
+    """학습·평가·추론이 함께 쓰는 설정.
+
+    Attributes:
+        seed: 고객 분할과 XGBoost의 난수 seed.
+        split_fractions: 학습/검증/테스트 분할의 고객 비율.
+        top_fraction: 고가치 고객으로 표시할 상위 비율(기본 상위 20% 고객).
+        require_complete_history: 13주 입력이 모두 완전 관측인 고객만 학습·평가한다.
+            추론은 부분 이력 고객도 예측한다.
+        calibration: BG/NBD 보정 기간. ``feature_window``(다른 모델과 같은 13주) 또는
+            ``full_history``(t0 이전 전체 주문).
+        transaction_period: BG/NBD 거래 단위. ``D``는 같은 서울 날짜의 주문을 하나로 묶는다.
+        no_purchase_fallback: 보정 기간 구매가 없는 고객의 BG/NBD 값. ``zero`` 또는
+            ``train_mean``(같은 처지인 Train 고객의 평균 정답).
+        bgnbd_penalizer: BG/NBD 로그 모수의 L2 벌점.
+        gg_penalizer: Gamma-Gamma 로그 모수의 L2 벌점.
+        selection_metric: XGBoost 설정과 최종 모델을 고르는 Validation 지표.
+        final_model: ``auto``(Validation 지표가 가장 좋은 모델) 또는 모델 이름 하나.
+        xgb_grid: Validation으로 탐색할 하이퍼파라미터 그리드.
+        xgb_fixed: 모든 그리드 점에 공통인 XGBoost 설정.
+    """
+
+    seed: int = 42
+    split_fractions: tuple[float, float, float] = (0.6, 0.2, 0.2)
+    top_fraction: float = 0.2
+    require_complete_history: bool = True
+    calibration: str = "feature_window"
+    transaction_period: str = "D"
+    no_purchase_fallback: str = "zero"
+    bgnbd_penalizer: float = 0.0
+    gg_penalizer: float = 0.0
+    selection_metric: str = "rmse"
+    final_model: str = "auto"
+    xgb_grid: dict = field(default_factory=lambda: {key: list(value) for key, value in DEFAULT_XGB_GRID.items()})
+    xgb_fixed: dict = field(default_factory=lambda: dict(DEFAULT_XGB_FIXED))
+
+    def __post_init__(self):
+        """비율 범위와 허용 선택지를 검사한다(잘못되면 ValueError)."""
+        self.split_fractions = tuple(float(value) for value in self.split_fractions)
+        if len(self.split_fractions) != 3 or min(self.split_fractions) <= 0 or abs(sum(self.split_fractions) - 1) > 1e-9:
+            raise ValueError("split_fractions must be three positive shares summing to one")
+        if not 0 < self.top_fraction < 1:
+            raise ValueError("top_fraction must be between zero and one")
+        choices = {"calibration": ("feature_window", "full_history"), "transaction_period": ("D", "order"),
+                   "no_purchase_fallback": ("zero", "train_mean"), "selection_metric": ("rmse", "mae")}
+        for name, allowed in choices.items():
+            if getattr(self, name) not in allowed:
+                raise ValueError(f"{name} must be one of {allowed}")
+        if self.final_model not in ("auto", "baseline", "bgnbd_gg", "xgboost"):
+            raise ValueError("final_model must be auto, baseline, bgnbd_gg or xgboost")
+
+    def to_dict(self) -> dict:
+        """JSON(registry) 저장용 dict. ``split_fractions``는 list로 바꾼다."""
+        result = asdict(self)
+        result["split_fractions"] = list(self.split_fractions)
+        return result
+
+    @classmethod
+    def from_dict(cls, values: dict | None) -> "CLVConfig":
+        """dict에서 설정을 만든다. 모르는 키가 있으면 ValueError."""
+        values = dict(values or {})
+        unknown = set(values) - set(cls.__dataclass_fields__)
+        if unknown:
+            raise ValueError(f"unknown CLV settings: {sorted(unknown)}")
+        return cls(**values)
+
+
+def load_config(path: str | Path | None = None) -> CLVConfig:
+    """JSON 또는 YAML(``clv:`` 섹션 허용)에서 설정을 읽는다. 경로가 없거나 파일이 비면 기본값."""
+    if path is None:
+        return CLVConfig()
+    path = Path(path)
+    text = path.read_text(encoding="utf-8")
+    if path.suffix in (".yaml", ".yml"):
+        import yaml
+        values = yaml.safe_load(text) or {}
+    else:
+        values = json.loads(text) if text.strip() else {}
+    if isinstance(values, dict) and isinstance(values.get("clv"), dict):
+        values = values["clv"]
+    return CLVConfig.from_dict(values)
