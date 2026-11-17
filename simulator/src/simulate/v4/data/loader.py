@@ -101,6 +101,65 @@ def load_tables(directory: str | Path = "data/processed") -> dict[str, Any]:
     return tables
 
 
+def load_retention_inputs(
+    feature_directory: str | Path,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
+    """Read snapshot keys, the ordered KIT39 matrix, and mature 28-day no-visit labels."""
+    from simulate.v4.features import EXPANDED_FEATURES, EXPANDED_FEATURE_VERSION
+
+    path = Path(feature_directory)
+    manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
+    if (manifest.get("feature_set_version") != EXPANDED_FEATURE_VERSION
+            or manifest.get("predictors") != list(EXPANDED_FEATURES)):
+        raise ValueError("Retention requires the registered KIT39 predictors in canonical order")
+    keys = ["customer_id", "as_of_at", "snapshot_id"]
+    identity = ["dataset_id", "raw_database_sha256"]
+    units = ["currency", "amount_unit"]
+    label_fields = ["definition_id", "outcome_window_days", "eligibility_window_days",
+                    "outcome_end_at", "observation_end_at", "is_censored", "policy_id", "churn"]
+    feature_fields = [*keys, *identity, *units, "expanded_feature_set_version", *EXPANDED_FEATURES]
+    frames = []
+    for name, columns in (("feature_store.parquet", feature_fields), ("labels.parquet", [*keys, *label_fields])):
+        checksum = manifest["file_sha256"].get(name)
+        file = path / name
+        if checksum is None or not file.is_file() or hashlib.sha256(file.read_bytes()).hexdigest() != checksum:
+            raise ValueError(f"Retention input {name} is missing or differs from its manifest")
+        frame = pd.read_parquet(file, columns=columns)
+        if frame[keys].isna().any().any() or frame.duplicated(keys).any():
+            raise ValueError(f"Retention input {name} requires unique, known snapshot keys")
+        if not isinstance(frame.as_of_at.dtype, pd.DatetimeTZDtype):
+            raise ValueError("Retention snapshots require a timezone-aware as_of_at")
+        frames.append(frame)
+    features, labels = frames
+    for name in identity:
+        declared = manifest.get(name)
+        if not isinstance(declared, str) or not declared or not features[name].eq(declared).fillna(False).all():
+            raise ValueError(f"Retention feature {name} differs from its manifest")
+    if not features.expanded_feature_set_version.eq(EXPANDED_FEATURE_VERSION).fillna(False).all():
+        raise ValueError("Retention feature rows require the registered KIT39 version")
+    if features[units].isna().any().any() or len(features[units].drop_duplicates()) != 1:
+        raise ValueError("Retention feature rows require a common currency and amount unit")
+    rows = features.merge(labels, on=keys, how="left", validate="one_to_one", indicator=True)
+    if rows.empty or not rows["_merge"].eq("both").all():
+        raise ValueError("Every Retention feature row requires a label from the same snapshot")
+    definition = "future_no_session_28d_active28d"
+    if (not rows.definition_id.eq(definition).fillna(False).all()
+            or not rows.outcome_window_days.eq(28).fillna(False).all()
+            or not rows.eligibility_window_days.eq(28).fillna(False).all()
+            or not rows.outcome_end_at.eq(rows.as_of_at + pd.Timedelta(days=28)).all()):
+        raise ValueError("Retention requires a 28-day no-visit outcome and 28-day eligibility")
+    if (not pd.api.types.is_bool_dtype(rows.is_censored) or rows.is_censored.isna().any()
+            or not isinstance(rows.observation_end_at.dtype, pd.DatetimeTZDtype)
+            or rows.observation_end_at.isna().any()):
+        raise ValueError("Retention labels require an observed cutoff and an explicit censoring flag")
+    mature = rows.loc[~rows.is_censored & rows.outcome_end_at.le(rows.observation_end_at)].reset_index(drop=True)
+    if mature.empty or not mature.churn.isin([0, 1]).all():
+        raise ValueError("Retention training requires mature binary no-visit labels")
+    snapshots = mature[[*keys, *identity, *units, "expanded_feature_set_version",
+                        "outcome_end_at", "definition_id", "policy_id"]]
+    return snapshots, mature[list(EXPANDED_FEATURES)], mature.churn.astype("int8")
+
+
 def load_uplift_inputs(feature_directory: str | Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Read the customer, weekly and cart inputs for the four-week purchase learner.
 

@@ -105,6 +105,28 @@ ecommerce-sim v4 export-experiment --data artifacts/small \
 `no_purchase_labels.parquet`의 실제 주문에서 계산한 값을 사용한다.
 기존 `run`·Starbucks·`campaign` 환경은 별도 연구 경로로 보존한다.
 
+### Retention 입력
+
+v5의 공통 입력은 v4 설계서의 `kit39-review-cart-v2`다. 방문·구매·세션의
+산식과 30일/90일 피처 창은 [피처 구현](src/simulate/v4/features.py)을 따른다.
+미방문 정답은 배정 직전 28일 적격 고객의 배정 후 28일을 관측해서 계산한다.
+
+```python
+from simulate.v4.data.loader import load_retention_inputs
+
+snapshots, X, y = load_retention_inputs("artifacts/features")
+```
+
+`X`는 등록 순서대로 KIT39만 담는다. `y=1`은 28일 미방문이다. 같은
+고객·기준시각·snapshot의 피처와 라벨을 연결하고 성숙한 결과만 반환한다.
+`snapshots.policy_id`는 관측된 실험 정책이다. 단일 실험 snapshot은
+입력 점검에 사용할 수 있고 시간순 학습에는 서로 다른 기준시점의 성숙한
+샘플이 필요하다.
+
+추가 분석은 [기준 시점 이전 세션·주문 조회](scripts/query_v4.sql)에서 시작한다.
+raw DB의 UTC 시각은 `2025-01-05T15:00:00.000000000+00:00` 형식으로 바인딩한다.
+새 피처 정의에는 관련 연구, 관측 창, 분모와 결측 규칙을 함께 기록한다.
+
 ### Uplift 입력
 
 `features` 명령이 생성한 디렉터리에서 실험 고객, 주간 합계, 배정 시 장바구니를 읽는다.
@@ -120,10 +142,6 @@ training = build_dataset(customers, weekly, cart)
 `w0`는 서울 월요일 00시의 배정 시점이다. 주간 `session_minutes`는 초를 분으로
 환산하고, `net_revenue`와 장바구니 금액은 원천 최소 단위로 유지한다. 각 입력의
 `attrs`에는 dataset ID, seed, 통화와 금액 단위가 있다.
-
-기존 retention 입력의 주문 고객·세션·시각은 `orders.purchase_event_id`로
-`events`를 조인해 얻을 수 있다. 품목은 `order_items`, 쿠폰 사용은
-`orders.coupon_id`가 있는 주문에서 가져온다.
 
 ## 검증
 

@@ -147,6 +147,41 @@ def test_experiment_exports_use_declared_eligibility_and_coupon_validity(dataset
     assert labels.no_purchase_churn.eq(1).all()
 
 
+def test_retention_reads_kit39_and_mature_labels_at_exact_snapshot(dataset, tmp_path):
+    from simulate.v4.data.loader import load_retention_inputs
+
+    add_sidecars(dataset)
+    (dataset / "treatments.parquet").unlink()
+    label_path = dataset / "labels.parquet"
+    labels = pd.read_parquet(label_path)
+    labels["definition_id"] = "future_no_session_28d_active28d"
+    labels["outcome_window_days"] = 28
+    labels["eligibility_window_days"] = 28
+    labels["observation_end_at"] = pd.Timestamp("2024-04-15", tz="UTC")
+    labels["policy_id"] = ["one_coupon_10pct_highest_unit_28d", "no_new_coupon"]
+    labels.loc[labels.customer_id.eq("v"), "is_censored"] = True
+    labels.loc[labels.customer_id.eq("v"), "churn"] = pd.NA
+    labels.to_parquet(label_path, index=False)
+
+    output = tmp_path / "retention"
+    materialize_features(dataset, output)
+    snapshots, x, y = load_retention_inputs(output)
+    assert snapshots.customer_id.tolist() == ["u"] and snapshots.as_of_at.eq(T0).all()
+    assert y.tolist() == [1]
+    assert tuple(x.columns) == EXPANDED_FEATURES
+    expected = pd.read_parquet(output / "feature_store.parquet", columns=["customer_id", *EXPANDED_FEATURES])
+    pd.testing.assert_frame_equal(x, expected.loc[expected.customer_id.eq("u"), list(EXPANDED_FEATURES)].reset_index(drop=True))
+
+    later = tmp_path / "later"
+    materialize_features(dataset, later, as_of_at=T0 + pd.Timedelta(days=1))
+    with pytest.raises(ValueError, match="same snapshot"):
+        load_retention_inputs(later)
+    # The rows are structurally valid but no longer the manifest-bound label file.
+    labels.assign(churn=0).to_parquet(output / "labels.parquet", index=False)
+    with pytest.raises(ValueError, match="differs from its manifest"):
+        load_retention_inputs(output)
+
+
 def test_uplift_reader_aligns_assignment_inputs_and_preserves_censoring(dataset, tmp_path):
     from simulate.v4.data.loader import load_uplift_inputs
 
