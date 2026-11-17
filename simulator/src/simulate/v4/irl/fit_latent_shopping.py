@@ -722,7 +722,9 @@ def validate_model(model):
 
 def policy(model, context, component_id, probabilities=None):
     b = _block(model)
-    if isinstance(component_id, bool) or not isinstance(component_id, (int, np.integer)) or not 0 <= component_id < len(b["mixture_weights"]):
+    if (probabilities is None or component_id is not None) and (
+            isinstance(component_id, bool) or not isinstance(component_id, (int, np.integer))
+            or not 0 <= component_id < len(b["mixture_weights"])):
         raise ValueError("component_id must be the persistent private customer draw")
     cache = _RUNTIME.get(id(b))
     if cache is None or cache[0] is not b:

@@ -1,6 +1,7 @@
 """Canonical SQLite, past-only KIT39 and isolated factual export contracts."""
 import hashlib
 import json
+from pathlib import Path
 import sqlite3
 
 import pandas as pd
@@ -68,7 +69,7 @@ def test_registered_features_use_strict_event_prefix_and_product_reviews(dataset
     tables = load_tables(dataset / "raw.sqlite")
     row = build_features(tables, as_of_at=T0).set_index("customer_id").loc["u"]
     assert len(EXPANDED_FEATURES) == 39 and len(set(EXPANDED_FEATURES)) == 39
-    assert row.expanded_feature_set_version == EXPANDED_FEATURE_VERSION == "kit39-review-cart-v2"
+    assert row.expanded_feature_set_version == EXPANDED_FEATURE_VERSION == "kit39-review-cart-v3"
     assert row.review_count_30d == 1 and row.mean_review_rating_30d == 1
     assert row.review_last_order_mean_rating == 1 and row.review_non5_share_30d == 1
     assert row.cart_adds_per_nonpurchase_session_30d == 1 and row.cart_removes_per_nonpurchase_session_30d == 0
@@ -77,6 +78,53 @@ def test_registered_features_use_strict_event_prefix_and_product_reviews(dataset
     later = build_features(tables, as_of_at=T0 + pd.Timedelta(nanoseconds=1)).set_index("customer_id").loc["u"]
     assert later.review_count_30d == 2 and later.review_last_order_mean_rating == 3
     assert later.review_non5_share_30d == .5
+
+
+def test_last_completed_session_and_explicit_snapshot_ignore_recent_window_and_future_labels(dataset):
+    add_sidecars(dataset)
+    tables = load_tables(dataset)
+    snapshot = T0 + pd.Timedelta(days=31)
+    tables["sessions"].loc[tables["sessions"].session_id.eq("edit"), "ended_at"] = snapshot
+    frame = build_features(tables, as_of_at=snapshot)
+    assert frame.as_of_at.eq(snapshot).all() and "churn" not in frame
+    row = frame.set_index("customer_id").loc["u"]
+    assert row.last_session_min_viewed_price == 100 and row.last_session_max_viewed_price == 200
+    assert row.last_session_start_hour == 19 and row.last_session_start_weekday == 5
+    assert pd.isna(row.mean_session_duration_minutes_30d)
+
+
+def test_feature_coverage_is_per_window_and_cart_needs_the_signup_prefix(dataset):
+    tables = load_tables(dataset)
+    tables["_metadata"]["observation_start_at"] = (T0 - pd.Timedelta(days=45)).isoformat()
+    row = build_features(tables, as_of_at=T0).set_index("customer_id").loc["u"]
+    assert row.view_count_30d == 2 and row.net_spend_30d == 300
+    assert row.review_count_30d == 1 and row.cart_adds_per_nonpurchase_session_30d == 1
+    assert row[["orders_delta_30d", "cart_qty_current", "cart_sku_current", "cart_gross_value_current"]].isna().all()
+
+    tables["_metadata"]["observation_start_at"] = (T0 - pd.Timedelta(days=27)).isoformat()
+    row = build_features(tables, as_of_at=T0).set_index("customer_id").loc["u"]
+    assert row[["view_count_30d", "review_count_30d", "review_non5_share_30d",
+                "cart_adds_per_nonpurchase_session_30d", "cart_removes_per_nonpurchase_session_30d"]].isna().all()
+
+    signup = pd.Timestamp("2024-01-01", tz="UTC")
+    tables["_metadata"]["observation_start_at"] = signup.isoformat()
+    at_signup = build_features(tables, as_of_at=signup)
+    assert at_signup[list(EXPANDED_FEATURES)].isna().all().all()
+
+
+def test_optional_cart_conversion_sql_uses_completed_sessions_and_observed_window(dataset):
+    sql = (Path(__file__).resolve().parents[1] / "scripts/query_v4.sql").read_text()
+    query = sql[sql.index("WITH first_carts AS"):].strip()
+    params = {"customer_id": "u", "as_of_at": T0.isoformat(timespec="nanoseconds"),
+              "window_start_at": (T0 - pd.Timedelta(days=30)).isoformat(timespec="nanoseconds"),
+              "observation_start_at": "2024-01-01T00:00:00.000000000+00:00"}
+    boundary = pd.Timestamp("2024-02-20T10:10:00Z")
+    with sqlite3.connect(dataset / "raw.sqlite") as conn:
+        assert conn.execute(query, params).fetchone() == (0.5,)
+        assert conn.execute(query, {**params, "as_of_at": boundary.isoformat(timespec="nanoseconds"),
+                                   "window_start_at": (boundary - pd.Timedelta(days=30)).isoformat(timespec="nanoseconds")}).fetchone() == (1.0,)
+        assert conn.execute(query, {**params, "customer_id": "v"}).fetchone() == (None,)
+        assert conn.execute(query, {**params, "observation_start_at": params["as_of_at"]}).fetchone() == (None,)
 
 
 def test_bare_sqlite_materializes_only_known_facts_without_inventing_assignments(dataset, tmp_path):
@@ -118,6 +166,148 @@ def test_sidecar_experiment_coverage_and_explicit_new_snapshot(dataset, tmp_path
     assert weekly.purchases.sum() == 1 and weekly.coupons_sent.sum() == 1
     manifest = json.loads((output / "manifest.json").read_text())
     assert manifest["omitted"] == {} and set(manifest["file_sha256"]) >= {"features.sqlite", "feature_store.parquet"}
+
+
+def test_experiment_exports_use_declared_eligibility_and_coupon_validity(dataset):
+    from simulate.v4.data.experiment_exports import build_no_purchase_labels
+    from simulate.v4.data.weekly import build_experiment_log
+
+    add_sidecars(dataset)
+    tables = load_tables(dataset)
+    metadata = {**tables["_metadata"], "definition_id": "future_no_session_28d_active30d"}
+    start = T0 - pd.Timedelta(days=29)
+    tables["sessions"].loc[len(tables["sessions"])] = dict(
+        session_id="old-only", customer_id="v", started_at=start, ended_at=start + pd.Timedelta(minutes=1),
+    )
+    legacy = build_experiment_log(tables, metadata)
+    assert legacy.eligible_at_assignment.all()
+    assert build_no_purchase_labels(tables, metadata, legacy).definition_id.eq("future_no_order_28d_active30d").all()
+    metadata.update(eligibility_window_days=28, coupon_validity_days=28, definition_id="future_no_session_28d_active28d")
+    tables["labels"]["definition_id"] = metadata["definition_id"]
+    with pytest.raises(ValueError, match="exactly 28 days"):
+        build_experiment_log(tables, metadata)
+    tables["coupons"]["expires_at"] = T0 + pd.Timedelta(days=28)
+    current = build_experiment_log(tables, metadata)
+    assert current.set_index("customer_id").eligible_at_assignment.to_dict() == {"u": True, "v": False}
+    labels = build_no_purchase_labels(tables, metadata, current)
+    assert labels.definition_id.eq("future_no_order_28d_active28d").all()
+    assert labels.eligibility_window_days.eq(28).all()
+    assert labels.no_purchase_churn.eq(1).all()
+
+
+def test_retention_reads_kit39_and_mature_labels_at_exact_snapshot(dataset, tmp_path):
+    from simulate.v4.data.loader import load_retention_inputs
+
+    add_sidecars(dataset)
+    (dataset / "treatments.parquet").unlink()
+    label_path = dataset / "labels.parquet"
+    labels = pd.read_parquet(label_path)
+    labels["definition_id"] = "future_no_session_28d_active28d"
+    labels["outcome_window_days"] = 28
+    labels["eligibility_window_days"] = 28
+    labels["observation_end_at"] = pd.Timestamp("2024-04-15", tz="UTC")
+    labels["policy_id"] = ["one_coupon_10pct_highest_unit_28d", "no_new_coupon"]
+    labels.loc[labels.customer_id.eq("v"), "is_censored"] = True
+    labels.loc[labels.customer_id.eq("v"), "churn"] = pd.NA
+    labels.to_parquet(label_path, index=False)
+
+    output = tmp_path / "retention"
+    materialize_features(dataset, output)
+    snapshots, x, y = load_retention_inputs(output)
+    assert snapshots.customer_id.tolist() == ["u"] and snapshots.as_of_at.eq(T0).all()
+    assert y.tolist() == [1]
+    assert tuple(x.columns) == EXPANDED_FEATURES
+    expected = pd.read_parquet(output / "feature_store.parquet", columns=["customer_id", *EXPANDED_FEATURES])
+    pd.testing.assert_frame_equal(x, expected.loc[expected.customer_id.eq("u"), list(EXPANDED_FEATURES)].reset_index(drop=True))
+
+    explicit = tmp_path / "explicit"
+    materialize_features(dataset, explicit, as_of_at=T0.tz_convert("Asia/Seoul"))
+    explicit_snapshots, explicit_x, explicit_y = load_retention_inputs(explicit)
+    pd.testing.assert_frame_equal(explicit_snapshots, snapshots)
+    pd.testing.assert_frame_equal(explicit_x, x)
+    pd.testing.assert_series_equal(explicit_y, y)
+
+    later = tmp_path / "later"
+    materialize_features(dataset, later, as_of_at=T0 + pd.Timedelta(days=1))
+    with pytest.raises(ValueError, match="same snapshot"):
+        load_retention_inputs(later)
+    # The rows are structurally valid but no longer the manifest-bound label file.
+    labels.assign(churn=0).to_parquet(output / "labels.parquet", index=False)
+    with pytest.raises(ValueError, match="differs from its manifest"):
+        load_retention_inputs(output)
+
+
+def test_uplift_reader_aligns_assignment_inputs_and_preserves_censoring(dataset, tmp_path):
+    from simulate.v4.data.loader import load_uplift_inputs
+
+    add_sidecars(dataset)
+    features = tmp_path / "features"
+    materialize_features(dataset, features)
+    customers, weekly, cart = load_uplift_inputs(features)
+    assert set(customers) == {"customer_id", "w0", "treatment"}
+    assert customers.w0.eq(T0.tz_convert("Asia/Seoul")).all()
+    assert set(weekly) == {"customer_id", "reference_week", "sessions", "purchases", "net_revenue", "views", "session_minutes"}
+    assert weekly.reference_week.ge(T0 - pd.Timedelta(weeks=12)).all()
+    assert weekly.reference_week.lt(T0 + pd.Timedelta(weeks=4)).all()
+    assert weekly.net_revenue.sum() == 300 and weekly.session_minutes.sum() == 20
+    assert pd.api.types.is_integer_dtype(weekly.net_revenue)
+    assert weekly.sessions.dtype == float and weekly.purchases.dtype == float
+    future = weekly.loc[weekly.reference_week.ge(T0)]
+    assert future.purchases.eq(0).all()
+    assert set(cart) == {"customer_id", "cart_qty", "cart_sku", "cart_gross_value"}
+    assert cart.set_index("customer_id").loc["u", "cart_gross_value"] == 100
+    assert customers.attrs == weekly.attrs == cart.attrs == {
+        "dataset_id": "v4-contract", "currency": "SOURCE_UNSPECIFIED", "amount_unit": "0.01", "seed": 3,
+    }
+    explicit = tmp_path / "explicit"
+    materialize_features(dataset, explicit, as_of_at=T0)
+    for loaded, automatic in zip(load_uplift_inputs(explicit), (customers, weekly, cart)):
+        pd.testing.assert_frame_equal(loaded, automatic)
+
+    weekly_path = features / "weekly_panel.parquet"
+    pd.read_parquet(weekly_path).assign(purchases=1).to_parquet(weekly_path, index=False)
+    with pytest.raises(ValueError, match="weekly_panel.parquet differs from its manifest"):
+        load_uplift_inputs(features)
+
+    raw_manifest = dataset / "raw.manifest.json"
+    manifest = json.loads(raw_manifest.read_text())
+    manifest["metadata"]["observation_end_at"] = (T0 + pd.Timedelta(days=8)).isoformat()
+    raw_manifest.write_text(json.dumps(manifest))
+    label_path = dataset / "labels.parquet"
+    pd.read_parquet(label_path).assign(is_censored=True, churn=pd.NA).to_parquet(label_path, index=False)
+    immature = tmp_path / "immature"
+    materialize_features(dataset, immature)
+    _, weekly, _ = load_uplift_inputs(immature)
+    assert weekly.loc[weekly.reference_week.ge(T0), "purchases"].isna().all()
+    later = tmp_path / "later"
+    materialize_features(dataset, later, as_of_at=T0 + pd.Timedelta(days=1))
+    with pytest.raises(ValueError, match="share one dataset and the assignment snapshots"):
+        load_uplift_inputs(later)
+
+
+def test_feature_database_is_closed_before_publication(dataset, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from simulate.v4 import storage
+
+    connections = []
+    publish = storage.os.rename
+
+    def connect(path):
+        connection = sqlite3.connect(path)
+        connections.append(connection)
+        return connection
+
+    def rename(staging, output):
+        (connection,) = connections
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
+        publish(staging, output)
+
+    monkeypatch.setattr(storage, "sqlite3", SimpleNamespace(connect=connect))
+    monkeypatch.setattr(storage, "os", SimpleNamespace(rename=rename))
+    output = tmp_path / "features"
+    materialize_features(dataset, output)
+    assert (output / "features.sqlite").is_file()
 
 
 def test_failed_publication_leaves_no_partial_feature_database(dataset, tmp_path, monkeypatch):

@@ -5,6 +5,7 @@ import yaml
 
 
 DEFAULT_CONFIG = Path(__file__).with_name("config") / "simulator.yaml"
+POPULATION_CONFIG = DEFAULT_CONFIG.with_name("population.yaml")
 
 
 def load_config(path=DEFAULT_CONFIG, assets_root=None):
@@ -13,7 +14,8 @@ def load_config(path=DEFAULT_CONFIG, assets_root=None):
     config = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(config, dict) or not isinstance(config.get("source_simulation"), dict):
         raise ValueError("v4 config requires a source_simulation mapping")
-    root = Path(assets_root or Path.cwd()).expanduser().resolve()
+    bundled_root = path.parent if path == POPULATION_CONFIG.resolve() else Path.cwd()
+    root = Path(assets_root or bundled_root).expanduser().resolve()
     for key, value in config["source_simulation"].items():
         if value and (key.endswith(("_path", "_source")) or key == "prepared_source_cache"):
             configured = Path(value).expanduser()

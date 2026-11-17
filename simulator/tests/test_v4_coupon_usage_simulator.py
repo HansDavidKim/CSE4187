@@ -14,7 +14,7 @@ from simulate.v4.simulator.raw_store import RAW_COLUMNS, validate_raw_dataset
 @pytest.mark.parametrize("a_price,target,line,gross", [(105, "B", 2, 1025), (250, "A", 1, 1750)])
 def test_usage_links_purchase_and_selects_highest_unit_with_stable_tie(
         checkout_fixture, tmp_path, a_price, target, line, gross):
-    config = _config(checkout_fixture, tmp_path / "fixture")
+    config = _config(checkout_fixture, tmp_path / "fixture", first_action="purchase")
     model_path = Path(config["source_simulation"]["model_path"])
     model = json.loads(model_path.read_text())
     for product in model["catalog"]:

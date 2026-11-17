@@ -150,11 +150,10 @@ def _observations(data, states, selected_sessions, activity, users, state_count)
     return result
 
 
-def fit_gaussian(rows, model, return_model, max_users=256):
-    """Fit only source-supported MAP effects; later observations tune shrinkage."""
+def _fit_map_effects(rows, model, return_model, max_users):
+    """Estimate source-supported offsets, with later observations tuning shrinkage."""
     if isinstance(max_users, bool) or not isinstance(max_users, int) or max_users < 2:
         raise ValueError("Gaussian fitting requires max_users >= 2")
-    started = time.perf_counter()
     latent = model["latent_shopping"]
     weights = np.asarray(latent["mixture_weights"])
     original = np.column_stack([latent["component_offsets"], latent["return_activity"]["component_logit_offsets"]])
@@ -212,6 +211,28 @@ def fit_gaussian(rows, model, return_model, max_users=256):
     for user in supported_users:
         theta, fit = fit_user_offsets(*observations["all"][user], base, matrices, mask, centre, penalty)
         coefficients.append(theta);convergence.append(fit)
+    report = {
+        "max_users": max_users, "sampled_users": len(users), "supported_users": len(supported_users),
+        "source_users": int(rows.user_id.nunique()), "selected_penalty": penalty, "tuning_grid": grid,
+        "tuning_centre": "frozen population-weighted centroid; no full-source posterior used for tuning",
+        "tuning_clock": "whole sessions terminal_known_at < cutoff vs start_at >= cutoff; activity target_at < cutoff vs at >= cutoff",
+        "cutoff_at": cutoff.isoformat(), "action_observations": sum(int(observations["all"][u][0].sum()) for u in supported_users),
+        "activity_observations": sum(len(observations["all"][u][1]) for u in supported_users),
+        "map_fits": len(convergence), "all_map_fits_converged": True,
+        "maximum_iterations": max(item["iterations"] for item in convergence),
+        "maximum_gradient_abs": max(item["gradient_max_abs"] for item in convergence),
+        "encoder_fallback_observations": int(fallback.sum()), "activity_panel": activity_audit,
+    }
+    return supported_users, np.asarray(coefficients), report
+
+
+def fit_gaussian(rows, model, return_model, max_users=256):
+    """Fit the legacy Gaussian moments using frozen discrete responsibilities."""
+    started = time.perf_counter()
+    supported_users, coefficients, report = _fit_map_effects(rows, model, return_model, max_users)
+    latent = model["latent_shopping"]
+    weights = np.asarray(latent["mixture_weights"])
+    original = np.column_stack([latent["component_offsets"], latent["return_activity"]["component_logit_offsets"]])
     responsibilities = [latent["profile_posteriors"].get(
         hashlib.sha256(f"cosmetics:{user}".encode()).hexdigest()[:16], latent["mixture_weights"])
         for user in supported_users]
@@ -219,18 +240,8 @@ def fit_gaussian(rows, model, return_model, max_users=256):
     return {"schema_version": 1, "type": TYPE, "purpose": "synthesis_only",
         "parameter_names": PARAMETERS, "component_count": len(weights), "mixture_weights": weights.tolist(),
         "means": means.tolist(), "variances": variances.tolist(),
-        "fit": {"scope": FIT_SCOPE, "forecast_validation_uses_gaussian": False,
-            "max_users": max_users, "sampled_users": len(users), "supported_users": len(supported_users),
-            "source_users": int(rows.user_id.nunique()), "selected_penalty": penalty, "tuning_grid": grid,
-            "tuning_centre": "frozen population-weighted centroid; no full-source posterior used for tuning",
-            "tuning_clock": "whole sessions terminal_known_at < cutoff vs start_at >= cutoff; activity target_at < cutoff vs at >= cutoff",
-            "cutoff_at": cutoff.isoformat(), "action_observations": sum(int(observations["all"][u][0].sum()) for u in supported_users),
-            "activity_observations": sum(len(observations["all"][u][1]) for u in supported_users),
+        "fit": {"scope": FIT_SCOPE, "forecast_validation_uses_gaussian": False, **report,
             "effective_component_users": masses.tolist(), "unsupported_component_rule": "mass < 1e-6 preserves original mean and zero variance",
-            "map_fits": len(convergence), "all_map_fits_converged": True,
-            "maximum_iterations": max(item["iterations"] for item in convergence),
-            "maximum_gradient_abs": max(item["gradient_max_abs"] for item in convergence),
-            "encoder_fallback_observations": int(fallback.sum()), "activity_panel": activity_audit,
             "elapsed_seconds": time.perf_counter() - started},
         "limitations": ["Two-stage conditional Gaussian approximation with frozen discrete donor gating; not a jointly refitted continuous mixture.",
             "MAP shrinkage and the hash-uniform user sample affect dispersion; no invented covariance floor or extra jitter is added.",

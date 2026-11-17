@@ -358,6 +358,7 @@ def test_source_trait_recipe_reconstructs_and_guards_the_exact_parent(tmp_path, 
     ("fit_visit_timing", "--source-cache", "prepared cache.parquet"),
     ("reconstruct_latent_traits", "--source-cache", "prepared cache.parquet"),
     ("fit_gaussian_rewards", "--source-cache", "prepared cache.parquet"),
+    ("fit_joint_reward_gmm", "--source-cache", "prepared cache.parquet"),
 ])
 def test_portable_source_paths_reach_fitter_without_shell_parsing(name, option, path):
     simulator = SimpleNamespace(settings={"cosmetics_source": "raw cosmetics",

@@ -40,6 +40,7 @@ def source_config(tmp_path_factory):
     config["source_simulation"]["return_model_path"] = None
     config["source_simulation"]["coupon_response_model_path"] = None
     config["source_simulation"]["visit_timing_model_path"] = None
+    config["source_simulation"].pop("coupon_effect_calibration")
     for name in ("search", "review", "cs"):
         config["source_simulation"][f"{name}_model_path"] = None
     return config
@@ -70,7 +71,8 @@ def test_canonical_units_utc_snapshot_eligibility_and_balanced_assignment(genera
     assert str(tables["events"].event_at.dt.tz) == "UTC"
     assert tables["events"].event_id.is_unique
     assert tables["events"].sort_values("event_id").event_at.is_monotonic_increasing
-    eligible = tables["sessions"].loc[tables["sessions"].started_at.ge(t0-pd.Timedelta(days=30)) &
+    assert metadata["eligibility_window_days"] == 28
+    eligible = tables["sessions"].loc[tables["sessions"].started_at.ge(t0-pd.Timedelta(days=28)) &
                                       tables["sessions"].started_at.lt(t0), "customer_id"]
     assert set(eligible) == set(tables["customers"].customer_id)
     assert tables["treatments"].treatment.value_counts().to_dict() == {0: 20, 1: 20}
@@ -84,10 +86,13 @@ def test_future_labels_are_recomputed_from_observed_sessions_and_paid_orders(gen
     labels = tables["labels"]
     t0, upper = labels.as_of_at.iloc[0], labels.outcome_end_at.iloc[0]
     assert upper - t0 == pd.Timedelta(weeks=4)
-    assert labels.definition_id.eq("future_no_session_28d_active30d").all()
+    assert labels.definition_id.eq("future_no_session_28d_active28d").all()
     assert generated.metadata["outcome_window_days"] == 28
     assert generated.metadata["generation_window_days"] == 30
-    assert tables["coupons"].expires_at.eq(t0 + pd.Timedelta(days=30)).all()
+    assert generated.metadata["coupon_validity_days"] == 28
+    assert tables["coupons"].expires_at.eq(t0 + pd.Timedelta(days=28)).all()
+    assert tables["coupons"].policy_id.eq("one_coupon_10pct_highest_unit_28d").all()
+    assert tables["treatments"].experiment_id.eq("coupon_once_highest_unit_28d").all()
     future = tables["sessions"].loc[tables["sessions"].started_at.ge(t0) & tables["sessions"].started_at.lt(upper)]
     active = set(future.customer_id)
     assert labels.set_index("customer_id").churn.to_dict() == {

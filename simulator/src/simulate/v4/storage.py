@@ -1,6 +1,7 @@
 """Materialize public KIT39 features and factual experiment tables beside raw SQLite."""
 from __future__ import annotations
 
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -57,12 +58,9 @@ def materialize_features(dataset, output, as_of_at=None):
         raise FileExistsError(f"feature output must be new or empty: {output}")
     tables = load_tables(dataset)
     metadata = tables.get("_metadata", {})
-    feature_tables = tables
-    if as_of_at is not None:
-        feature_tables = {name: frame for name, frame in tables.items() if name != "labels"}
-    elif "labels" not in tables:
+    if as_of_at is None and "labels" not in tables:
         as_of_at = metadata.get("as_of_at")
-    features = build_features(feature_tables, as_of_at=as_of_at)
+    features = build_features(tables, as_of_at=as_of_at)
     features = features[[*FEATURE_KEYS, *EXPANDED_FEATURES]]
     if features.duplicated(["customer_id", "as_of_at"]).any():
         raise ValueError("feature snapshots must be unique per customer/time")
@@ -98,7 +96,7 @@ def materialize_features(dataset, output, as_of_at=None):
     output.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}-", dir=output.parent))
     try:
-        with sqlite3.connect(staging / "features.sqlite") as connection:
+        with closing(sqlite3.connect(staging / "features.sqlite")) as connection, connection:
             for name, frame in frames.items():
                 _sql_frame(frame).to_sql(name, connection, index=False, if_exists="fail")
                 frame.to_parquet(staging / ("feature_store.parquet" if name == "features" else f"{name}.parquet"), index=False)

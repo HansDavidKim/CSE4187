@@ -136,28 +136,35 @@ def test_private_evaluation_exports_cannot_enter_raw_loader_or_kit_whitelist(inp
     assert truth.attrs["recommended_directory"]=="evaluation_only"
 
 
-def test_28_day_view_selects_new_marginals_without_changing_generation_or_history(inputs):
+@pytest.mark.parametrize("eligibility_days", [28, 30])
+def test_28_day_view_selects_new_marginals_without_changing_generation_or_history(inputs, eligibility_days):
     diagnostics,metadata=inputs
     original=diagnostics.copy(deep=True)
     diagnostics["no_coupon_return_probability_28d"]=diagnostics.no_coupon_return_probability_30d*0.95
     diagnostics["coupon_return_probability_28d"]=diagnostics.coupon_return_probability_30d*0.95
-    view={**metadata,"definition_id":"future_no_session_28d_active30d","outcome_window_days":28,
-          "generation_window_days":30,"eligibility_window_days":30,"generation_definition_id":metadata["definition_id"],
+    view={**metadata,"definition_id":f"future_no_session_28d_active{eligibility_days}d","outcome_window_days":28,
+          "generation_window_days":30,"eligibility_window_days":eligibility_days,"coupon_validity_days":eligibility_days,
+          "generation_definition_id":f"future_no_session_30d_active{eligibility_days}d",
           "parent_dataset_id":metadata["dataset_id"],"dataset_id":metadata["dataset_id"]+"-28d",
           "source_raw_database_sha256":"c"*64}
     pairs,truth=paired_retention_rollouts(diagnostics,view)
     expected=truth.set_index("customer_id")
     assert pairs.outcome_window_days.eq(28).all() and pairs.generation_window_days.eq(30).all()
-    assert pairs.eligibility_window_days.eq(30).all()
+    assert pairs.eligibility_window_days.eq(eligibility_days).all()
     assert pairs.outcome_scope.eq("first_28_day_return_marginal_of_30d_activity_window").all()
     assert pairs.control_retained.eq((pairs.shared_uniform < pairs.customer_id.map(expected.no_coupon_return_probability_28d)).astype(int)).all()
     assert expected.loc["positive","true_retention_uplift"]==pytest.approx(0.55*0.95)
     assert truth.source_raw_database_sha256.eq("c"*64).all()
     pd.testing.assert_frame_equal(diagnostics[original.columns],original)
-    for key in ("outcome_window_days","generation_window_days","eligibility_window_days","generation_definition_id","parent_dataset_id"):
+    for key in ("outcome_window_days","generation_window_days","generation_definition_id","parent_dataset_id"):
         missing=view.copy()
         missing.pop(key)
         with pytest.raises(ValueError):
             paired_retention_rollouts(diagnostics,missing)
+    if eligibility_days == 30:
+        legacy = {key: value for key, value in view.items() if key not in {"eligibility_window_days", "coupon_validity_days"}}
+        legacy_pairs, legacy_truth = paired_retention_rollouts(diagnostics, legacy)
+        pd.testing.assert_frame_equal(legacy_pairs, pairs)
+        pd.testing.assert_frame_equal(legacy_truth, truth)
     with pytest.raises(ValueError,match="both return probabilities"):
         paired_retention_rollouts(original,view)

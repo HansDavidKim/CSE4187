@@ -18,10 +18,10 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import yaml
 
+from ..configuration import DEFAULT_CONFIG, load_config
 from .raw_store import RAW_COLUMNS, discount_minor, save_raw_dataset
-from .outcomes import redefine_outcomes
+from .outcomes import experiment_window_days, redefine_outcomes
 from .lifecycle import build_observed_lifecycle
 from .item_choice import item_probabilities
 from .coupon_response import sample_coupon_response, validate_response_model
@@ -81,9 +81,8 @@ class EcommerceSimulator:
 
     def __init__(self, config: str | Path | dict | None = None):
         if config is None:
-            from ..configuration import load_config
-            config = load_config()
-        self.config = yaml.safe_load(Path(config).read_text()) if isinstance(config, (str, Path)) else config
+            config = DEFAULT_CONFIG
+        self.config = load_config(config) if isinstance(config, (str, Path)) else config
         settings = self.config.get("source_simulation", {})
         self.model_path = Path(settings.get("model_path", "data/models/shopping_profiles.json"))
         self.settings = settings
@@ -125,10 +124,16 @@ class EcommerceSimulator:
         runtime_hashes = {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in runtime_paths.items()}
         model_bytes = self.model_path.read_bytes()
         model = json.loads(model_bytes)
-        if model.get("schema_version") != 1 or not model.get("profiles") or not model.get("catalog"):
+        population = model.get("population")
+        if model.get("schema_version") != 1 or (population is None and (not model.get("profiles") or not model.get("catalog"))):
             raise ValueError("incompatible or empty shopping profiles artifact")
         causal_block = model.get("causal_shopping")
         latent_block = model.get("latent_shopping")
+        if population is not None and (not latent_block or not latent_block.get("return_activity")
+                                      or not self.settings.get("visit_timing_model_path")):
+            raise ValueError("population synthesis requires the joint latent policy and population visit calibration")
+        if population is not None and (model.get("profiles") or model.get("catalog") or latent_block.get("profile_posteriors")):
+            raise ValueError("population calibration cannot contain source profiles, catalogs or individual posteriors")
         if causal_block is not None and latent_block is not None:
             raise ValueError("shopping artifact must select one learned planning policy")
         causal_policy = None
@@ -174,13 +179,31 @@ class EcommerceSimulator:
         if decision < local:
             decision += pd.Timedelta(days=7)
         t0 = decision.tz_convert("UTC")
+        eligibility_days = experiment_window_days(self.settings, "eligibility_window_days")
+        coupon_validity_days = experiment_window_days(self.settings, "coupon_validity_days")
+        eligibility_start = t0 - pd.Timedelta(days=eligibility_days)
+        coupon_expires_at = t0 + pd.Timedelta(days=coupon_validity_days)
+        experiment_policy = f"coupon_once_highest_unit_{coupon_validity_days}d"
+        coupon_policy = f"one_coupon_10pct_highest_unit_{coupon_validity_days}d"
+        generation_definition = f"future_no_session_30d_active{eligibility_days}d"
         if months >= 24:
             end = max(end, t0 + pd.DateOffset(months=12))
         outcome_end = t0 + pd.Timedelta(days=30)
         if outcome_end >= end:
             raise ValueError("simulation must observe the full 30-day outcome")
         product_input = self._frame(products)
-        catalog = (product_input.to_dict("records") if product_input is not None else model["catalog"])
+        if population is not None:
+            from . import population_profiles, population_timing
+
+            population_rng = np.random.default_rng(np.random.SeedSequence(seed, spawn_key=(1,)))
+            for module in (population_profiles, population_timing):
+                runtime_hashes[module.__name__.rsplit(".", 1)[-1]] = hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
+        if product_input is not None:
+            catalog = product_input.to_dict("records")
+        elif population is not None:
+            catalog = population_profiles.make_catalog(population, population_rng)
+        else:
+            catalog = model["catalog"]
         required = {"product_id", "category_id", "unit_price_minor"}
         if not catalog or any(not required <= set(row) for row in catalog):
             raise ValueError("product input requires product_id/category_id/unit_price_minor in the model's declared currency")
@@ -194,7 +217,12 @@ class EcommerceSimulator:
             if isinstance(row["unit_price_minor"], bool) or not isinstance(row["unit_price_minor"], (int, np.integer)) or row["unit_price_minor"] <= 0:
                 raise ValueError("catalog prices must be positive integer minor amounts")
         products_by_id = {row["product_id"]: row for row in product_rows}
-        profiles = model["profiles"]
+        profiles = model.get("profiles", [])
+        if population is not None:
+            if any(len(group["component_probabilities"]) != len(latent_block["mixture_weights"])
+                   for group in population["home_groups"].values()):
+                raise ValueError("population group probabilities must match the fitted reward components")
+            model["home_groups"], draw_profile = population_profiles.prepare_population(population, product_rows, population_rng)
         checkout_kernel = model.get("checkout_kernel")
         if checkout_kernel is not None:
             if not checkout_episodes:
@@ -240,22 +268,46 @@ class EcommerceSimulator:
             path = Path(__file__).parents[1] / "irl" / "fit_joint_latent_shopping.py"
             runtime_hashes["fit_joint_latent_shopping"] = hashlib.sha256(path.read_bytes()).hexdigest()
         gaussian_path = self.settings.get("gaussian_reward_model_path")
+        gmm_path = self.settings.get("reward_gmm_model_path")
+        gmm_return_only = self.settings.get("reward_gmm_return_only", False)
+        if type(gmm_return_only) is not bool or (gmm_return_only and not gmm_path):
+            raise ValueError("reward_gmm_return_only requires a fitted GMM")
+        if gaussian_path and gmm_path:
+            raise ValueError("configure one continuous reward model at a time")
         gaussian_block = gaussian_bytes = gaussian_matrices = None
-        if gaussian_path:
+        if reward_path := gmm_path or gaussian_path:
             if latent_block is None or latent_return_offset is None or return_model_bytes is None:
-                raise ValueError("Gaussian reward synthesis requires a joint latent shopping and return model")
-            from simulate.v4.irl.fit_gaussian_rewards import sample_reward_policy, validate_gaussian
+                raise ValueError("continuous reward synthesis requires a joint latent shopping and return model")
             from simulate.v4.irl.fit_latent_shopping import unpack_matrices
-            gaussian_bytes = Path(gaussian_path).read_bytes()
+            gaussian_bytes = Path(reward_path).read_bytes()
             gaussian_block = json.loads(gaussian_bytes)
-            validate_gaussian(gaussian_block, hashlib.sha256(model_bytes).hexdigest(),
-                              hashlib.sha256(return_model_bytes).hexdigest())
-            if (gaussian_block["component_count"] != len(latent_block["mixture_weights"]) or
-                    gaussian_block["mixture_weights"] != latent_block["mixture_weights"]):
-                raise ValueError("Gaussian reward components differ from the frozen donor mixture")
-            gaussian_matrices = unpack_matrices(latent_block)
-            path = Path(__file__).parents[1] / "irl" / "fit_gaussian_rewards.py"
-            runtime_hashes["fit_gaussian_rewards"] = hashlib.sha256(path.read_bytes()).hexdigest()
+            bindings = (hashlib.sha256(model_bytes).hexdigest(), hashlib.sha256(return_model_bytes).hexdigest())
+            if gmm_path:
+                from simulate.v4.irl.reward_gmm import prepare_bellman, sample_reward as sample_gmm_reward, validate_gmm
+                if population is not None and gaussian_block.get("profile_posteriors"):
+                    raise ValueError("population GMM calibration cannot contain individual posteriors")
+                factors = validate_gmm(gaussian_block, *bindings)
+                module = "reward_gmm"
+            else:
+                from simulate.v4.irl.fit_gaussian_rewards import sample_reward_policy, validate_gaussian
+                validate_gaussian(gaussian_block, *bindings)
+                if (gaussian_block["component_count"] != len(latent_block["mixture_weights"]) or
+                        gaussian_block["mixture_weights"] != latent_block["mixture_weights"]):
+                    raise ValueError("Gaussian reward components differ from the frozen donor mixture")
+                module = "fit_gaussian_rewards"
+            if gmm_return_only:
+                from simulate.v4.irl import conditional_return
+
+                draw_return_offset = conditional_return.prepare_conditional_return(
+                    gaussian_block, latent_block["component_offsets"], latent_block["return_activity"]["component_logit_offsets"])
+                runtime_hashes["conditional_return"] = hashlib.sha256(Path(conditional_return.__file__).read_bytes()).hexdigest()
+            else:
+                gaussian_matrices = unpack_matrices(latent_block)
+                if gmm_path:
+                    gmm_policy = prepare_bellman(latent_block, gaussian_matrices)
+            path = Path(__file__).parents[1] / "irl" / f"{module}.py"
+            runtime_hashes[module] = hashlib.sha256(path.read_bytes()).hexdigest()
+        continuous_shopping = gaussian_block is not None and not gmm_return_only
         retention_mode = self.settings.get("retention_mode", "target")
         signup_mode = self.settings.get("signup_mode", "legacy_bounded_uniform")
         target = float(self.config["churn"]["target_rate"]) if retention_mode == "target" else None
@@ -277,6 +329,10 @@ class EcommerceSimulator:
             from simulate.v4.irl.fit_visit_timing import sample_session_offsets, validate_model
             visit_timing_bytes = Path(visit_timing_path).read_bytes()
             visit_timing_model = json.loads(visit_timing_bytes)
+            if population is not None:
+                if visit_timing_model.get("source_sample_sha256") != model["source"]["sample_sha256"]:
+                    raise ValueError("population shopping and visit timing must share the same source sample")
+                visit_timing_model = population_timing.materialize_visit_timing(visit_timing_model, model["source"])
             validate_model(visit_timing_model)
             if any(visit_timing_model["source"].get(k) != model["source"].get(k) for k in ("files", "sample_modulus")):
                 raise ValueError("visit timing must use the shopping model's exact native source sample")
@@ -302,6 +358,8 @@ class EcommerceSimulator:
                 continue
             content = Path(path).read_bytes()
             artifact = json.loads(content)
+            if population is not None:
+                artifact = population_timing.materialize_review_model(artifact)
             module = importlib.import_module(f"simulate.v4.simulator.{name}_events")
             getattr(module, f"validate_{name}_model")(artifact)
             event_models[name], event_modules[name] = artifact, module
@@ -324,6 +382,19 @@ class EcommerceSimulator:
             else:
                 high = coefficient
         response_weights = weights
+        coupon_effects = settings.get("coupon_effect_calibration")
+        if coupon_effects is not None:
+            from . import coupon_calibration
+            from simulate.v4.irl.fit_visit_timing import first_session_share
+
+            if purchase_response is None or visit_timing_model is None:
+                raise ValueError("coupon effect calibration requires coupon redemption and visit timing models")
+            coupon_calibration.validate_effect_calibration(coupon_effects, coupon_validity_days)
+            runtime_hashes["coupon_calibration"] = hashlib.sha256(Path(coupon_calibration.__file__).read_bytes()).hexdigest()
+            contact_until = t0 + pd.Timedelta(days=coupon_effects["contact_days"])
+            price_until = t0 + pd.Timedelta(days=coupon_effects["price_days"])
+            induced_purchase_weight = math.exp(np.clip(coupon_effects["induced_purchase_log_odds"], -40, 40))
+            price_purchase_weight = math.exp(np.clip(coupon_effects["price_purchase_log_odds"], -40, 40))
         coupon_use = float(coupon_model["groups"]["baseline"]["coupon_use_probability"]) if coupon_model else 0.0
         send_cost = int(settings.get("coupon_send_cost_minor", 100))
         if send_cost < 0:
@@ -451,7 +522,9 @@ class EcommerceSimulator:
             context = return_context([session["started_at"] for session in local["sessions"]], local["events"], as_of,
                                      purchase_item_units=quantities if checkout_episodes else None)
             value = float(_logit(return_probability(return_model, context)))
-            if gaussian_block is not None:
+            if gmm_return_only:
+                value += state["conditional_return_offset"]
+            elif continuous_shopping:
                 value += state["gaussian_reward"]["return_offset"]
             elif latent_return_offset is not None:
                 value += latent_return_offset(model, state["latent_reward_component"])
@@ -502,26 +575,33 @@ class EcommerceSimulator:
                     heapq.heappush(state["review_queue"], (at, len(state["review_diagnostics"]), detail))
             state["prior_orders"].append(purchased_at)
 
-        def user_segment(uid, profile, signed, lower, upper, probability, state, local, treatment=False):
+        def user_segment(uid, profile, signed, lower, upper, probability, state, local, treatment=False,
+                         baseline_probability=None):
             """Thirty-day activity with observed conditional session timing and choice."""
             flush_reviews(uid, state, local, lower)
-            active = rng.random() < probability
+            activity_draw = rng.random()
+            active = activity_draw < probability
+            induced_visit = baseline_probability is not None and activity_draw >= baseline_probability
             if lower <= signed < upper:
                 active = True
-            if not active:
+            baseline_active = baseline_probability is not None and activity_draw < baseline_probability
+            if not (active or baseline_active):
                 flush_reviews(uid, state, local, upper)
                 return
             scheduled = None
             if visit_timing_model is not None:
                 entry = lower <= signed < upper
                 prior_active = any(lower - pd.Timedelta(days=30) <= row["started_at"] < lower for row in local["sessions"])
-                offsets, scope = sample_session_offsets(visit_timing_model, profile["profile_id"], entry, prior_active, rng)
+                timing_key = profile["home_group"] if population is not None else profile["profile_id"]
+                offsets, scope = sample_session_offsets(visit_timing_model, timing_key, entry, prior_active, rng)
                 timing_scopes[scope] += 1
                 anchor = signed.normalize() if entry else lower
                 scheduled = [anchor + pd.Timedelta(seconds=value) for value in offsets]
                 scheduled = [at for at in scheduled if max(lower, signed) <= at < upper]
                 count = len(scheduled)
-                if not count:
+                # The contact changes the activity gate only for a potential first visit during the trial horizon.
+                if not count or (baseline_probability is not None and
+                                 not (active if scheduled[0] < contact_until else baseline_active)):
                     flush_reviews(uid, state, local, upper)
                     return
                 when = scheduled[0]
@@ -605,8 +685,8 @@ class EcommerceSimulator:
                         context.update(shopping_history.snapshot(when))
                         context["previous_action_run_length"] = previous_run_length
                     if latent_block is not None:
-                        probabilities = (causal_policy(model, context, state["latent_reward_component"],
-                                         state["gaussian_reward"]["policy"]) if gaussian_block is not None else
+                        probabilities = (causal_policy(model, context, None if gmm_path else state["latent_reward_component"],
+                                         state["gaussian_reward"]["policy"]) if continuous_shopping else
                                          causal_policy(model, context, state["latent_reward_component"]))
                     elif causal_policy is not None:
                         probabilities = causal_policy(model, context)
@@ -631,35 +711,45 @@ class EcommerceSimulator:
                     if causal_policy is None or termination_mode == "source_length":
                         probabilities["end"] = 0.0
                     actions = list(probabilities)
-                    p = np.array(list(probabilities.values()))
-                    response_record = state.get("coupon_response")
-                    response_ready = (purchase_response is not None and treatment and not state["coupon_used"]
-                                      and response_record["response_selected"]
-                                      and response_record["response_ready_at"] <= when < outcome_end)
-                    if not p.sum() and not response_ready:
+                    p = np.array(list(probabilities.values()), dtype=float)
+                    if not p.sum():
                         # An observed remove-only start with unknown initial cart cannot be fabricated in a complete empty-cart history.
                         limited = True
                         termination_reason = "infeasible_initial_action" if decision == 0 else "no_nonterminal_support"
                         break
-                    action = actions[int(rng.choice(len(actions), p=p / p.sum()))] if p.sum() else None
+                    gap_key = "choice_gap_seconds" if checkout_episodes else "event_gap_seconds"
+                    next_time, gap_rng_state = None, None
+                    if (coupon_effects is not None and treatment and t0 <= when < coupon_expires_at
+                            and (when < price_until or (induced_visit and when < contact_until))
+                            and (state["last_purchase"] is None or state["last_purchase"] < t0)):
+                        # Keep the seeded action draw before the gap while gating the odds at the emitted time.
+                        action_draw = rng.random()
+                        gap_rng_state = rng.bit_generator.state if decision and probabilities.get("end", 0.) else None
+                        gap = float(sample(profile, gap_key, [0.0])) if decision else 0.0
+                        next_time = when + pd.Timedelta(seconds=gap)
+                        purchase_index = actions.index("purchase")
+                        if induced_visit and next_time < contact_until:
+                            p[purchase_index] *= induced_purchase_weight
+                        if next_time < price_until:
+                            p[purchase_index] *= price_purchase_weight
+                        cdf = (p / p.sum()).cumsum()
+                        cdf /= cdf[-1]
+                        action = actions[cdf.searchsorted(action_draw, side="right")]
+                    else:
+                        action = actions[int(rng.choice(len(actions), p=p / p.sum()))]
                     if action == "end":
+                        if gap_rng_state is not None:
+                            rng.bit_generator.state = gap_rng_state
                         limited, termination_reason = False, "causal_policy_end"
                         break
-                    gap_key = "choice_gap_seconds" if checkout_episodes else "event_gap_seconds"
-                    gap = float(sample(profile, gap_key, [0.0])) if decision else 0.0
-                    next_time = when + pd.Timedelta(seconds=gap)
+                    if next_time is None:
+                        gap = float(sample(profile, gap_key, [0.0])) if decision else 0.0
+                        next_time = when + pd.Timedelta(seconds=gap)
                     if next_time >= upper or (scheduled is not None and next_time > session_upper):
                         limited, termination_reason = True, "scheduled_next_start" if session_upper < upper else "window_end"
                         break
                     flush_reviews(uid, state, local, next_time)
                     when, prior_gap = next_time, gap
-                    if (purchase_response is not None and treatment and not state["coupon_used"]
-                            and response_record["response_selected"]
-                            and response_record["response_ready_at"] <= when < outcome_end):
-                        # shortcut: O2O rates transfer to shopping opportunities, replace with coupon RCT calibration when available.
-                        response_record.update(opportunity_at=when, baseline_action=action,
-                                               promoted_purchase=action != "purchase")
-                        action = "purchase"
                     decision_offer = offer_seen
                     interaction_units = 1
                     if action == "view":
@@ -689,6 +779,8 @@ class EcommerceSimulator:
                     elif action == "purchase":
                         if checkout_episodes:
                             basket = checkout_basket(profile, state)
+                            if population is not None:
+                                basket = population_profiles.align_checkout_basket(basket, profile, products_by_id, rng)
                             held_units = sum(min(state["cart"][pid], quantity) for pid, quantity in basket.items())
                             interaction_units = sum(basket.values())
                             source = "cart" if held_units == interaction_units else "mixed" if held_units else "buy_now"
@@ -699,10 +791,11 @@ class EcommerceSimulator:
                         token = event("purchase", offer=decision_offer)
                         order_id = f"{uid}:O{state['purchases'] + 1}"
                         gross = sum(quantity * products_by_id[pid]["unit_price_minor"] for pid, quantity in basket.items())
+                        response_record = state.get("coupon_response")
                         use_coupon = (treatment and not state["coupon_used"]
                                       and (response_record["response_selected"] and response_record["response_ready_at"] <= when
                                            if purchase_response is not None else state["will_use_coupon"])
-                                      and t0 <= when < t0 + pd.Timedelta(days=30))
+                                      and t0 <= when < coupon_expires_at)
                         target_line, target_product = max(enumerate(basket, 1),
                             key=lambda item: (products_by_id[item[1]]["unit_price_minor"], -item[0]))
                         reduction = discount_minor(products_by_id[target_product]["unit_price_minor"], discount) if use_coupon else 0
@@ -740,7 +833,8 @@ class EcommerceSimulator:
                         state["coupon_used"] |= use_coupon
                         schedule_review(uid, state, when, token, order_id, basket)
                         if use_coupon and purchase_response is not None:
-                            response_record.update(coupon_used=True, purchase_event_id=token)
+                            response_record.update(opportunity_at=when, baseline_action="purchase",
+                                                   coupon_used=True, purchase_event_id=token)
                     if shopping_history is not None:
                         shopping_history.record_action(sid, when, action, quantity=interaction_units,
                             view_price_minor=price if action == "view" else None)
@@ -762,8 +856,11 @@ class EcommerceSimulator:
         donors = []
         candidates = 0
         while len(donors) < n_customers and candidates < max_candidates:
-            index = int(rng.integers(len(profiles)))
-            profile = profiles[index]
+            if population is not None:
+                index, profile = None, draw_profile(candidates)
+            else:
+                index = int(rng.integers(len(profiles)))
+                profile = profiles[index]
             uid = str(supplied.iloc[candidates].customer_id) if supplied is not None else f"U{len(donors) + 1:07d}"
             if supplied is not None:
                 signed = pd.Timestamp(supplied.iloc[candidates].signed_up_at)
@@ -782,12 +879,24 @@ class EcommerceSimulator:
                      "price_sum": 0, "price_count": 0, "reference_price": None, "first_event_at": None,
                      "will_use_coupon": rng.random() < coupon_use}
             if latent_sampler is not None:
-                component, scope = latent_sampler(model, profile["profile_id"], rng)
+                if gmm_path and continuous_shopping:
+                    component, scope, state["gaussian_reward"] = sample_gmm_reward(
+                        gaussian_block, factors, gmm_policy, profile["profile_id"], rng)
+                else:
+                    if population is not None:
+                        probabilities = profile["component_probabilities"]
+                        component = int(rng.choice(len(probabilities), p=probabilities))
+                        scope = "synthetic_population_group"
+                    else:
+                        component, scope = latent_sampler(model, profile["profile_id"], rng)
+                    if gmm_return_only:
+                        state["conditional_return_offset"] = draw_return_offset(
+                            component, auxiliary_rng(f"{uid}:{candidates}", "conditional_return"))
+                    elif continuous_shopping:
+                        state["gaussian_reward"] = sample_reward_policy(model, gaussian_block, component, rng,
+                                                                        matrices=gaussian_matrices)
                 state.update(latent_reward_component=component, latent_assignment_scope=scope,
                              shopping_history=ShoppingHistory(start))
-                if gaussian_block is not None:
-                    state["gaussian_reward"] = sample_reward_policy(model, gaussian_block, component, rng,
-                                                                    matrices=gaussian_matrices)
             state.update(review_rng=auxiliary_rng(uid, "review"),
                          reviews=[], prior_orders=[], review_queue=[], review_diagnostics=[])
             local = {key: [] for key in ("sessions", "events", "orders", "order_items")}
@@ -800,7 +909,7 @@ class EcommerceSimulator:
             for lower, upper in reversed(windows):
                 probability = float(_sigmoid(source_return_logit(local, index, lower, state) + history_shift))
                 user_segment(uid, profile, signed, lower, upper, probability, state, local)
-            eligible = any(row["started_at"] >= t0 - pd.Timedelta(days=30) for row in local["sessions"])
+            eligible = any(eligibility_start <= row["started_at"] < t0 for row in local["sessions"])
             candidates += 1
             if not eligible:
                 del session_diagnostic_rows[old_diagnostics_size:]
@@ -814,11 +923,25 @@ class EcommerceSimulator:
             raise ValueError("unable to populate the eligible active-customer panel")
         snapshot_logits = np.array([source_return_logit(local, index, t0, state) for _, index, _, _, state, local in donors])
         outcome_shift = _calibration(snapshot_logits, target) if target is not None else 0.
+        if coupon_effects is not None:
+            contact_keys = [profile["home_group"] if population is not None else profile["profile_id"]
+                            for _, _, profile, _, _, _ in donors]
+            contact_shares = {key: first_session_share(visit_timing_model, key, True, coupon_effects["contact_days"])
+                              for key in sorted(set(contact_keys))}
+            support = coupon_calibration.calibrate_contact_support(
+                snapshot_logits + outcome_shift, np.array([contact_shares[key] for key in contact_keys]),
+                support, response_weights, coupon_effects["contact_visit_lift"])
         assignments = np.array([1] * (n_customers // 2) + [0] * (n_customers - n_customers // 2))
         rng.shuffle(assignments)
         for treatment, (uid, index, profile, signed, state, local), snapshot_logit in zip(assignments, donors, snapshot_logits):
+            if coupon_effects is not None:
+                rng = auxiliary_rng(uid, "coupon-calibrated-outcome")
             if purchase_response is not None:
-                record = sample_coupon_response(purchase_response, seed, uid, t0, state["last_purchase"])
+                if coupon_effects is None:
+                    record = sample_coupon_response(purchase_response, seed, uid, t0, state["last_purchase"])
+                else:
+                    record = sample_coupon_response(purchase_response, seed, uid, t0, state["last_purchase"],
+                                                    odds_multiplier=coupon_effects["redemption_odds_multiplier"])
                 record.update(treatment=int(treatment), coupon_id=f"{uid}:C1" if treatment else None)
                 state["coupon_response"] = record
                 coupon_response_rows.append(record)
@@ -827,35 +950,46 @@ class EcommerceSimulator:
             coupon_id = f"{uid}:C1" if treatment else None
             if treatment:
                 frames["coupons"].append({"coupon_id": coupon_id, "customer_id": uid, "sent_at": t0,
-                    "expires_at": outcome_end, "discount_rate": discount, "policy_id": "one_coupon_10pct_highest_unit_30d",
+                    "expires_at": coupon_expires_at, "discount_rate": discount, "policy_id": coupon_policy,
                     "send_cost_minor": send_cost})
             treatment_rows.append({"customer_id": uid, "as_of_at": t0, "assigned_at": t0,
-                "treatment": int(treatment), "assignment_probability": 0.5, "experiment_id": "coupon_once_highest_unit_30d",
+                "treatment": int(treatment), "assignment_probability": 0.5, "experiment_id": experiment_policy,
                 "coupon_id": coupon_id, "actual_sent": bool(treatment), "sent": bool(treatment),
                 "send_cost_minor": send_cost if treatment else 0,
-                "intervention_spec": "one 10% coupon at t0 on the highest-unit-price purchased unit, valid 30d, no later sending"})
+                "intervention_spec": f"one 10% coupon at t0 on the highest-unit-price purchased unit, valid {coupon_validity_days}d, no later sending"})
             window = t0
             while window < end:
                 upper = min(window + pd.Timedelta(days=30), end)
                 baseline_logit = snapshot_logit if window == t0 else source_return_logit(local, index, window, state)
                 probability = float(_sigmoid(baseline_logit + outcome_shift + (shift if treatment and window == t0 else 0)))
-                user_segment(uid, profile, signed, window, upper, probability, state, local, bool(treatment))
+                baseline_probability = (float(_sigmoid(baseline_logit + outcome_shift))
+                                        if coupon_effects is not None and treatment and window == t0 else None)
+                user_segment(uid, profile, signed, window, upper, probability, state, local, bool(treatment),
+                             baseline_probability=baseline_probability)
                 window = upper
             flush_reviews(uid, state, local, end)
             frames["customers"].append({"customer_id": uid, "signed_up_at": signed})
             for key in local:
                 frames[key].extend(local[key])
             review_diagnostic_rows.extend(state["review_diagnostics"])
+            response_type = response if coupon_effects is None else (0 if shift > 0 else 2 if shift < 0 else 1)
+            baseline_return = float(_sigmoid(snapshot_logit + outcome_shift))
+            coupon_return = float(_sigmoid(snapshot_logit + outcome_shift + shift))
+            if coupon_effects is not None:
+                key = profile["home_group"] if population is not None else profile["profile_id"]
+                coupon_return = baseline_return + (coupon_return - baseline_return) * contact_shares[key]
             diagnostic_rows.append({"customer_id": uid, "source_profile_id": profile["profile_id"],
                 "home_persona": profile["home_group"],
-                "response_type": ("P" if response == 0 else "SD" if response == 2 else "ST" if snapshot_logit > np.median(snapshot_logits) else "LC"),
-                "no_coupon_return_probability_30d": float(_sigmoid(snapshot_logit + outcome_shift)),
-                "coupon_return_probability_30d": float(_sigmoid(snapshot_logit + outcome_shift + shift)),
+                "response_type": ("P" if response_type == 0 else "SD" if response_type == 2 else "ST" if snapshot_logit > np.median(snapshot_logits) else "LC"),
+                "no_coupon_return_probability_30d": baseline_return,
+                "coupon_return_probability_30d": coupon_return,
                 "intervention_logit_shift": shift})
             if latent_sampler is not None:
                 diagnostic_rows[-1].update(latent_reward_component=state["latent_reward_component"],
                                           latent_assignment_scope=state["latent_assignment_scope"])
-            if gaussian_block is not None:
+            if gmm_return_only:
+                diagnostic_rows[-1]["conditional_return_logit_offset"] = state["conditional_return_offset"]
+            if continuous_shopping:
                 draw = state.pop("gaussian_reward")
                 diagnostic_rows[-1].update({f"gaussian_reward_offset_{action}": float(value)
                                            for action, value in zip(("view", "cart", "remove", "purchase"), draw["action_offsets"])})
@@ -899,8 +1033,8 @@ class EcommerceSimulator:
                 "future_retained": int(uid in active), "future_revenue_30d": int(revenue30.get(uid, 0)),
                 "future_revenue": int(revenue30.get(uid, 0)),
                 "future_revenue_12m": int(revenue12.get(uid, 0)) if end >= clv_end and not row["treatment"] else None,
-                "clv_outcome_end_at": clv_end, "definition_id": "future_no_session_30d_active30d",
-                "policy_id": "one_coupon_10pct_highest_unit_30d" if row["treatment"] else "no_new_coupon",
+                "clv_outcome_end_at": clv_end, "definition_id": generation_definition,
+                "policy_id": coupon_policy if row["treatment"] else "no_new_coupon",
                 "is_censored": False, "observation_status": "complete"})
         tables.update(labels=pd.DataFrame(labels), treatments=pd.DataFrame(treatment_rows),
                       diagnostics=pd.DataFrame(diagnostic_rows), session_diagnostics=pd.DataFrame(session_diagnostic_rows))
@@ -919,9 +1053,15 @@ class EcommerceSimulator:
             unit_tag += "-source-length"
         if visit_timing_model is not None:
             unit_tag += "-joint-timing"
-        if gaussian_block is not None:
+        if population is not None:
+            unit_tag += "-population"
+        if gmm_return_only:
+            unit_tag += "-gmm-return"
+        elif gmm_path:
+            unit_tag += "-gmm"
+        elif continuous_shopping:
             unit_tag += "-gaussian"
-        version = 11 if gaussian_block is not None else 10 if latent_return_offset is not None else 9 if latent_block is not None else 8 if causal_policy is not None else 7 if "review" in event_models else 6 if donor_prior is not None or checkout_kernel is not None or retention_mode == "source" else 5
+        version = 12 if gmm_path and continuous_shopping else 11 if continuous_shopping else 10 if latent_return_offset is not None else 9 if latent_block is not None else 8 if causal_policy is not None else 7 if "review" in event_models else 6 if donor_prior is not None or checkout_kernel is not None or retention_mode == "source" else 5
         metadata = {"schema_version": 7, "raw_schema_version": 5 if "review" in event_models else 4,
             "dataset_id": f"cosmetics-source-v{version}-six-event-{unit_tag}-{mode}-{months}m-seed{seed}",
             "seed": seed, "months": months, "currency": model["currency"], "amount_unit": model["minor_unit"],
@@ -932,10 +1072,12 @@ class EcommerceSimulator:
             "configured_target_churn_rate": self.config["churn"].get("target_rate"),
             "start_at": start.isoformat(), "end_at": end.isoformat(),
             "observation_start_at": start.isoformat(), "observation_end_at": end.isoformat(), "as_of_at": t0.isoformat(),
-            "definition_id": "future_no_session_30d_active30d", "policy_id": "coupon_once_highest_unit_30d",
+            "definition_id": generation_definition, "policy_id": experiment_policy,
+            "eligibility_window_days": eligibility_days, "coupon_validity_days": coupon_validity_days,
             "target_churn_rate": target, "expected_control_churn_rate": float(np.mean(1 - _sigmoid(snapshot_logits + outcome_shift))),
             "observed_churn_rate": observed, "history_logit_shift": history_shift, "outcome_logit_shift": outcome_shift,
-            "candidate_customers": candidates, "eligible_customers": n_customers, "eligibility": "session in [t0-30d,t0), selection uses history only",
+            "candidate_customers": candidates, "eligible_customers": n_customers,
+            "eligibility": f"session in [t0-{eligibility_days}d,t0), selection uses history only",
             "model_path": str(self.model_path), "model_sha256": hashlib.sha256(model_bytes).hexdigest(),
             "return_model_path": return_model_path,
             "return_model_sha256": hashlib.sha256(return_model_bytes).hexdigest() if return_model_bytes else None,
@@ -962,7 +1104,13 @@ class EcommerceSimulator:
             "latent_shopping": ({"type": latent_block["type"], "discount": latent_block["discount"],
                 "regularization": latent_block["regularization"], "state_count": latent_block["state_count"],
                 "mixture_weights": latent_block["mixture_weights"], "feature_names": latent_block["feature_names"],
-                "assignment": ("one persistent private component per synthetic customer; full observed source donor trait reconstruction, not heldout forecasting"
+                "assignment": ("discrete shopping component with a GMM return draw conditioned on its action offsets"
+                               if gmm_return_only else
+                               "frozen parent dynamics; active reward mixture is specified by reward_gmm"
+                               if gmm_path else
+                               "one persistent component drawn from the synthetic profile group's aggregate mixture"
+                               if population is not None else
+                               "one persistent private component per synthetic customer; full observed source donor trait reconstruction, not heldout forecasting"
                                if latent_block.get("profile_posterior_assignment_scope") == "source_observation_trait_posterior"
                                else "one persistent private component per customer; train-prefix profile posterior or source population prior"),
                 "posterior_bank_scope": latent_block.get("posterior_bank_scope"),
@@ -976,7 +1124,8 @@ class EcommerceSimulator:
             "latent_return_activity": (latent_block["return_activity"] if latent_return_offset is not None else None),
             "visit_timing": ({"model_path": str(visit_timing_path), "model_sha256": hashlib.sha256(visit_timing_bytes).hexdigest(),
                 "type": visit_timing_model["type"], "scope_counts_all_attempts": dict(timing_scopes),
-                "clock": "native joint 30d start offsets; entry first-observed-day UTC anchor; regular windows KST midnight; partial windows clipped without resampling",
+                "clock": ("synthetic 30d schedules generated from population histograms; partial windows clipped without resampling"
+                          if population is not None else "native joint 30d start offsets; entry first-observed-day UTC anchor; regular windows KST midnight; partial windows clipped without resampling"),
                 "collision": "ties retained; later scheduled start right-censors earlier shopping choices; no time compression"}
                 if visit_timing_model is not None else None),
             "shopping_session_termination": {"mode": termination_mode,
@@ -990,7 +1139,8 @@ class EcommerceSimulator:
             "event_models": event_provenance,
             "review_generation": {"clock": "asynchronous, purchased-product-linked, no shopping session", "rating_kind": "product_star_scenario",
                 "uniqueness": "one review per purchase_event_id/product_id; purchased quantity does not multiply reviews",
-                "schedule_unit": "one Olist response/delay draw per order; responded order expands to its purchased products",
+                "schedule_unit": ("one response and binned delay draw per order; responded order expands to its purchased products"
+                                  if population is not None else "one Olist response/delay draw per order; responded order expands to its purchased products"),
                 "assumption": "Olist survey scheduling transported to all purchased products and Amazon conditional stars are separate components; per-product response propensity and their joint distribution are not observed"},
             "coupon_application": {
                 "scope": "one purchased unit", "selection": "highest unit_price_minor; ties choose lowest line_no",
@@ -1002,7 +1152,7 @@ class EcommerceSimulator:
             "simulator_code_sha256": simulator_sha,
             "runtime_code_sha256": runtime_hashes,
             "configuration_sha256": hashlib.sha256(json.dumps(self.config, sort_keys=True).encode()).hexdigest(),
-            "marketing_effect_source": "Hillstrom randomized 14d email mean transferred to 30d coupon scenario; latent signs are MaxEnt decomposition, not identified individual effects",
+            "marketing_effect_source": "Hillstrom randomized 14d email mean transferred to the 30d visit window; latent signs are MaxEnt decomposition, not identified individual effects",
             "marketing_proxy_sha256": hashlib.sha256(message_path.read_bytes()).hexdigest(),
             "coupon_takeup_source": "dunnhumby targeted descriptive baseline; cross-domain transfer assumption",
             "coupon_model_sha256": hashlib.sha256(response_bytes if response_bytes else coupon_path.read_bytes()).hexdigest(),
@@ -1011,8 +1161,9 @@ class EcommerceSimulator:
                 "source": purchase_response.get("source"),
                 "type": "observational_response_scenario", "window_days": 30,
                 "cohort_clock": "purchase history strictly before sending; no observed purchase is not never purchased",
-                "mechanism": "one keyed response draw per coupon; first actual shopping decision at/after sampled source redemption day becomes purchase",
-                "probability_scope": "source receipts transferred to a shopping opportunity; realized redemption can be lower when no eligible opportunity occurs",
+                "mechanism": "one keyed response draw per coupon, applied only at an eligible purchase sampled from the shopping policy",
+                "requires_policy_purchase": True,
+                "probability_scope": "source receipt rates and response timing transferred to already sampled eligible purchases",
                 "replaces": "dunnhumby will_use_coupon gate; no multiplication of response rates",
                 "causal_effect_identified": False, "full_purchase_counterfactual_replay": False,
                 "response_type_scope": "ST/P/SD/LC remain Hillstrom visit-proxy diagnostics, not purchase effect types",
@@ -1021,17 +1172,25 @@ class EcommerceSimulator:
             "checkout_template_scope_counts": dict(checkout_scopes),
             "checkout_generation": ({"type": checkout_kernel["type"], "loc": checkout_kernel["loc"],
                 "scale": checkout_kernel["scale"], "training_transitions": checkout_kernel["training_transitions"],
-                "profile_bank": "observed template frequencies without replacement; source pool after exhaustion",
-                "pool": "source templates conditioned on observed size and fitted log unit-mean price transitions",
+                "profile_bank": ("synthetic checkout templates" if population is not None
+                                 else "observed template frequencies without replacement; source pool after exhaustion"),
+                "pool": ("generated group baskets conditioned on calibrated size and fitted log unit-mean price transitions"
+                         if population is not None else "source templates conditioned on observed size and fitted log unit-mean price transitions"),
                 "meaning": "finite evidence bank, not product stock or a lifetime personal assortment"}
                 if checkout_kernel is not None else {"type": "iid_observed_donor_templates"}),
             "sampling_diagnostic_scope": "all generation attempts, including rejected enrollment histories; not factual event counts",
             "item_choice_scope_counts": dict(item_choice_scopes),
             "item_choice_fallback_counts": dict(item_choice_fallbacks),
-            "item_choice_type": item_kernel.get("type") if item_kernel else "fixed donor all-action top16 product frequencies",
+            "item_choice_type": ("synthetic customer SKU preferences" if population is not None else
+                                 item_kernel.get("type") if item_kernel else "fixed donor all-action top16 product frequencies"),
             "purchase_proxy": model.get("checkout_episode_definition") if checkout_episodes else "whole cart or one direct item; source has no verified orders",
-            "assumptions": ["native Cosmetics currency not documented; no KRW conversion", "fixed product price is positive observed source mode",
-                ("initial cart empty; observed checkout templates consume matching held units and preserve the rest; rows are unit proxies, not verified source quantities"
+            "assumptions": ["native Cosmetics currency not documented; no KRW conversion",
+                ("prices are fixed by the supplied product catalog" if product_input is not None
+                 else "synthetic SKU prices are sampled from aggregate price bins" if population is not None
+                 else "fixed product price is positive observed source mode"),
+                ("initial cart empty; generated checkout baskets consume matching held units and preserve the rest"
+                 if population is not None else
+                 "initial cart empty; observed checkout templates consume matching held units and preserve the rest; rows are unit proxies, not verified source quantities"
                  if checkout_episodes else "initial cart empty; additions one unit; cart purchases checkout the whole basket"), "first observed event is not an actual source signup",
                 "signup is supplied or structural uniform sampling, not verified source signup; lifecycle ENTRY/HOME/EXIT uses observed sessions and elapsed 28-day inactivity only",
                 ("30d activity windows and retention calibration alter absolute source visit rates" if target is not None
@@ -1041,14 +1200,43 @@ class EcommerceSimulator:
                  "first actions and END use the source-fitted causal reward policy; no posthoc donor weighting or forced donor length"
                  if causal_policy is not None else "first actions and session termination sample observed donor frequencies/lengths; MNL models subsequent nonterminal choices"),
                 "the offer context is a last-view proxy; remove-only starts with unknown initial cart end without fabricated actions",
-                ("active windows use source joint count/time templates; five-month patterns extrapolate to longer runs"
+                ("active windows generate fresh timing patterns from fitted population summaries"
+                 if population is not None else
+                 "active windows use source joint count/time templates; five-month patterns extrapolate to longer runs"
                  if visit_timing_model is not None else "active-window timing is bounded observed idle gaps; five-month patterns extrapolate to longer runs"),
-                "email-to-coupon, 14d-to-30d and individual response decomposition are scenarios", "send cost is declared policy cost, not a measured source cost"],
+                ("experimental contact and price contrasts are transferred scenarios; direct effects end at the respective study horizons"
+                 if coupon_effects is not None else "email-to-coupon, 14d-to-30d and individual response decomposition are scenarios"),
+                "send cost is declared policy cost, not a measured source cost"],
             "table_rows": {name: len(frame) for name, frame in tables.items()}}
+        if population is not None:
+            metadata["profile_generation"] = "synthetic_population"
+        if coupon_effects is not None:
+            metadata["coupon_effect_calibration"] = {**coupon_effects, "visit_logit_shifts": support.tolist()}
+            metadata["marketing_effect_source"] = "Hillstrom randomized contact risk difference, transferred to the configured contact horizon"
+            metadata["coupon_purchase_response"].update(
+                mechanism="calibrated shopping purchase odds, with separate Tianchi redemption draws on generated purchases",
+                probability_scope="Tianchi purchase-history odds and delay shape, scaled to trial redemption among buyers",
+                response_type_scope="visit shifts remain a latent scenario; no identified purchase effect types",
+            )
         if purchase_response is not None:
-            metadata["coupon_takeup_source"] = "Tianchi O2O observed 30d redemption by purchase history; scenario transfer, not causal uplift"
+            metadata["coupon_takeup_source"] = (
+                "Tianchi timing and recency odds scaled to a trial redemption share among purchasers"
+                if coupon_effects is not None else
+                "Tianchi O2O observed 30d redemption by purchase history; scenario transfer, not causal uplift"
+            )
             metadata["coupon_model_sha256"] = hashlib.sha256(response_bytes).hexdigest()
-        if gaussian_block is not None:
+        if gmm_path:
+            metadata["reward_gmm"] = {
+                "model_path": str(gmm_path), "model_sha256": hashlib.sha256(gaussian_bytes).hexdigest(),
+                "type": gaussian_block["type"], "means": gaussian_block["means"], "covariances": gaussian_block["covariances"],
+                "parameter_names": gaussian_block["parameter_names"], "mixture_weights": gaussian_block["mixture_weights"],
+                "assignment": ("one persistent GMM return draw conditional on the discrete shopping reward"
+                               if gmm_return_only else
+                               "one draw per customer using learned GMM source-donor posterior or population prior"
+                               if gaussian_block.get("profile_posteriors") else
+                               "one draw per customer using learned GMM population prior"),
+                "visibility": "individual offsets occur only in private diagnostics"}
+        elif gaussian_block is not None:
             metadata["gaussian_reward"] = {
                 "model_path": str(gaussian_path), "model_sha256": hashlib.sha256(gaussian_bytes).hexdigest(),
                 "type": gaussian_block["type"], "means": gaussian_block["means"], "variances": gaussian_block["variances"],
@@ -1060,7 +1248,9 @@ class EcommerceSimulator:
         identity = {key: metadata.get(key) for key in ("configuration_sha256", "model_sha256", "return_model_sha256",
             "coupon_model_sha256", "marketing_proxy_sha256", "runtime_code_sha256", "event_models", "visit_timing",
             "seed", "months", "start_at", "end_at")}
-        if gaussian_block is not None:
+        if gmm_path:
+            identity["reward_gmm_model_sha256"] = metadata["reward_gmm"]["model_sha256"]
+        elif gaussian_block is not None:
             identity["gaussian_reward_model_sha256"] = metadata["gaussian_reward"]["model_sha256"]
         identity["n_customers"] = n_customers
         identity["products_input_sha256"] = hashlib.sha256(pd.util.hash_pandas_object(
@@ -1081,5 +1271,6 @@ class EcommerceSimulator:
         metadata["table_rows"] = {name: len(frame) for name, frame in tables.items()}
         tables, metadata = redefine_outcomes(
             tables, metadata, outcome_days=self.settings.get("outcome_days", 28), shopping_model=model,
+            eligibility_days=eligibility_days,
             **({"visit_timing_model": visit_timing_model} if visit_timing_model is not None else {}))
         return SimulationResult(tables, time.perf_counter() - started, metadata)
