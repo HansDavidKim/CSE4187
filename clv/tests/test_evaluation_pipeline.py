@@ -147,3 +147,71 @@ def test_api_run_and_cli(raw_dir, tmp_path, capsys):
                     "--model-dir", str(tmp_path / "api"), "--output", str(tmp_path / "cli.csv")])
     assert summary["customers"] == result["predicted_customers"]
     capsys.readouterr()
+
+
+def test_history_segments_use_the_same_customer_split(trained, raw_dir):
+    """이력 완전·미완전 고객은 하나의 분할을 나눠 쓴다. 완전 구간 지표는 기본 Test 지표와 같다."""
+    output, registry = trained
+    evaluation = json.loads((output / "reports" / "evaluation.json").read_text())
+    segments = evaluation["by_history"]["test"]
+    assert segments["complete"]["customers"] + segments["incomplete"]["customers"] == \
+        registry["split_counts_all_labelled"]["test"]
+    assert segments["incomplete"]["customers"] > 1 and registry["split_counts"]["test"] == segments["complete"]["customers"]
+    for name in registry["trained_models"]:
+        assert segments["complete"]["models"][name]["mae"] == pytest.approx(evaluation["test"]["models"][name]["mae"])
+        assert registry["test_metrics_by_history"]["incomplete"][name]["n"] == segments["incomplete"]["customers"]
+    splits = pd.read_csv(output / "splits.csv", dtype={"customer_id": str})
+    assert {"history_complete", "training_population"} <= set(splits.columns)
+    assert len(splits) == sum(registry["split_counts_all_labelled"].values())
+    report = evaluate(raw_dir / "features", raw_dir / "dataset", output)
+    assert report["by_history"]["incomplete"]["customers"] == segments["incomplete"]["customers"]
+
+
+def test_all_history_training_keeps_the_same_split(trained, raw_dir, tmp_path):
+    """require_complete_history=False여도 고객 분할은 같고, 학습 대상만 정답 고객 전체로 넓어진다."""
+    output, registry = trained
+    wide = train(raw_dir / "features", raw_dir / "dataset", tmp_path / "wide",
+                 CLVConfig.from_dict({**FAST, "require_complete_history": False}))
+    narrow_splits = pd.read_csv(output / "splits.csv", dtype={"customer_id": str})
+    wide_splits = pd.read_csv(tmp_path / "wide" / "splits.csv", dtype={"customer_id": str})
+    pd.testing.assert_series_equal(narrow_splits["split"], wide_splits["split"])
+    assert wide_splits["training_population"].all()
+    assert wide["split_counts"] == wide["split_counts_all_labelled"] == registry["split_counts_all_labelled"]
+
+
+def test_baseline_ratios_and_bgnbd_sensitivity_report(trained):
+    output, registry = trained
+    evaluation = json.loads((output / "reports" / "evaluation.json").read_text())
+    models = evaluation["test"]["models"]
+    assert models["baseline"]["vs_baseline"] == {"mae_ratio": 1.0, "rmse_ratio": 1.0}
+    assert models["xgboost"]["vs_baseline"]["mae_ratio"] == pytest.approx(models["xgboost"]["mae"] / models["baseline"]["mae"])
+    table = pd.read_csv(output / "reports" / "bgnbd_sensitivity.csv")
+    assert table["bgnbd_penalizer"].tolist() == list(CLVConfig().bgnbd_sensitivity_penalizers)
+    configured = table.loc[table["configured"]].iloc[0]
+    params = registry["model_details"]["bgnbd_gg"]["bgnbd"]["params"]
+    for name in ("r", "alpha", "a", "b"):
+        assert configured[name] == pytest.approx(params[name])
+    assert configured["spearman_vs_configured"] == pytest.approx(1.0)
+
+
+def test_bgnbd_violating_a_required_condition_is_rejected(raw_dir, tmp_path, monkeypatch):
+    """Gamma-Gamma q <= 1이면 BG/NBD + GG를 rejected로 기록하고 저장·평가·최종 선택에서 뺀다."""
+    from clv.probabilistic import GammaGamma
+
+    original = GammaGamma.fit
+
+    def broken_fit(self, frequency, monetary_value, penalizer=0.0):
+        info = original(self, frequency, monetary_value, penalizer)
+        self.params = {**self.params, "q": 0.9}
+        return info
+
+    monkeypatch.setattr(GammaGamma, "fit", broken_fit)
+    registry = train(raw_dir / "features", raw_dir / "dataset", tmp_path / "clv",
+                     CLVConfig.from_dict({**FAST, "bgnbd_sensitivity_penalizers": []}))
+    assert registry["model_status"]["bgnbd_gg"].startswith("rejected: Gamma-Gamma q = 0.9")
+    assert "bgnbd_gg" not in registry["trained_models"] and registry["final_model"] != "bgnbd_gg"
+    assert registry["model_details"]["bgnbd_gg"]["rejections"]
+    assert not (tmp_path / "clv" / "models" / "bgnbd_gg.json").exists()
+    evaluation = json.loads((tmp_path / "clv" / "reports" / "evaluation.json").read_text())
+    assert "bgnbd_gg" not in evaluation["test"]["models"]
+    assert not (tmp_path / "clv" / "reports" / "bgnbd_sensitivity.csv").exists()

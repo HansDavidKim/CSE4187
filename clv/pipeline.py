@@ -3,9 +3,10 @@
 ``output_dir``(기본 ``results/clv``) 아래 산출물::
 
     registry.json            기준시점, 계약, 설정, 모델 상태, 최종 모델
-    splits.csv               customer_id -> train/validation/test
+    splits.csv               customer_id -> train/validation/test, 이력 완전 여부, 학습 대상 여부
     models/                  baseline.json, bgnbd_gg.json, xgboost/{xgboost_model,xgboost_meta}.json
-    reports/                 입력 검증, 적격 기준시점, 평가, 10분위, Top-N, 정답 포함 예측
+    reports/                 입력 검증, 적격 기준시점, 평가(이력 구간별 포함), 10분위, Top-N,
+                             BG/NBD 벌점 민감도, 정답 포함 예측
 """
 from __future__ import annotations
 
@@ -20,10 +21,12 @@ from .adapter import adapt_orders, adapt_weekly, load_orders, load_weekly
 from .baseline import BaselineModel
 from .config import CLVConfig
 from .dataset import SPLITS, build_dataset, complete_grid, find_eligible_cutoffs, labeled_rows, select_cutoff, split_customers
-from .evaluation import decile_table, evaluate_predictions, ranks, top_flags, top_n_table
+from .evaluation import (
+    decile_table, evaluate_by_history, evaluate_predictions, ranks, regression_metrics, top_flags, top_n_table,
+)
 from .features import WEEK, build_features, fully_observed, to_cutoff
 from .io import read_json, write_json
-from .probabilistic import ProbabilisticCLV
+from .probabilistic import MAX_NUMERICAL_FAILURE_SHARE, ProbabilisticCLV
 from .schema import (
     HIGH_VALUE_COLUMN, INPUT_WEEKS, LABEL_COLUMN, LABEL_WEEKS, OUTPUT_COLUMNS, PREDICTION_COLUMN, PREDICTOR_FEATURES,
 )
@@ -136,12 +139,56 @@ def _dataset_summary(dataset: pd.DataFrame, labelled: pd.DataFrame, cutoff) -> d
     }
 
 
+def _bgnbd_sensitivity(config: CLVConfig, orders, t0, parts: dict, reference) -> pd.DataFrame:
+    """BG/NBD 벌점만 바꿔 Train 고객으로 다시 적합하고 모수·Validation 지표·순위 변화를 표로 만든다.
+
+    보고용이다. 선택 모델은 ``config.bgnbd_penalizer``로 적합한 모델 그대로 둔다.
+    ``reference``는 그 선택 모델의 Validation 예측값(순위상관 비교 기준)이다.
+    """
+    train_ids = parts["train"]["customer_id"]
+    train_labels = parts["train"].set_index("customer_id")[LABEL_COLUMN]
+    validation = parts["validation"]
+    rows = []
+    for penalizer in config.bgnbd_sensitivity_penalizers:
+        row = {"bgnbd_penalizer": penalizer, "configured": penalizer == config.bgnbd_penalizer}
+        try:
+            model = ProbabilisticCLV(config.calibration, config.transaction_period, config.no_purchase_fallback,
+                                     penalizer, config.gg_penalizer).fit(orders, t0, train_ids, labels=train_labels)
+        except (ValueError, RuntimeError) as error:
+            rows.append({**row, "error": str(error)})
+            continue
+        diagnostics = model.diagnostics
+        row.update(model.bgnbd.params)
+        row.update(mean_dropout_probability=diagnostics["mean_dropout_probability"],
+                   dropout_concentration=diagnostics["dropout_concentration"],
+                   converged=diagnostics["checks"]["bgnbd_converged"],
+                   rejected="; ".join(diagnostics["rejections"]) or None)
+        if len(validation) > 1:
+            predicted = model.predict(orders, t0, validation["customer_id"])["predicted_clv_12m"].to_numpy(dtype=float)
+            metrics = regression_metrics(validation[LABEL_COLUMN], predicted)
+            row.update(validation_mae=metrics["mae"], validation_rmse=metrics["rmse"],
+                       validation_mean_predicted=metrics["mean_predicted"],
+                       spearman_vs_configured=float(pd.Series(predicted).corr(pd.Series(reference), method="spearman")))
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _split_counts(frame: pd.DataFrame) -> dict:
+    """분할별 고객 수(없는 분할은 0)."""
+    return frame["split"].value_counts().reindex(SPLITS).fillna(0).astype(int).to_dict()
+
+
 def train(weekly, orders=None, output_dir: str | Path = "results/clv", config: CLVConfig | None = None,
           cutoff=None, strict: bool = True, **input_options) -> dict:
     """한 기준시점에서 Baseline, BG/NBD + Gamma-Gamma, XGBoost를 학습하고 평가한다.
 
     실행할 수 없는 모델(원장 없음, xgboost 미설치, 구매 고객 부족)은 중단하지 않고
-    사유와 함께 skipped/failed로 기록하며, 그 모델의 지표는 만들지 않는다.
+    사유와 함께 skipped/failed로 기록하며, 그 모델의 지표는 만들지 않는다. BG/NBD + GG가 필수
+    적용 조건(수렴, ``q > 1``, 수치 안정성)을 어기면 rejected로 기록하고 저장·평가·최종 선택에서 뺀다.
+
+    분할은 정답이 있는 모든 고객에 대해 만든다. 학습·모델 선택·기본 평가는 학습 대상
+    (``require_complete_history``이면 13주 이력 완전 고객)만 쓰고, 이력 완전/미완전 구간별 평가를
+    ``evaluation["by_history"]``에 따로 남긴다.
 
     Returns:
         저장한 registry(기준시점, 모델 상태, 최종 모델, 지표).
@@ -152,21 +199,28 @@ def train(weekly, orders=None, output_dir: str | Path = "results/clv", config: C
     cutoffs = find_eligible_cutoffs(panel)
     t0 = select_cutoff(cutoffs, cutoff)
     dataset = build_dataset(panel, t0, orders)
-    labelled = labeled_rows(dataset, config.require_complete_history)
-    # 고객 단위 학습/검증/테스트 분할: 한 고객은 한 분할에만 속한다.
-    splits = split_customers(labelled["customer_id"], config.seed, config.split_fractions)
-    labelled["split"] = labelled["customer_id"].map(splits)
-    labelled[LABEL_COLUMN] = labelled[LABEL_COLUMN].astype(float)
+    # 정답이 있는 모든 고객을 먼저 고객 단위로 분할한다(한 고객은 한 분할에만 속한다). 분할이
+    # require_complete_history 설정과 무관하므로 두 설정의 결과를 같은 Test 고객으로 비교할 수 있다.
+    everyone = labeled_rows(dataset, require_complete_history=False)
+    splits = split_customers(everyone["customer_id"], config.seed, config.split_fractions)
+    everyone["split"] = everyone["customer_id"].map(splits)
+    everyone[LABEL_COLUMN] = everyone[LABEL_COLUMN].astype(float)
+    everyone["history_complete"] = everyone["feature_window_complete"].astype(bool)
+    # 학습·모델 선택·기본 평가 대상
+    everyone["training_population"] = everyone["history_complete"] if config.require_complete_history else True
+    labelled = everyone.loc[everyone["training_population"]].reset_index(drop=True)
     parts = {name: labelled.loc[labelled["split"].eq(name)] for name in SPLITS}
-    keep = ["customer_id", "split", LABEL_COLUMN, *(["treatment"] if "treatment" in labelled else [])]
+    keep = ["customer_id", "split", "history_complete", "training_population", LABEL_COLUMN,
+            *(["treatment"] if "treatment" in everyone else [])]
     # 모든 모델의 예측을 같은 행(scored)에 모아 같은 고객·같은 정답으로 평가한다.
-    scored = labelled[keep].copy()
-    status, models, details = {}, {}, {}
+    scored = everyone[keep].copy()
+    status, models, details, model_warnings = {}, {}, {}, []
 
     baseline = BaselineModel()
-    scored["pred_baseline"] = baseline.predict(labelled)
+    scored["pred_baseline"] = baseline.predict(everyone)
     status["baseline"], models["baseline"] = "trained", baseline
 
+    sensitivity = None
     if orders is None:
         status["bgnbd_gg"] = "skipped: no order ledger supplied"
     else:
@@ -176,14 +230,30 @@ def train(weekly, orders=None, output_dir: str | Path = "results/clv", config: C
             # Train 고객으로만 적합하고, 예측은 정답이 있는 전체 고객에 대해 만든다.
             train_labels = parts["train"].set_index("customer_id")[LABEL_COLUMN]
             probabilistic.fit(orders, t0, parts["train"]["customer_id"], labels=train_labels)
-            output_frame = probabilistic.predict(orders, t0, labelled["customer_id"])
-            scored["pred_bgnbd_gg"] = output_frame["predicted_clv_12m"].to_numpy(dtype=float)
-            scored["bgnbd_status"] = output_frame["status"].to_numpy()
-            status["bgnbd_gg"], models["bgnbd_gg"] = "trained", probabilistic
-            details["bgnbd_gg"] = {**probabilistic.diagnostics,
-                                   "status_counts": output_frame["status"].value_counts().to_dict()}
+            output_frame = probabilistic.predict(orders, t0, everyone["customer_id"])
+            counts = output_frame["status"].value_counts()
+            rejections = list(probabilistic.diagnostics["rejections"])
+            buyers = int(counts.get("modeled", 0) + counts.get("numerical_failure", 0))
+            failure_share = float(counts.get("numerical_failure", 0)) / buyers if buyers else 0.0
+            if failure_share > MAX_NUMERICAL_FAILURE_SHARE:
+                rejections.append(f"numerical failures for {failure_share:.1%} of customers with a purchase")
+            details["bgnbd_gg"] = {**probabilistic.diagnostics, "rejections": rejections,
+                                   "status_counts": counts.to_dict(), "numerical_failure_share": failure_share}
+            model_warnings += [f"bgnbd_gg: {warning}" for warning in probabilistic.diagnostics["warnings"]]
+            if rejections:
+                # 필수 적용 조건 위반: 진단은 남기고 저장·평가·최종 선택에서는 뺀다.
+                status["bgnbd_gg"] = "rejected: " + "; ".join(rejections)
+            else:
+                scored["pred_bgnbd_gg"] = output_frame["predicted_clv_12m"].to_numpy(dtype=float)
+                scored["bgnbd_status"] = output_frame["status"].to_numpy()
+                status["bgnbd_gg"], models["bgnbd_gg"] = "trained", probabilistic
+            if config.bgnbd_sensitivity_penalizers:
+                validation_ids = parts["validation"]["customer_id"]
+                reference = probabilistic.predict(orders, t0, validation_ids)["predicted_clv_12m"].to_numpy(dtype=float)
+                sensitivity = _bgnbd_sensitivity(config, orders, t0, parts, reference)
+                details["bgnbd_gg"]["penalizer_sensitivity"] = sensitivity.to_dict(orient="records")
         except (ValueError, RuntimeError) as error:
-            # 적합 실패(인원 부족, 조건 위반 등)는 전체 실행을 멈추지 않고 failed로 기록한다.
+            # 적합 실패(인원 부족 등)는 전체 실행을 멈추지 않고 failed로 기록한다.
             status["bgnbd_gg"] = f"failed: {error}"
 
     available, version = xgboost_status()
@@ -192,14 +262,18 @@ def train(weekly, orders=None, output_dir: str | Path = "results/clv", config: C
     else:
         booster = XGBoostCLV(config.seed, config.xgb_grid, config.xgb_fixed, config.selection_metric)
         booster.fit(parts["train"], parts["train"][LABEL_COLUMN], parts["validation"], parts["validation"][LABEL_COLUMN])
-        scored["pred_xgboost"] = booster.predict(labelled)
+        scored["pred_xgboost"] = booster.predict(everyone)
         status["xgboost"], models["xgboost"] = "trained", booster
         details["xgboost"] = {"version": version, "best_params": booster.best_params, "grid_results": booster.grid_results,
                               "clipped_negative_predictions": booster.last_clipped}
 
     trained = [name for name in MODEL_NAMES if status.get(name) == "trained"]
-    evaluation = {name: evaluate_predictions(scored.loc[scored["split"].eq(name)], trained, config.top_fraction)
+    primary = scored["training_population"].astype(bool)
+    evaluation = {name: evaluate_predictions(scored.loc[scored["split"].eq(name) & primary], trained, config.top_fraction)
                   for name in ("validation", "test")}
+    # 같은 분할 안에서 13주 이력 완전/미완전 고객을 따로 평가한다(미완전 고객은 학습 대상이 아닐 수 있다).
+    evaluation["by_history"] = {name: evaluate_by_history(scored.loc[scored["split"].eq(name)], trained,
+                                                          config.top_fraction) for name in ("validation", "test")}
     # 최종 모델: Validation 지표(기본 RMSE)가 가장 낮은 모델, 동률이면 MODEL_NAMES 순서. Test는 보고에만 쓴다.
     if config.final_model == "auto":
         metric = config.selection_metric
@@ -218,12 +292,18 @@ def train(weekly, orders=None, output_dir: str | Path = "results/clv", config: C
     cutoffs.assign(reference_week=cutoffs["reference_week"].map(lambda value: value.isoformat())).to_csv(
         reports_dir / "eligible_cutoffs.csv", index=False)
     write_json(reports_dir / "evaluation.json", evaluation)
-    test = scored.loc[scored["split"].eq("test")]
+    if sensitivity is not None:
+        sensitivity.to_csv(reports_dir / "bgnbd_sensitivity.csv", index=False)
+    test = scored.loc[scored["split"].eq("test") & primary]
     decile_table(test, trained).to_csv(reports_dir / "deciles_test.csv", index=False)
     pd.concat([top_n_table(test, name, 20) for name in trained]).to_csv(reports_dir / "top20_test.csv", index=False)
     scored.to_csv(reports_dir / "labelled_predictions.csv", index=False)
-    splits.rename_axis("customer_id").reset_index().to_csv(output / "splits.csv", index=False)
+    everyone[["customer_id", "split", "history_complete", "training_population"]].to_csv(output / "splits.csv",
+                                                                                         index=False)
     summary = _dataset_summary(dataset, labelled, t0)
+    by_history_test = {segment: {name: {key: values["models"][name][key] for key in ("n", "mae", "rmse")}
+                                 for name in trained}
+                       for segment, values in evaluation["by_history"]["test"].items() if "models" in values}
     registry = {
         "clv_version": __version__, "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "reference_week": t0.isoformat(), "horizon_weeks": LABEL_WEEKS, "input_weeks": INPUT_WEEKS,
@@ -232,24 +312,30 @@ def train(weekly, orders=None, output_dir: str | Path = "results/clv", config: C
                                                                  "source_format", "coverage_source")},
         "ledger": None if orders is None else {name: orders.attrs.get(name) for name in (
             "path", "raw_database_sha256", "observation_start_at", "observation_end_at")},
-        "dataset": summary, "split_counts": labelled["split"].value_counts().reindex(SPLITS).fillna(0).astype(int).to_dict(),
+        "dataset": summary, "split_counts": _split_counts(labelled), "split_counts_all_labelled": _split_counts(everyone),
+        "training_population": ("customers with a complete 13-week history" if config.require_complete_history
+                                else "all labelled customers"),
         "model_status": status, "model_details": details, "trained_models": trained, "final_model": final,
         "selection": f"lowest validation {config.selection_metric}" if config.final_model == "auto" else "configured",
         "test_metrics": {name: {key: evaluation["test"]["models"][name][key] for key in ("mae", "rmse")}
                          | {"top20_overlap_rate": evaluation["test"]["models"][name]["top"]["overlap_rate"]}
                          for name in trained},
-        "warnings": [warning for report in reports for warning in report.warnings],
+        "test_metrics_by_history": by_history_test,
+        "warnings": [warning for report in reports for warning in report.warnings] + model_warnings,
     }
     write_json(output / "registry.json", registry)
     return registry
 
 
 def _labelled_frame(panel, orders, registry, cutoff, population, model_dir):
-    """저장된 설정으로 ``cutoff``의 정답 고객을 만든다. ``population="test"``면 저장된 Test 고객만 남긴다."""
+    """저장된 설정으로 ``cutoff``의 정답 고객 전체를 만들고 이력 완전 여부와 학습 대상 표시를 붙인다.
+
+    ``population="test"``면 저장된 Test 고객만 남긴다(이력 완전·미완전 모두).
+    """
     config = CLVConfig.from_dict(registry["config"])
     t0 = to_cutoff(cutoff or registry["reference_week"])
     dataset = build_dataset(panel, t0, orders)
-    labelled = labeled_rows(dataset, config.require_complete_history)
+    labelled = labeled_rows(dataset, require_complete_history=False)
     if population == "test":
         splits = pd.read_csv(Path(model_dir) / "splits.csv", dtype={"customer_id": str})
         labelled = labelled.loc[labelled["customer_id"].isin(splits.loc[splits["split"].eq("test"), "customer_id"])]
@@ -257,6 +343,8 @@ def _labelled_frame(panel, orders, registry, cutoff, population, model_dir):
         raise ValueError("population must be test or all")
     labelled = labelled.reset_index(drop=True)
     labelled[LABEL_COLUMN] = labelled[LABEL_COLUMN].astype(float)
+    labelled["history_complete"] = labelled["feature_window_complete"].astype(bool)
+    labelled["training_population"] = labelled["history_complete"] if config.require_complete_history else True
     return config, t0, labelled
 
 
@@ -284,11 +372,14 @@ def evaluate(weekly, orders=None, model_dir: str | Path = "results/clv", cutoff=
         raise ValueError("no labelled customers to evaluate at this cutoff")
     # 원장이 없으면 BG/NBD + GG는 평가에서 뺀다.
     names = [name for name in registry["trained_models"] if name != "bgnbd_gg" or orders is not None]
-    frame = labelled[["customer_id", LABEL_COLUMN, *(["treatment"] if "treatment" in labelled else [])]].copy()
+    frame = labelled[["customer_id", LABEL_COLUMN, "history_complete", "training_population",
+                      *(["treatment"] if "treatment" in labelled else [])]].copy()
     for name, model in _models_for(model_dir, names).items():
         frame[f"pred_{name}"] = _score(model, labelled, orders, t0)
+    # 기본 지표는 학습 대상 고객으로 계산하고(학습 때 Test 지표와 같다), 이력 구간별 지표를 덧붙인다.
     report = {"reference_week": t0.isoformat(), "population": population, "models_evaluated": names,
-              **evaluate_predictions(frame, names, config.top_fraction)}
+              **evaluate_predictions(frame.loc[frame["training_population"].astype(bool)], names, config.top_fraction),
+              "by_history": evaluate_by_history(frame, names, config.top_fraction)}
     if output is not None:
         write_json(output, report)
     return report

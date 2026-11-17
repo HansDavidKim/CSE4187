@@ -36,6 +36,8 @@ class CLVConfig:
             ``train_mean``(같은 처지인 Train 고객의 평균 정답).
         bgnbd_penalizer: BG/NBD 로그 모수의 L2 벌점.
         gg_penalizer: Gamma-Gamma 로그 모수의 L2 벌점.
+        bgnbd_sensitivity_penalizers: 민감도 보고용으로 다시 적합할 BG/NBD 벌점 목록(빈 목록이면 생략).
+            보고서만 만들고 선택 모델(``bgnbd_penalizer``)은 바꾸지 않는다.
         selection_metric: XGBoost 설정과 최종 모델을 고르는 Validation 지표.
         final_model: ``auto``(Validation 지표가 가장 좋은 모델) 또는 모델 이름 하나.
         xgb_grid: Validation으로 탐색할 하이퍼파라미터 그리드.
@@ -51,6 +53,7 @@ class CLVConfig:
     no_purchase_fallback: str = "zero"
     bgnbd_penalizer: float = 0.0
     gg_penalizer: float = 0.0
+    bgnbd_sensitivity_penalizers: tuple[float, ...] = (0.0, 0.001, 0.01, 0.1)
     selection_metric: str = "rmse"
     final_model: str = "auto"
     xgb_grid: dict = field(default_factory=lambda: {key: list(value) for key, value in DEFAULT_XGB_GRID.items()})
@@ -61,6 +64,9 @@ class CLVConfig:
         self.split_fractions = tuple(float(value) for value in self.split_fractions)
         if len(self.split_fractions) != 3 or min(self.split_fractions) <= 0 or abs(sum(self.split_fractions) - 1) > 1e-9:
             raise ValueError("split_fractions must be three positive shares summing to one")
+        self.bgnbd_sensitivity_penalizers = tuple(float(value) for value in self.bgnbd_sensitivity_penalizers)
+        if any(not value >= 0 for value in (self.bgnbd_penalizer, self.gg_penalizer, *self.bgnbd_sensitivity_penalizers)):
+            raise ValueError("penalizers must be non-negative")
         if not 0 < self.top_fraction < 1:
             raise ValueError("top_fraction must be between zero and one")
         choices = {"calibration": ("feature_window", "full_history"), "transaction_period": ("D", "order"),
@@ -75,6 +81,7 @@ class CLVConfig:
         """JSON(registry) 저장용 dict. ``split_fractions``는 list로 바꾼다."""
         result = asdict(self)
         result["split_fractions"] = list(self.split_fractions)
+        result["bgnbd_sensitivity_penalizers"] = list(self.bgnbd_sensitivity_penalizers)
         return result
 
     @classmethod

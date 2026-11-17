@@ -133,6 +133,12 @@ def evaluate_predictions(frame: pd.DataFrame, models, fraction: float = 0.2) -> 
         report["models"][model] = {**regression_metrics(actual, predicted),
                                    "top": top_overlap(actual, predicted, frame["customer_id"], fraction),
                                    "prediction_distribution": distribution(predicted)}
+    # Baseline 대비 비율(1보다 작으면 Baseline보다 오차가 작다). Baseline 오차가 0이면 None.
+    if "baseline" in report["models"]:
+        base = report["models"]["baseline"]
+        for values in report["models"].values():
+            values["vs_baseline"] = {f"{key}_ratio": values[key] / base[key] if base[key] > 0 else None
+                                     for key in ("mae", "rmse")}
     # 정답 구간에 Treatment 쿠폰 효과가 섞이므로 Treatment/Control별 지표도 따로 남긴다.
     if "treatment" in frame and frame["treatment"].notna().any():
         groups = {}
@@ -141,4 +147,20 @@ def evaluate_predictions(frame: pd.DataFrame, models, fraction: float = 0.2) -> 
             if len(part) > 1:
                 groups[name] = {model: regression_metrics(part[LABEL_COLUMN], part[f"pred_{model}"]) for model in models}
         report["by_assignment_group"] = groups
+    return report
+
+
+HISTORY_SEGMENTS = {"complete": True, "incomplete": False}
+
+
+def evaluate_by_history(frame: pd.DataFrame, models, fraction: float = 0.2) -> dict:
+    """``history_complete``(13주 입력 완전 관측 여부)별로 ``evaluate_predictions``를 따로 계산한다.
+
+    고객이 2명 미만인 구간은 지표 없이 고객 수만 남긴다. 상위 20%는 구간 안에서 다시 정한다.
+    """
+    flags = frame["history_complete"].astype(bool)
+    report = {}
+    for name, value in HISTORY_SEGMENTS.items():
+        part = frame.loc[flags.eq(value)]
+        report[name] = evaluate_predictions(part, models, fraction) if len(part) > 1 else {"customers": int(len(part))}
     return report

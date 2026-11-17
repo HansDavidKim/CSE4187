@@ -223,3 +223,28 @@ def test_bgnbd_52_week_expectation_matches_monte_carlo(params):
                 break
     expected = BGNBD(dict(zip(("r", "alpha", "a", "b"), params))).expected_purchases(horizon, x, tx, np.full(n, T))
     assert expected.sum() / future.sum() == pytest.approx(1.0, abs=0.05)
+
+
+def test_applicability_separates_rejections_from_warnings():
+    """q <= 1·미수렴은 모델 제외 사유이고, a + b 과대·상관 과대·반복 구매 고객 부족은 경고만 남긴다."""
+    from clv.probabilistic import applicability
+
+    sane = applicability({"r": 0.8, "alpha": 5.0, "a": 1.5, "b": 6.0}, {"p": 6.0, "q": 4.0, "v": 15.0},
+                         True, True, 0.1, 200)
+    assert sane["rejections"] == [] and sane["warnings"] == []
+    assert sane["checks"]["dropout_heterogeneity_identified"] and sane["checks"]["q_gt_1"]
+    bad = applicability({"r": 0.45, "alpha": 2.3, "a": 1.9e5, "b": 9.6e5}, {"p": 2.7, "q": 0.9, "v": 5000.0},
+                        True, False, 0.5, 10)
+    assert any("q = 0.9" in reason for reason in bad["rejections"])
+    assert any("Gamma-Gamma optimisation" in reason for reason in bad["rejections"])
+    assert len(bad["warnings"]) == 3 and "point mass p = 0.1652" in bad["warnings"][0]
+    assert bad["checks"]["dropout_heterogeneity_identified"] is False and bad["checks"]["independence_ok"] is False
+
+
+def test_probabilistic_diagnostics_record_dropout_concentration(orders, labelled):
+    t0, rows = labelled
+    model = ProbabilisticCLV().fit(orders, t0, rows.loc[rows["split"].eq("train"), "customer_id"])
+    params = model.bgnbd.params
+    assert model.diagnostics["dropout_concentration"] == pytest.approx(params["a"] + params["b"])
+    assert model.diagnostics["mean_dropout_probability"] == pytest.approx(params["a"] / (params["a"] + params["b"]))
+    assert {"checks", "rejections", "warnings"} <= set(model.diagnostics)

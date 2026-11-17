@@ -21,6 +21,55 @@ NAME = "bgnbd_gg"
 MIN_BGNBD_CUSTOMERS = 10
 MIN_GG_CUSTOMERS = 5
 CORRELATION_LIMIT = 0.3
+# a + b가 이 값을 넘으면 이탈 확률의 Beta 분포가 한 점(a / (a + b))으로 무너져 고객 간 이탈 이질성을
+# 추정하지 못한 것으로 본다(모델은 쓰되 경고).
+DROPOUT_CONCENTRATION_LIMIT = 1e3
+# 반복 구매 고객이 이보다 적으면 Gamma-Gamma 모수가 불안정할 수 있어 경고한다.
+SMALL_REPEAT_SAMPLE = 30
+# 예측 중 수치 오류(무한대·음수) 고객 비율이 이 값을 넘으면 모델을 제외한다.
+MAX_NUMERICAL_FAILURE_SHARE = 0.01
+
+
+def applicability(bgnbd_params: dict, gg_params: dict, bgnbd_converged: bool, gg_converged: bool,
+                  correlation: float | None, repeat_customers: int) -> dict:
+    """적용 조건을 필수(``rejections``: 하나라도 있으면 모델 제외)와 참고(``warnings``)로 나눠 판정한다.
+
+    필수: 두 최적화 수렴, 모수가 유한한 양수, ``q > 1``(Gamma-Gamma 평균이 유한).
+    참고: ``a + b`` 과대(이탈 이질성 미식별), |corr(frequency, monetary)| > 0.3(독립 가정 위반),
+    반복 구매 고객 수 부족. ``a <= 1``은 52주 조건부 기대값이 유한하므로 기록만 한다.
+    """
+    values = [*bgnbd_params.values(), *gg_params.values()]
+    finite = all(np.isfinite(value) and value > 0 for value in values)
+    a, b, q = bgnbd_params["a"], bgnbd_params["b"], gg_params["q"]
+    concentration = a + b
+    checks = {
+        "bgnbd_converged": bool(bgnbd_converged), "gamma_gamma_converged": bool(gg_converged),
+        "finite_positive_params": bool(finite), "a_gt_1": a > 1, "q_gt_1": q > 1,
+        "dropout_heterogeneity_identified": bool(concentration <= DROPOUT_CONCENTRATION_LIMIT),
+        "independence_ok": None if correlation is None else abs(correlation) <= CORRELATION_LIMIT,
+        "repeat_sample_ok": repeat_customers >= SMALL_REPEAT_SAMPLE,
+        "correlation_limit": CORRELATION_LIMIT, "dropout_concentration_limit": DROPOUT_CONCENTRATION_LIMIT,
+        "small_repeat_sample": SMALL_REPEAT_SAMPLE,
+    }
+    rejections = []
+    if not checks["bgnbd_converged"]:
+        rejections.append("BG/NBD optimisation did not converge")
+    if not checks["gamma_gamma_converged"]:
+        rejections.append("Gamma-Gamma optimisation did not converge")
+    if not finite:
+        rejections.append("non-finite or non-positive parameters")
+    if not checks["q_gt_1"]:
+        rejections.append(f"Gamma-Gamma q = {q:.4g} <= 1 (mean transaction value is not finite)")
+    warnings = []
+    if not checks["dropout_heterogeneity_identified"]:
+        warnings.append(f"BG/NBD a + b = {concentration:.4g} > {DROPOUT_CONCENTRATION_LIMIT:g}: dropout Beta collapsed "
+                        f"to a point mass p = {a / concentration:.4f}; dropout heterogeneity is not identified")
+    if checks["independence_ok"] is False:
+        warnings.append(f"|corr(frequency, monetary)| = {abs(correlation):.3f} > {CORRELATION_LIMIT}: "
+                        "Gamma-Gamma independence assumption is doubtful")
+    if not checks["repeat_sample_ok"]:
+        warnings.append(f"only {repeat_customers} repeat customers (< {SMALL_REPEAT_SAMPLE}) for Gamma-Gamma")
+    return {"checks": checks, "rejections": rejections, "warnings": warnings}
 
 
 def rfm_summary(orders: pd.DataFrame, t0, calibration: str = "feature_window", period: str = "D") -> pd.DataFrame:
@@ -192,8 +241,8 @@ class ProbabilisticCLV:
     def fit(self, orders: pd.DataFrame, t0, customers, labels: pd.Series | None = None) -> "ProbabilisticCLV":
         """``customers``(학습 분할)의 보정 기간 주문으로 적합한다. ``labels``는 ``train_mean`` 대체값에만 쓴다.
 
-        적용 조건은 ``diagnostics["checks"]``에 남긴다: 최적화 수렴, ``q > 1``(Gamma-Gamma 평균 유한, 필수),
-        ``a > 1``(참고용), |corr(frequency, monetary)| <= 0.3(Gamma-Gamma 독립 가정). 최소 인원 미달이면 오류다.
+        적용 조건(``applicability``)은 ``diagnostics``의 ``checks``·``rejections``·``warnings``에 남긴다.
+        ``rejections``가 있으면 파이프라인이 이 모델을 제외한다. 최소 인원 미달이면 오류다.
         """
         customers = pd.Index(customers, name="customer_id")
         summary = rfm_summary(orders, t0, self.calibration, self.period).reindex(customers)
@@ -218,6 +267,9 @@ class ProbabilisticCLV:
         correlation =(float(np.corrcoef(repeat["frequency"], repeat["monetary_value"])[0, 1])
                        if len(repeat) > 2 and repeat["frequency"].nunique() > 1 and repeat["monetary_value"].nunique() > 1
                        else None)
+        judged = applicability(self.bgnbd.params, self.gamma_gamma.params, bgnbd_info["converged"],
+                               gg_info["converged"], correlation, len(repeat))
+        a, b = self.bgnbd.params["a"], self.bgnbd.params["b"]
         self.diagnostics = {
             "cutoff": to_cutoff(t0).isoformat(), "calibration": self.calibration, "transaction_period": self.period,
             "fit_customers": int(len(customers)), "customers_with_purchase": int(len(buyers)),
@@ -226,13 +278,9 @@ class ProbabilisticCLV:
             "gamma_gamma": {"params": self.gamma_gamma.params, **gg_info,
                             "population_mean_value": self.gamma_gamma.population_mean()},
             "frequency_monetary_correlation": correlation,
-            # a_gt_1은 참고용이다(a <= 1이어도 52주 조건부 기대값은 유한). q_gt_1은 필수 조건이다.
-            "checks": {
-                "bgnbd_converged": bgnbd_info["converged"], "gamma_gamma_converged": gg_info["converged"],
-                "a_gt_1": self.bgnbd.params["a"] > 1, "q_gt_1": self.gamma_gamma.params["q"] > 1,
-                "independence_ok": None if correlation is None else abs(correlation) <= CORRELATION_LIMIT,
-                "correlation_limit": CORRELATION_LIMIT,
-            },
+            # 이탈 확률 Beta(a, b)의 평균과 집중도(a + b). 집중도가 매우 크면 모든 고객의 이탈 확률이 같다.
+            "mean_dropout_probability": a / (a + b), "dropout_concentration": a + b,
+            **judged,
             "no_purchase_fallback": self.no_purchase_fallback, "fallback_value": self.fallback_value,
         }
         return self

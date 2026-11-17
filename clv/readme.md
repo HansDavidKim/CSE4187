@@ -78,10 +78,10 @@ clv = predict_clv("artifacts/features", ledger="artifacts/small/raw.sqlite", mod
 
 * 기준시점 `t0`는 서울 월요일 00:00이다. 출력 `reference_week`는 **예측 기준시점 t0**이며 시뮬레이터 주간 행의 `reference_week`(그 주의 시작)와 다른 개념이다.
 * Feature: `[t0 - 13주, t0)`, 정답: `[t0, t0 + 52주)`의 실결제금액 합 `actual_clv_12m`.
-* 정답은 52주가 모두 완전 관측일 때만 만든다. 학습·평가 대상은 13주 입력도 모두 완전 관측인 고객이다(`require_complete_history`).
+* 정답은 52주가 모두 완전 관측일 때만 만든다. 기본 학습 대상은 13주 입력도 모두 완전 관측인 고객이다(`require_complete_history=True`). 정답이 있는 고객 전체로 학습하려면 `--config clv/configs/all_history.json`을 쓴다.
 * 시뮬레이터는 월 단위로 생성하므로 `cutoffs`로 실제 데이터에서 13 + 52주가 들어가는 `t0`를 찾는다. 기본 학습 시점은 적격 고객이 가장 많은 `t0`(동률이면 최신)다. 처음·마지막 주는 부분 관측이어서 최소 67개 달력 주가 필요하다. 24개월 생성(`months>=24`)이면 실험 시점 `as_of_at`도 적격이다.
 * 시뮬레이터 `future_revenue_12m`(달력 12개월, Control만 제공)은 쓰지 않는다.
-* 고객 단위로 Train/Validation/Test(기본 0.6/0.2/0.2, seed 42)를 나눈다. 한 고객은 한 분할에만 속한다.
+* 정답이 있는 모든 고객을 고객 단위로 Train/Validation/Test(기본 0.6/0.2/0.2, seed 42)로 나눈다. 한 고객은 한 분할에만 속한다. 분할이 `require_complete_history`와 무관하므로 두 설정을 같은 Test 고객으로 비교할 수 있다. 학습·모델 선택은 그중 학습 대상 고객만 쓴다.
 * 정답은 원장 합계와 고객별로 대조하고, 다르면 오류를 낸다.
 
 ## Feature (WBS 4.3)
@@ -103,7 +103,12 @@ clv = predict_clv("artifacts/features", ledger="artifacts/small/raw.sqlite", mod
 
 * **Baseline**: `(net_spend_13w / 13) * 52`. 부분 이력 고객(추론만 해당)은 13 대신 관측 주 수로 나눈다.
 * **BG/NBD + Gamma-Gamma**: 거래 단위는 서울 날짜별 주문 묶음(Lifetimes 관례, `transaction_period="order"` 선택 가능), 시간 단위는 주, 52주 비할인 합계다. 보정 기간은 기본적으로 다른 모델과 같은 13주(`calibration="feature_window"`)이고 `full_history`도 선택할 수 있다. Train 고객으로만 적합한다.
-  * 적용 조건 기록(`registry.json → model_details.bgnbd_gg.checks`): 최적화 수렴, `q>1`(Gamma-Gamma 평균 유한, 필수), `a>1`(참고: `a≤1`이면 고객 생애 거래 수의 평균이 발산하는 두꺼운 꼬리이지만 52주 조건부 기대값은 유한하며 Monte Carlo로 확인), |corr(frequency, monetary)| ≤ 0.3(Gamma-Gamma 독립 가정), 최소 적합 인원(구매 고객 10명, 반복 구매 고객 5명). 인원이 부족하면 `failed`로 기록하고 평가 결과를 만들지 않는다.
+  * 적용 조건(`registry.json → model_details.bgnbd_gg`의 `checks`·`rejections`·`warnings`, `probabilistic.applicability`)
+    * 필수(위반 시 `rejected`로 기록하고 저장·평가·최종 선택에서 제외): 두 최적화 수렴, 모수가 유한한 양수, `q>1`(Gamma-Gamma 평균 유한), 수치 오류 고객 비율 ≤ 1%.
+    * 경고만: `a+b > 1000`(이탈 확률 Beta가 한 점 `a/(a+b)`로 무너져 이탈 이질성 미식별), |corr(frequency, monetary)| > 0.3(독립 가정 위반), 반복 구매 고객 < 30명.
+    * 기록만: `a>1`(`a≤1`이면 생애 거래 수 평균이 발산하지만 52주 조건부 기대값은 유한하며 Monte Carlo로 확인).
+    * 최소 적합 인원(구매 고객 10명, 반복 구매 고객 5명)이 부족하면 `failed`로 기록하고 평가 결과를 만들지 않는다.
+  * 벌점 민감도(`reports/bgnbd_sensitivity.csv`): `bgnbd_sensitivity_penalizers`(기본 0, 0.001, 0.01, 0.1)마다 Train 고객으로 다시 적합해 모수, `a/(a+b)`, `a+b`, Validation MAE·RMSE, 선택 모델과의 예측 순위상관을 남긴다. 보고용이며 선택 모델은 바꾸지 않는다.
   * 보정 기간 구매가 없는 고객은 BG/NBD가 정의되지 않는다. `no_purchase_fallback="zero"`(기본) 또는 `train_mean`(같은 처지 Train 고객의 평균 정답)을 쓰고 `status=no_purchase_in_calibration`으로 표시한다.
   * 반복 구매 0회 고객은 Gamma-Gamma 모집단 평균 `p·v/(q−1)`을 받는다.
   * 13주 보정 기간이면 T가 13주 이하로 잘린다(좌측 절단). 생성 과정의 `a`, `b`는 개별 식별이 약하고 `a/(a+b)`는 잘 식별된다(테스트로 확인).
@@ -116,7 +121,8 @@ clv = predict_clv("artifacts/features", ledger="artifacts/small/raw.sqlite", mod
 모든 모델을 같은 Test 고객, 같은 52주 정답으로 평가한다(`reports/evaluation.json`).
 MAE, RMSE, 편향, 총액, R², Spearman, 예측·실제 분포 분위수, 10분위별 실제 대 예측(`deciles_test.csv`),
 모델별 Top-20(`top20_test.csv`), 상위 20% 일치율(같은 k: |예측 ∩ 실제| / k)과 포착 가치 비율을 낸다.
-Treatment/Control별 지표도 함께 낸다. 실행하지 못한 모델은 평가에서 빠지고 사유만 남는다.
+Treatment/Control별 지표와 Baseline 대비 MAE·RMSE 비율(`vs_baseline`, 1 미만이면 Baseline보다 나음)도 함께 낸다.
+같은 분할 안에서 13주 이력 완전/미완전 고객을 따로 평가한 결과는 `evaluation.json → by_history`와 `registry.json → test_metrics_by_history`에 있다. 실행하지 못했거나 제외된 모델은 평가에서 빠지고 사유만 남는다.
 
 ## 출력 (WBS 4.7)
 
@@ -131,12 +137,13 @@ Treatment/Control별 지표도 함께 낸다. 실행하지 못한 모델은 평�
 | `clv_rank`, `model_name`, `horizon_weeks`, `history_complete`, `history_weeks_13w`, `currency`, `amount_unit`, `dataset_id` | 보조 |
 
 상위 20%는 `ceil(0.2·N)`명이고, 동점은 `customer_id` 오름차순으로 정한다. 예측에는 정답이 필요 없다.
-13주 이력이 부족한 고객도 예측하되 `history_complete=False`로 표시한다(모델은 완전 이력 고객으로 학습했다).
+13주 이력이 부족한 고객도 예측하되 `history_complete=False`로 표시한다(기본 설정에서는 완전 이력 고객으로 학습한 모델이다).
 기본 예측 시점은 패널의 실험 `as_of_at`이 하나일 때 그 값, 아니면 마지막 완전 관측 주의 다음 월요일이다.
 
-학습 산출물(`results/clv/`): `registry.json`(기준시점·계약·설정·모델 상태·최종 모델·지표·경고), `splits.csv`,
-`models/`(baseline.json, bgnbd_gg.json, xgboost/), `reports/`(validation.json, eligible_cutoffs.csv, evaluation.json,
-deciles_test.csv, top20_test.csv, labelled_predictions.csv).
+학습 산출물(`results/clv/`): `registry.json`(기준시점·계약·설정·모델 상태·최종 모델·지표·경고),
+`splits.csv`(분할, `history_complete`, `training_population`), `models/`(baseline.json, bgnbd_gg.json, xgboost/),
+`reports/`(validation.json, eligible_cutoffs.csv, evaluation.json, bgnbd_sensitivity.csv, deciles_test.csv,
+top20_test.csv, labelled_predictions.csv).
 
 ## 테스트
 
@@ -167,4 +174,5 @@ cd .. && python -m clv run --weekly results/simulator/population-24m-n5000-seed4
 * 실험 시점 이후 52주 정답 구간에는 Treatment 고객의 쿠폰 효과가 들어간다. 학습에는 모두 포함하고, `treatment_in_label_window` 표시와 그룹별 지표를 남긴다. Uplift × CLV 결합 시 이중 계상 여부를 협의해야 한다.
 * 통화가 `SOURCE_UNSPECIFIED`이면 금액은 원천 최소 단위(`amount_unit`)다. KRW 환산은 하지 않는다.
 * `simulator.yaml`(원천 고객별 프로필, `data/models` 필요) 데이터에서는 아직 실행하지 않았다. 동봉 `population.yaml` 데이터와 분포·dataset_id가 다를 수 있다.
-* `population.yaml` 24개월 데이터에서 기준시점(2025-01-06) 고객 5,000명 중 13주 이력이 완전한 고객은 1,601명이다. 기본 설정(`require_complete_history=True`)은 이 1,601명으로 학습·평가하고, 나머지는 `history_complete=False`로 예측만 낸다.
+* `population.yaml` 24개월 데이터(5,000명, seed 42)에서 기준시점(2025-01-06) 고객 중 13주 이력이 완전한 고객은 1,601명(32%)이다. 같은 Test 고객 1,000명(완전 329, 미완전 671)으로 비교하면, 정답 고객 전체로 학습한 설정(`configs/all_history.json`)이 두 구간 모두에서 XGBoost MAE가 낮았다(완전 6,498→6,039, 미완전 3,946→2,274). 기본값 변경은 팀 협의 사항이다.
+* 같은 데이터에서 BG/NBD의 `a`, `b`는 표본에 따라 크게 달라졌다(이전 분할 약 19만·96만, 현재 분할 2.3·10.7). `a/(a+b)`는 0.17~0.18로 안정적이고, 벌점 0~0.1에서 Validation 예측 순위상관은 0.995 이상, RMSE는 9,886~11,307이었다.
