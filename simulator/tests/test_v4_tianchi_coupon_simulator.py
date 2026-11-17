@@ -5,6 +5,7 @@ import json
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from test_v4_checkout_simulator import checkout_fixture, _customers
 from simulate.v4.simulator.engine import EcommerceSimulator
@@ -130,6 +131,22 @@ def test_sampled_day29_response_waits_for_actual_session_and_preserves_28d_outco
     assert pd.to_datetime(used.opportunity_at,utc=True).ge(pd.to_datetime(used.response_ready_at,utc=True)).all()
     assert bought.coupon_id.is_unique
     validate_raw_dataset({name:tables[name] for name in RAW_COLUMNS},result.metadata)
+
+
+@pytest.mark.parametrize("delay", [28, 29])
+def test_coupon_expiry_blocks_response_at_or_after_day_28(checkout_fixture, tmp_path, delay):
+    config = _config(checkout_fixture, tmp_path, delay=delay, sessions=31)
+    config["source_simulation"]["coupon_validity_days"] = 28
+    result = _run(config)
+    t0 = pd.Timestamp(result.metadata["as_of_at"])
+    expiry = t0 + pd.Timedelta(days=28)
+    assert result.tables["sessions"].started_at.ge(expiry).any()
+    assert result.tables["coupons"].expires_at.eq(expiry).all()
+    assert result.tables["orders"].empty
+    treated = result.tables["coupon_response_diagnostics"].query("treatment == 1")
+    assert treated.response_selected.all()
+    assert treated.response_ready_at.ge(expiry).all()
+    assert treated.response_status.eq("no_eligible_opportunity").all()
 
 
 def test_selected_response_without_opportunity_before_expiry_creates_no_order(checkout_fixture,tmp_path):

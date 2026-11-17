@@ -447,11 +447,17 @@ def test_28_day_outcome_keeps_30_day_revenue_eligibility_and_coupon_policy(recor
     assert not broken["passed"] and broken["mismatch_counts"]["future_revenue_30d"]==1
 
 
-def test_real_outcome_view_helper_matches_validator_and_paired_marginal_contract(records):
+@pytest.mark.parametrize("experiment_days", [28, 30])
+def test_real_outcome_view_helper_matches_validator_and_paired_marginal_contract(records, experiment_days):
     from simulate.v4.simulator.outcomes import redefine_outcomes
     from simulate.v4.simulator.paired_evaluation import paired_retention_rollouts
     tables,metadata,labels,treatments=records
-    metadata.update(schema_version=7,simulator_version="source-shopping-v2",definition_id="future_no_session_30d_active30d")
+    metadata.update(schema_version=7, simulator_version="source-shopping-v2",
+                    definition_id=f"future_no_session_30d_active{experiment_days}d",
+                    eligibility_window_days=experiment_days, coupon_validity_days=experiment_days)
+    t0 = pd.Timestamp(metadata["as_of_at"])
+    tables["coupons"]["expires_at"] = t0 + pd.Timedelta(days=experiment_days)
+    tables["sessions"].loc[0, "started_at"] = t0 - pd.Timedelta(days=experiment_days)
     original={name:frame.copy(deep=True) for name,frame in tables.items()}
     diagnostics=pd.DataFrame(dict(customer_id=["u1","u2"],source_profile_id=["donor1","donor2"],home_persona=["g","g"],
                                   no_coupon_return_probability_30d=[0.8,0.8],coupon_return_probability_30d=[0.9,0.7]))
@@ -463,5 +469,11 @@ def test_real_outcome_view_helper_matches_validator_and_paired_marginal_contract
     pairs,truth=paired_retention_rollouts(view["diagnostics"],view_metadata,repetitions=2)
     assert truth.set_index("customer_id").loc["u1","true_retention_uplift"]==pytest.approx(0.1*(28/30))
     assert pairs.outcome_window_days.eq(28).all()
+    assert pairs.eligibility_window_days.eq(experiment_days).all()
     for name in RAW_COLUMNS:
         pd.testing.assert_frame_equal(view[name],original[name])
+    tables["sessions"].loc[0, "started_at"] -= pd.Timedelta(nanoseconds=1)
+    tables["coupons"].loc[0, "expires_at"] += pd.Timedelta(days=1)
+    failed = audit.audit_sidecars(view, view_metadata, view["labels"], view["treatments"])
+    assert failed["mismatch_counts"][f"not_eligible_active{experiment_days}d"] == 1
+    assert failed["mismatch_counts"]["experiment_coupon_time"] == 1

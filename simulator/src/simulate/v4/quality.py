@@ -18,6 +18,7 @@ from simulate.v4.validation import (
     _distance, _generated_interactions, _metric_arrays, _source_interactions, _source_sessions, _summary,
 )
 from simulate.v4.simulator.engine import EcommerceSimulator
+from simulate.v4.simulator.outcomes import experiment_window_days
 from simulate.v4.configuration import DEFAULT_CONFIG, load_config
 
 
@@ -160,9 +161,15 @@ def compare_reports(baseline,candidate):
     protocol_keys=("source_cache_fingerprint","customers","seeds","months","clock_start","clock_end","as_of_at",
                    "source_cache_sha256", "configuration_except_profile_sha256")
     equal = {key:baseline["protocol"].get(key)==candidate["protocol"].get(key) for key in protocol_keys}
+    equal["eligibility_window_days"] = (
+        experiment_window_days(baseline["protocol"], "eligibility_window_days")
+        == experiment_window_days(candidate["protocol"], "eligibility_window_days")
+    )
     changes = []
     for before,after in zip(baseline["runs"],candidate["runs"]):
         for scope in before["scopes"]:
+            if scope not in after["scopes"]:
+                continue
             a,b=before["scopes"][scope],after["scopes"][scope]
             metrics={"action_share_L1":b["action_share_L1"]-a["action_share_L1"]}
             av,bv=a["transition_distance"]["source_event_weighted_row_L1"],b["transition_distance"]["source_event_weighted_row_L1"]
@@ -199,9 +206,11 @@ def run_benchmark(config,model,source,source_descriptor,customers,seeds):
         lower,upper,asof = (pd.Timestamp(metadata[key]) for key in ("observation_start_at","observation_end_at","as_of_at"))
         if lower!=pd.Timestamp(model["observation_start"]) or upper!=pd.Timestamp(model["observation_end"]):
             raise ValueError("benchmark requires the same five-calendar-month source/generation span")
-        active_source = set(source_sessions.loc[source_sessions.started_at.ge(asof-pd.Timedelta(days=30)) & source_sessions.started_at.lt(asof),"customer_id"])
+        eligibility_days = experiment_window_days(metadata, "eligibility_window_days")
+        history_start = asof - pd.Timedelta(days=eligibility_days)
+        active_source = set(source_sessions.loc[source_sessions.started_at.ge(history_start) & source_sessions.started_at.lt(asof),"customer_id"])
         gen_sessions=result.tables["sessions"]
-        active_generated=set(gen_sessions.loc[gen_sessions.started_at.ge(asof-pd.Timedelta(days=30)) & gen_sessions.started_at.lt(asof),"customer_id"])
+        active_generated=set(gen_sessions.loc[gen_sessions.started_at.ge(history_start) & gen_sessions.started_at.lt(asof),"customer_id"])
         generated=_generated_interactions(result.tables)
         groups=result.tables["diagnostics"].set_index("customer_id").home_persona.to_dict()
         controls=set(result.tables["treatments"].loc[result.tables["treatments"].treatment.eq(0),"customer_id"]) & active_generated
@@ -210,7 +219,7 @@ def run_benchmark(config,model,source,source_descriptor,customers,seeds):
         control_labels = result.tables["labels"].loc[result.tables["labels"].customer_id.isin(controls)]
         scopes={}
         for name,start,end,ids in (("matched_five_months_no_new_coupon",lower,upper,controls),
-                                   ("pre_asof_30d",asof-pd.Timedelta(days=30),asof,active_generated),
+                                   (f"pre_asof_{eligibility_days}d",history_start,asof,active_generated),
                                    ("post_asof_28d_no_new_coupon",asof,asof+pd.Timedelta(days=28),controls)):
             scopes[name]=compare_scope(source_events,source_sessions,active_source,source_groups,generated,gen_sessions,ids,groups,start,end,asof)
         donor_ids=result.tables["diagnostics"].source_profile_id.astype(str)
@@ -241,7 +250,8 @@ def run_benchmark(config,model,source,source_descriptor,customers,seeds):
                         "configuration_except_profile_sha256": hashlib.sha256(json.dumps(comparable_config, sort_keys=True).encode()).hexdigest(),
                         "customers":customers,"seeds":seeds,"months":5,
                         "clock_start":lower.isoformat(),"clock_end":upper.isoformat(),"as_of_at":asof.isoformat(),
-                        "eligibility":"same session-start criterion [asof-30d,asof) applied separately in both domains"},
+                        "eligibility_window_days":eligibility_days,
+                        "eligibility":f"same session-start criterion [asof-{eligibility_days}d,asof) applied separately in both domains"},
             "source_cache":source_descriptor,"runs":runs,
             "interpretation":[
                 "Same calendar span/asof/eligibility criterion; source and generated people and donor composition are not individually matched.",

@@ -99,3 +99,70 @@ def load_tables(directory: str | Path = "data/processed") -> dict[str, Any]:
     tables["_metadata"] = json.loads(manifest.read_text()) if manifest.exists() else {}
     tables["_format"] = "legacy_parquet"
     return tables
+
+
+def load_uplift_inputs(feature_directory: str | Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Read the customer, weekly and cart inputs for the four-week purchase learner.
+
+    Monetary values keep the materialized minor units. Currency, amount unit,
+    dataset identity and experiment seed travel in each frame's attrs.
+    """
+    path = Path(feature_directory)
+    provenance_columns = ["dataset_id", "currency", "amount_unit"]
+    keys = ["customer_id", "as_of_at", "snapshot_id", *provenance_columns]
+    assignments = pd.read_parquet(
+        path / "experiment_log.parquet",
+        columns=[*keys, "seed", "assigned_at", "treatment", "outcome_end_at", "outcome_observed"],
+    )
+    if assignments.empty or assignments.customer_id.duplicated().any():
+        raise ValueError("Uplift input requires one assignment per customer")
+    w0 = pd.Timestamp(assignments.as_of_at.iloc[0])
+    if pd.isna(w0) or w0.tzinfo is None:
+        raise ValueError("Uplift w0 must be a timezone-aware Monday midnight in Asia/Seoul")
+    w0 = w0.tz_convert("Asia/Seoul")
+    if w0.weekday() != 0 or w0 != w0.normalize():
+        raise ValueError("Uplift w0 must be a timezone-aware Monday midnight in Asia/Seoul")
+    start, end = w0 - pd.Timedelta(weeks=12), w0 + pd.Timedelta(weeks=4)
+    if not assignments.assigned_at.eq(w0).all() or not assignments.outcome_end_at.eq(end).all():
+        raise ValueError("Uplift requires assignment at w0 and a four-week outcome")
+    weekly_columns = ["sessions", "purchases", "net_revenue_minor", "views", "session_seconds"]
+    weekly = pd.read_parquet(
+        path / "weekly_panel.parquet", columns=[*keys, "seed", "reference_week", *weekly_columns],
+        filters=[("reference_week", ">=", start), ("reference_week", "<", end)],
+    )
+    cart_columns = {f"{name}_current": name for name in ("cart_qty", "cart_sku", "cart_gross_value")}
+    cart = pd.read_parquet(path / "feature_store.parquet", columns=[*keys, *cart_columns])
+    provenance = assignments.iloc[0][provenance_columns].to_dict()
+    by_customer = assignments.set_index("customer_id")
+    snapshots = by_customer.snapshot_id
+    for frame in (assignments, weekly, cart):
+        if (frame[keys].isna().any().any() or not frame.as_of_at.eq(w0).all()
+                or set(frame.customer_id) != set(snapshots.index)
+                or not frame.customer_id.map(snapshots).eq(frame.snapshot_id).all()
+                or any(not frame[name].eq(value).all() for name, value in provenance.items())):
+            raise ValueError("Uplift inputs must share one dataset and the assignment snapshots")
+    if (cart.customer_id.duplicated().any() or weekly.duplicated(["customer_id", "reference_week"]).any()
+            or not weekly.reference_week.isin(pd.date_range(start, end, freq="7D", inclusive="left")).all()):
+        raise ValueError("Uplift inputs require unique customers and unique Monday weeks")
+    if (not assignments.treatment.isin([0, 1]).all()
+            or not pd.api.types.is_bool_dtype(assignments.outcome_observed)
+            or assignments.outcome_observed.isna().any()):
+        raise ValueError("Uplift assignments require binary treatment and an explicit outcome observation flag")
+    if not pd.api.types.is_integer_dtype(assignments.seed) or assignments.seed.isna().any():
+        raise ValueError("Uplift inputs require one recorded integer experiment seed")
+    seed = int(assignments.seed.iloc[0])
+    if not assignments.seed.eq(seed).all() or not weekly.seed.eq(seed).fillna(False).all():
+        raise ValueError("Uplift inputs must share the assignment experiment seed")
+    outcome_observed = weekly.customer_id.map(by_customer.outcome_observed)
+    # pandas nullable integers produce pd.NA in NumPy comparisons in build_dataset.
+    weekly[["sessions", "purchases"]] = weekly[["sessions", "purchases"]].astype(float)
+    weekly.loc[weekly.reference_week.ge(w0) & ~outcome_observed.astype(bool), "purchases"] = np.nan
+    weekly["session_seconds"] = weekly.session_seconds.astype(float) / 60
+    customers = assignments[["customer_id", "treatment"]].assign(w0=w0)
+    weekly = weekly[["customer_id", "reference_week", *weekly_columns]].rename(
+        columns={"net_revenue_minor": "net_revenue", "session_seconds": "session_minutes"},
+    )
+    cart = cart[["customer_id", *cart_columns]].rename(columns=cart_columns)
+    for frame in (customers, weekly, cart):
+        frame.attrs = {**provenance, "seed": seed}
+    return customers, weekly, cart

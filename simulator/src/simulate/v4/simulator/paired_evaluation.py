@@ -8,10 +8,11 @@ import numbers
 import numpy as np
 import pandas as pd
 
+from simulate.v4.simulator.outcomes import GENERATION_WINDOW_DAYS, experiment_window_days
+
 
 PAIRED_METHOD_VERSION = "paired-retention-equation-v1"
 OUTCOME_DEFINITION = "future_no_session_30d_active30d"
-_HORIZONS = {OUTCOME_DEFINITION: 30, "future_no_session_28d_active30d": 28}
 _OUTCOME_TYPES = {(1, 1): "ST", (0, 1): "P", (1, 0): "SD", (0, 0): "LC"}
 
 
@@ -35,18 +36,22 @@ def paired_retention_rollouts(diagnostics: pd.DataFrame, metadata: dict,
             not isinstance(metadata.get("schema_version"), numbers.Integral) or metadata["schema_version"] != 7 or
             metadata.get("simulator_version") not in {f"source-shopping-v{version}" for version in range(2, 13)}):
         raise ValueError("paired equation evaluation requires schema 7 and source-shopping-v2 through v12")
+    eligibility_days = experiment_window_days(metadata, "eligibility_window_days")
+    experiment_window_days(metadata, "coupon_validity_days")
+    horizons = {f"future_no_session_{days}d_active{eligibility_days}d": days for days in (28, GENERATION_WINDOW_DAYS)}
     definition = metadata.get("definition_id")
-    if not isinstance(definition, str) or definition not in _HORIZONS:
+    if not isinstance(definition, str) or definition not in horizons:
         raise ValueError("unsupported return outcome definition")
-    days = _HORIZONS[definition]
-    for name, expected in (("outcome_window_days", days), ("generation_window_days", 30), ("eligibility_window_days", 30)):
-        declared = metadata.get(name, expected if days == 30 else None)
+    days = horizons[definition]
+    for name, expected in (("outcome_window_days", days), ("generation_window_days", GENERATION_WINDOW_DAYS)):
+        declared = metadata.get(name, expected if days == GENERATION_WINDOW_DAYS else None)
         if isinstance(declared, bool) or not isinstance(declared, numbers.Integral) or declared != expected:
             raise ValueError(f"{name} must explicitly match {expected}")
     p0_name, p1_name = f"no_coupon_return_probability_{days}d", f"coupon_return_probability_{days}d"
-    scope = ("first_30_day_activity_equation" if days == 30 else
+    scope = ("first_30_day_activity_equation" if days == GENERATION_WINDOW_DAYS else
              "first_28_day_return_marginal_of_30d_activity_window")
-    if days == 28 and (metadata.get("generation_definition_id") != OUTCOME_DEFINITION or
+    generation_definition = f"future_no_session_{GENERATION_WINDOW_DAYS}d_active{eligibility_days}d"
+    if days == 28 and (metadata.get("generation_definition_id") != generation_definition or
                        not isinstance(metadata.get("parent_dataset_id"), str) or not metadata["parent_dataset_id"].strip()):
         raise ValueError("28-day evaluation requires the original 30-day definition and parent dataset")
     dataset_id = metadata.get("dataset_id")
@@ -91,9 +96,10 @@ def paired_retention_rollouts(diagnostics: pd.DataFrame, metadata: dict,
                   "snapshot_id": f"{customer_id}:{snapshot.isoformat()}", "actual_experiment_seed": seed,
                   "paired_derived_seed": derived_seed, "paired_method_version": PAIRED_METHOD_VERSION,
                   "simulator_version": metadata["simulator_version"], "outcome_definition_id": definition,
-                  "outcome_window_days": days, "generation_window_days": 30, "eligibility_window_days": 30,
+                  "outcome_window_days": days, "generation_window_days": GENERATION_WINDOW_DAYS,
+                  "eligibility_window_days": eligibility_days,
                   "parent_dataset_id": metadata.get("parent_dataset_id"),
-                  "generation_definition_id": metadata.get("generation_definition_id", OUTCOME_DEFINITION),
+                  "generation_definition_id": metadata.get("generation_definition_id", generation_definition),
                   "outcome_scope": scope, "is_factual_replay": False,
                   "evaluation_only": True}
         p0, p1 = float(row[p0_name]), float(row[p1_name])

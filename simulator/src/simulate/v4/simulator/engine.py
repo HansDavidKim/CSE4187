@@ -21,7 +21,7 @@ import pandas as pd
 import yaml
 
 from .raw_store import RAW_COLUMNS, discount_minor, save_raw_dataset
-from .outcomes import redefine_outcomes
+from .outcomes import experiment_window_days, redefine_outcomes
 from .lifecycle import build_observed_lifecycle
 from .item_choice import item_probabilities
 from .coupon_response import sample_coupon_response, validate_response_model
@@ -174,6 +174,13 @@ class EcommerceSimulator:
         if decision < local:
             decision += pd.Timedelta(days=7)
         t0 = decision.tz_convert("UTC")
+        eligibility_days = experiment_window_days(self.settings, "eligibility_window_days")
+        coupon_validity_days = experiment_window_days(self.settings, "coupon_validity_days")
+        eligibility_start = t0 - pd.Timedelta(days=eligibility_days)
+        coupon_expires_at = t0 + pd.Timedelta(days=coupon_validity_days)
+        experiment_policy = f"coupon_once_highest_unit_{coupon_validity_days}d"
+        coupon_policy = f"one_coupon_10pct_highest_unit_{coupon_validity_days}d"
+        generation_definition = f"future_no_session_30d_active{eligibility_days}d"
         if months >= 24:
             end = max(end, t0 + pd.DateOffset(months=12))
         outcome_end = t0 + pd.Timedelta(days=30)
@@ -646,7 +653,7 @@ class EcommerceSimulator:
                     response_record = state.get("coupon_response")
                     response_ready = (purchase_response is not None and treatment and not state["coupon_used"]
                                       and response_record["response_selected"]
-                                      and response_record["response_ready_at"] <= when < outcome_end)
+                                      and response_record["response_ready_at"] <= when < coupon_expires_at)
                     if not p.sum() and not response_ready:
                         # An observed remove-only start with unknown initial cart cannot be fabricated in a complete empty-cart history.
                         limited = True
@@ -666,11 +673,15 @@ class EcommerceSimulator:
                     when, prior_gap = next_time, gap
                     if (purchase_response is not None and treatment and not state["coupon_used"]
                             and response_record["response_selected"]
-                            and response_record["response_ready_at"] <= when < outcome_end):
+                            and response_record["response_ready_at"] <= when < coupon_expires_at):
                         # shortcut: O2O rates transfer to shopping opportunities, replace with coupon RCT calibration when available.
                         response_record.update(opportunity_at=when, baseline_action=action,
                                                promoted_purchase=action != "purchase")
                         action = "purchase"
+                    elif action is None:
+                        # The coupon can expire during the gap to an otherwise unsupported action.
+                        limited, termination_reason = True, "no_nonterminal_support"
+                        break
                     decision_offer = offer_seen
                     interaction_units = 1
                     if action == "view":
@@ -713,7 +724,7 @@ class EcommerceSimulator:
                         use_coupon = (treatment and not state["coupon_used"]
                                       and (response_record["response_selected"] and response_record["response_ready_at"] <= when
                                            if purchase_response is not None else state["will_use_coupon"])
-                                      and t0 <= when < t0 + pd.Timedelta(days=30))
+                                      and t0 <= when < coupon_expires_at)
                         target_line, target_product = max(enumerate(basket, 1),
                             key=lambda item: (products_by_id[item[1]]["unit_price_minor"], -item[0]))
                         reduction = discount_minor(products_by_id[target_product]["unit_price_minor"], discount) if use_coupon else 0
@@ -815,7 +826,7 @@ class EcommerceSimulator:
             for lower, upper in reversed(windows):
                 probability = float(_sigmoid(source_return_logit(local, index, lower, state) + history_shift))
                 user_segment(uid, profile, signed, lower, upper, probability, state, local)
-            eligible = any(row["started_at"] >= t0 - pd.Timedelta(days=30) for row in local["sessions"])
+            eligible = any(eligibility_start <= row["started_at"] < t0 for row in local["sessions"])
             candidates += 1
             if not eligible:
                 del session_diagnostic_rows[old_diagnostics_size:]
@@ -842,13 +853,13 @@ class EcommerceSimulator:
             coupon_id = f"{uid}:C1" if treatment else None
             if treatment:
                 frames["coupons"].append({"coupon_id": coupon_id, "customer_id": uid, "sent_at": t0,
-                    "expires_at": outcome_end, "discount_rate": discount, "policy_id": "one_coupon_10pct_highest_unit_30d",
+                    "expires_at": coupon_expires_at, "discount_rate": discount, "policy_id": coupon_policy,
                     "send_cost_minor": send_cost})
             treatment_rows.append({"customer_id": uid, "as_of_at": t0, "assigned_at": t0,
-                "treatment": int(treatment), "assignment_probability": 0.5, "experiment_id": "coupon_once_highest_unit_30d",
+                "treatment": int(treatment), "assignment_probability": 0.5, "experiment_id": experiment_policy,
                 "coupon_id": coupon_id, "actual_sent": bool(treatment), "sent": bool(treatment),
                 "send_cost_minor": send_cost if treatment else 0,
-                "intervention_spec": "one 10% coupon at t0 on the highest-unit-price purchased unit, valid 30d, no later sending"})
+                "intervention_spec": f"one 10% coupon at t0 on the highest-unit-price purchased unit, valid {coupon_validity_days}d, no later sending"})
             window = t0
             while window < end:
                 upper = min(window + pd.Timedelta(days=30), end)
@@ -914,8 +925,8 @@ class EcommerceSimulator:
                 "future_retained": int(uid in active), "future_revenue_30d": int(revenue30.get(uid, 0)),
                 "future_revenue": int(revenue30.get(uid, 0)),
                 "future_revenue_12m": int(revenue12.get(uid, 0)) if end >= clv_end and not row["treatment"] else None,
-                "clv_outcome_end_at": clv_end, "definition_id": "future_no_session_30d_active30d",
-                "policy_id": "one_coupon_10pct_highest_unit_30d" if row["treatment"] else "no_new_coupon",
+                "clv_outcome_end_at": clv_end, "definition_id": generation_definition,
+                "policy_id": coupon_policy if row["treatment"] else "no_new_coupon",
                 "is_censored": False, "observation_status": "complete"})
         tables.update(labels=pd.DataFrame(labels), treatments=pd.DataFrame(treatment_rows),
                       diagnostics=pd.DataFrame(diagnostic_rows), session_diagnostics=pd.DataFrame(session_diagnostic_rows))
@@ -949,10 +960,12 @@ class EcommerceSimulator:
             "configured_target_churn_rate": self.config["churn"].get("target_rate"),
             "start_at": start.isoformat(), "end_at": end.isoformat(),
             "observation_start_at": start.isoformat(), "observation_end_at": end.isoformat(), "as_of_at": t0.isoformat(),
-            "definition_id": "future_no_session_30d_active30d", "policy_id": "coupon_once_highest_unit_30d",
+            "definition_id": generation_definition, "policy_id": experiment_policy,
+            "eligibility_window_days": eligibility_days, "coupon_validity_days": coupon_validity_days,
             "target_churn_rate": target, "expected_control_churn_rate": float(np.mean(1 - _sigmoid(snapshot_logits + outcome_shift))),
             "observed_churn_rate": observed, "history_logit_shift": history_shift, "outcome_logit_shift": outcome_shift,
-            "candidate_customers": candidates, "eligible_customers": n_customers, "eligibility": "session in [t0-30d,t0), selection uses history only",
+            "candidate_customers": candidates, "eligible_customers": n_customers,
+            "eligibility": f"session in [t0-{eligibility_days}d,t0), selection uses history only",
             "model_path": str(self.model_path), "model_sha256": hashlib.sha256(model_bytes).hexdigest(),
             "return_model_path": return_model_path,
             "return_model_sha256": hashlib.sha256(return_model_bytes).hexdigest() if return_model_bytes else None,
@@ -1021,7 +1034,7 @@ class EcommerceSimulator:
             "simulator_code_sha256": simulator_sha,
             "runtime_code_sha256": runtime_hashes,
             "configuration_sha256": hashlib.sha256(json.dumps(self.config, sort_keys=True).encode()).hexdigest(),
-            "marketing_effect_source": "Hillstrom randomized 14d email mean transferred to 30d coupon scenario; latent signs are MaxEnt decomposition, not identified individual effects",
+            "marketing_effect_source": "Hillstrom randomized 14d email mean transferred to the 30d visit window; latent signs are MaxEnt decomposition, not identified individual effects",
             "marketing_proxy_sha256": hashlib.sha256(message_path.read_bytes()).hexdigest(),
             "coupon_takeup_source": "dunnhumby targeted descriptive baseline; cross-domain transfer assumption",
             "coupon_model_sha256": hashlib.sha256(response_bytes if response_bytes else coupon_path.read_bytes()).hexdigest(),
@@ -1111,5 +1124,6 @@ class EcommerceSimulator:
         metadata["table_rows"] = {name: len(frame) for name, frame in tables.items()}
         tables, metadata = redefine_outcomes(
             tables, metadata, outcome_days=self.settings.get("outcome_days", 28), shopping_model=model,
+            eligibility_days=eligibility_days,
             **({"visit_timing_model": visit_timing_model} if visit_timing_model is not None else {}))
         return SimulationResult(tables, time.perf_counter() - started, metadata)

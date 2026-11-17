@@ -120,6 +120,69 @@ def test_sidecar_experiment_coverage_and_explicit_new_snapshot(dataset, tmp_path
     assert manifest["omitted"] == {} and set(manifest["file_sha256"]) >= {"features.sqlite", "feature_store.parquet"}
 
 
+def test_experiment_exports_use_declared_eligibility_and_coupon_validity(dataset):
+    from simulate.v4.data.experiment_exports import build_no_purchase_labels
+    from simulate.v4.data.weekly import build_experiment_log
+
+    add_sidecars(dataset)
+    tables = load_tables(dataset)
+    metadata = {**tables["_metadata"], "definition_id": "future_no_session_28d_active30d"}
+    start = T0 - pd.Timedelta(days=29)
+    tables["sessions"].loc[len(tables["sessions"])] = dict(
+        session_id="old-only", customer_id="v", started_at=start, ended_at=start + pd.Timedelta(minutes=1),
+    )
+    legacy = build_experiment_log(tables, metadata)
+    assert legacy.eligible_at_assignment.all()
+    assert build_no_purchase_labels(tables, metadata, legacy).definition_id.eq("future_no_order_28d_active30d").all()
+    metadata.update(eligibility_window_days=28, coupon_validity_days=28, definition_id="future_no_session_28d_active28d")
+    tables["labels"]["definition_id"] = metadata["definition_id"]
+    with pytest.raises(ValueError, match="exactly 28 days"):
+        build_experiment_log(tables, metadata)
+    tables["coupons"]["expires_at"] = T0 + pd.Timedelta(days=28)
+    current = build_experiment_log(tables, metadata)
+    assert current.set_index("customer_id").eligible_at_assignment.to_dict() == {"u": True, "v": False}
+    labels = build_no_purchase_labels(tables, metadata, current)
+    assert labels.definition_id.eq("future_no_order_28d_active28d").all()
+    assert labels.eligibility_window_days.eq(28).all()
+    assert labels.no_purchase_churn.eq(1).all()
+
+
+def test_uplift_reader_aligns_assignment_inputs_and_preserves_censoring(dataset, tmp_path):
+    from simulate.v4.data.loader import load_uplift_inputs
+
+    add_sidecars(dataset)
+    features = tmp_path / "features"
+    materialize_features(dataset, features)
+    experiment_path = features / "experiment_log.parquet"
+    experiment = pd.read_parquet(experiment_path)
+    experiment.loc[experiment.customer_id.eq("v"), "outcome_observed"] = False
+    experiment.to_parquet(experiment_path, index=False)
+
+    customers, weekly, cart = load_uplift_inputs(features)
+    assert set(customers) == {"customer_id", "w0", "treatment"}
+    assert customers.w0.eq(T0.tz_convert("Asia/Seoul")).all()
+    assert set(weekly) == {"customer_id", "reference_week", "sessions", "purchases", "net_revenue", "views", "session_minutes"}
+    assert weekly.reference_week.ge(T0 - pd.Timedelta(weeks=12)).all()
+    assert weekly.reference_week.lt(T0 + pd.Timedelta(weeks=4)).all()
+    assert weekly.net_revenue.sum() == 300 and weekly.session_minutes.sum() == 20
+    assert pd.api.types.is_integer_dtype(weekly.net_revenue)
+    assert weekly.sessions.dtype == float and weekly.purchases.dtype == float
+    future = weekly.loc[weekly.reference_week.ge(T0)]
+    assert future.loc[future.customer_id.eq("u"), "purchases"].eq(0).all()
+    assert future.loc[future.customer_id.eq("v"), "purchases"].isna().all()
+    assert set(cart) == {"customer_id", "cart_qty", "cart_sku", "cart_gross_value"}
+    assert cart.set_index("customer_id").loc["u", "cart_gross_value"] == 100
+    assert customers.attrs == weekly.attrs == cart.attrs == {
+        "dataset_id": "v4-contract", "currency": "SOURCE_UNSPECIFIED", "amount_unit": "0.01", "seed": 3,
+    }
+    cart_path = features / "feature_store.parquet"
+    featured = pd.read_parquet(cart_path)
+    featured.loc[featured.customer_id.eq("u"), "snapshot_id"] = "wrong snapshot"
+    featured.to_parquet(cart_path, index=False)
+    with pytest.raises(ValueError, match="share one dataset and the assignment snapshots"):
+        load_uplift_inputs(features)
+
+
 def test_feature_database_is_closed_before_publication(dataset, tmp_path, monkeypatch):
     from types import SimpleNamespace
     from simulate.v4 import storage

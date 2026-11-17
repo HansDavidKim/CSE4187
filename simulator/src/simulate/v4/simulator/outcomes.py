@@ -11,6 +11,14 @@ import pandas as pd
 GENERATION_WINDOW_DAYS = 30
 
 
+def experiment_window_days(metadata, key):
+    """Resolve a declared experiment window or the original 30-day default."""
+    value = metadata.get(key, GENERATION_WINDOW_DAYS)
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral) or value not in (28, 30):
+        raise ValueError(f"{key} must be 28 or 30")
+    return int(value)
+
+
 def _utc(value):
     result = pd.to_datetime(value, utc=True, errors="raise")
     if isinstance(result, pd.Series) and result.isna().any():
@@ -27,7 +35,8 @@ def _first_session_share(profile, group, outcome_days):
     return 1 - (GENERATION_WINDOW_DAYS - outcome_days) / GENERATION_WINDOW_DAYS * tail
 
 
-def redefine_outcomes(tables, metadata, outcome_days=28, shopping_model=None, visit_timing_model=None):
+def redefine_outcomes(tables, metadata, outcome_days=28, shopping_model=None, visit_timing_model=None, *,
+                      eligibility_days=None):
     """Return new labels/diagnostics; share unchanged raw tables and assignments.
 
     This is an analysis view of the existing 30-day generation law, not a new
@@ -36,6 +45,11 @@ def redefine_outcomes(tables, metadata, outcome_days=28, shopping_model=None, vi
     """
     if isinstance(outcome_days, bool) or not isinstance(outcome_days, numbers.Integral) or not 1 <= outcome_days <= GENERATION_WINDOW_DAYS:
         raise ValueError("outcome_days must be an integer from 1 through 30")
+    eligibility_days = experiment_window_days(
+        metadata if eligibility_days is None else {"eligibility_window_days": eligibility_days},
+        "eligibility_window_days",
+    )
+    definition = f"future_no_session_{int(outcome_days)}d_active{eligibility_days}d"
     if "labels" not in tables or "treatments" not in tables:
         raise ValueError("Outcome redefinition requires original labels and factual assignments")
     if visit_timing_model is not None:
@@ -74,8 +88,8 @@ def redefine_outcomes(tables, metadata, outcome_days=28, shopping_model=None, vi
     labels["future_revenue"] = revenue
     labels["outcome_end_at"] = labels.as_of_at + pd.Timedelta(days=int(outcome_days))
     labels["outcome_window_days"] = int(outcome_days)
-    labels["eligibility_window_days"] = GENERATION_WINDOW_DAYS
-    labels["definition_id"] = f"future_no_session_{int(outcome_days)}d_active30d"
+    labels["eligibility_window_days"] = eligibility_days
+    labels["definition_id"] = definition
     labels["is_censored"] = labels.churn.isna()
     labels["observation_status"] = np.where(labels.is_censored, "immature", "complete")
 
@@ -89,8 +103,8 @@ def redefine_outcomes(tables, metadata, outcome_days=28, shopping_model=None, vi
         "generation_policy_id": metadata.get("generation_policy_id", metadata.get("policy_id")),
         "generation_target_churn_rate": metadata.get("generation_target_churn_rate", metadata.get("target_churn_rate")),
         "generation_window_days": GENERATION_WINDOW_DAYS,
-        "outcome_window_days": int(outcome_days), "eligibility_window_days": GENERATION_WINDOW_DAYS,
-        "definition_id": f"future_no_session_{int(outcome_days)}d_active30d",
+        "outcome_window_days": int(outcome_days), "eligibility_window_days": eligibility_days,
+        "definition_id": definition,
         "outcome_revenue_column": revenue_column,
         "analysis_view": "immutable 30d generation queried under a shorter observation window",
         "analysis_target_recalibrated": False,

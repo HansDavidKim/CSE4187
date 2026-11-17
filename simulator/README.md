@@ -71,11 +71,14 @@ GMM을 적합한다. 합성용 donor 성분 확률까지 저장하려면 학습�
 
 v12는 고정된 전이를 미리 묶고 Newton 갱신으로 soft Bellman 정책을 계산한다.
 Bellman 잔차가 기준을 충족하면 정책을 사용하고, 계산이 수렴하지 않으면 기존 반복법으로
-계산한다. Apple M3에서 20,000명·24개월·seed42의 원시 생성과 저장에 든 CPU 시간은
+계산한다. 이전 30일 적격성·쿠폰 조건으로 Apple M3에서 진행한 20,000명·24개월·seed42
+비교의 원시 생성과 저장 CPU 시간은
 원래 v12 1,866.67초에서 1,132.63초로 줄었다. SQLite와 Parquet 14개의 체크섬은
 같았다. 같은 조건의 v10은 807.97초였다. Cosmetics 5개월 분포 검증에서 GMM
 보완안은 독립 고객 표본을 바꿨을 때 행동 비중, 행동 전이, 세션 길이 오차의 허용
-기준을 모두 충족하지 못했다. GMM 설정을 선택하면 최적화한 v12로 실행한다.
+기준을 모두 충족하지 못했다. 현재 28일 조건의 5개월 전체 분포에서는 v12가 두
+보류 표본의 세 지표를 개선했다. 배정 이후 28일 대조군의 행동 비중 오차는 두
+표본 모두에서 v10이 낮았다. GMM 설정을 선택하면 최적화한 v12로 실행한다.
 
 업무 기록은 `raw.sqlite`의 고객·상품·세션·이벤트·주문·주문상품·쿠폰 7개 관계에
 저장한다. `features.sqlite`는 공개 이력의 39개 피처와 배정·정답·주간/실험 테이블을
@@ -83,8 +86,11 @@ Bellman 잔차가 기준을 충족하면 정책을 사용하고, 계산이 수�
 `EXPANDED_FEATURES`와 파생 DB의 `feature_registry`를 따른다.
 조회 예시는 [query_v4.sql](scripts/query_v4.sql)에 있다.
 
-기본 이탈 정답은 미래 28일 미방문이며, 과거 피처·적격성 창과 쿠폰 유효기간은
-30일이다. 쿠폰은 고객별 1:1 고정 배정하며 실제 발송과 사용을 구분한다. 별점은
+기본 실험의 적격성은 배정 직전 28일 방문 여부이며, 쿠폰은 배정 때 한 번 발송해
+28일 동안 유효하다. 미래 28일 미방문은 기본 이탈 정답이고, 28일 미구매 정답은
+실험 출력에서 별도로 제공한다. KIT의 `_30d` 피처와 원천 방문 모형의 30일 학습 창은
+별도로 사용한다. 과거 30일 적격성·쿠폰 산출물은 해당 manifest 기준으로 읽는다.
+쿠폰은 고객별 1:1 고정 배정하며 실제 발송과 사용을 구분한다. 별점은
 실제 구매한 상품별 최대 한 번이다. 금액은 원자료의 통화·단위를 유지한다.
 잠재 성향과 미래 정답은 예측 피처에 포함하지 않는다.
 
@@ -95,8 +101,29 @@ ecommerce-sim v4 export-experiment --data artifacts/small \
   --output artifacts/experiment --evaluation-output artifacts/evaluation_only/small
 ```
 
-이 평가는 조건부 재방문 확률의 비교이며 실제 개인 인과효과의 식별이 아니다.
+쌍대 평가는 조건부 재방문 확률을 비교한다. Uplift의 28일 구매 학습 정답은
+`no_purchase_labels.parquet`의 실제 주문에서 계산한 값을 사용한다.
 기존 `run`·Starbucks·`campaign` 환경은 별도 연구 경로로 보존한다.
+
+### Uplift 입력
+
+`features` 명령이 생성한 디렉터리에서 실험 고객, 주간 합계, 배정 시 장바구니를 읽는다.
+
+```python
+from simulate.v4.data.loader import load_uplift_inputs
+from uplift.common.features import build_dataset
+
+customers, weekly, cart = load_uplift_inputs("artifacts/features")
+training = build_dataset(customers, weekly, cart)
+```
+
+`w0`는 서울 월요일 00시의 배정 시점이다. 주간 `session_minutes`는 초를 분으로
+환산하고, `net_revenue`와 장바구니 금액은 원천 최소 단위로 유지한다. 각 입력의
+`attrs`에는 dataset ID, seed, 통화와 금액 단위가 있다.
+
+기존 retention 입력의 주문 고객·세션·시각은 `orders.purchase_event_id`로
+`events`를 조인해 얻을 수 있다. 품목은 `order_items`, 쿠폰 사용은
+`orders.coupon_id`가 있는 주문에서 가져온다.
 
 ## 검증
 
