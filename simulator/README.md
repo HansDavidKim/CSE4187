@@ -50,10 +50,13 @@ ecommerce-sim v4 features --data artifacts/small --output artifacts/features
 학습된 쇼핑·재방문·리뷰 모형과 방문·가격·바구니·리뷰 지연의 집계 분포를 사용한다.
 원천 고객별 관측 프로필을 쓰는 실행과 생성 분포 및 데이터셋 ID가 달라질 수 있다.
 
-합성 프로필 설정은 이산 성향 모형을 사용한다. 별도 시드 122·123으로 각 2,000명·6개월을
-생성해 기존 고객별 프로필 기반 v10과 비교했을 때 평균 오차는 보정 전 0.1296,
-보정한 이산 모형 0.0811, GMM 0.0993이었다. 방문 수·주문 수·28일 미방문율·행동 비중·
-행동 전이의 오차를 같은 가중치로 비교했다.
+합성 프로필 설정은 이산 쇼핑 정책과 GMM 재방문 모형을 사용한다. 각 고객의 쇼핑
+보상에 따른 재방문 오프셋을 GMM에서 한 번 뽑아 전체 이력에 적용한다. GMM의
+학습 범위에서 벗어난 쇼핑 보상에는 이산 모형의 재방문 오프셋을 적용한다.
+
+별도 시드 222·223으로 각 2,000명·6개월을 생성해 고객별 프로필 기반 v10과 비교했다.
+방문 수·주문 수·28일 미방문율·행동 비중·행동 전이의 오차를 같은 가중치로 비교했을 때
+평균 오차는 이산 모형 0.1136, 전체 GMM 0.0810, 결합 모형 0.0642였다.
 
 학습 자료는 [REES46](https://rees46.com/en/datasets)의
 [Cosmetics Shop 행동 기록](https://www.kaggle.com/datasets/mkechinov/ecommerce-events-history-in-cosmetics-shop),
@@ -65,12 +68,12 @@ ecommerce-sim v4 features --data artifacts/small --output artifacts/features
 
 ```bash
 PYTHONPATH=src python -m simulate.v4.irl.export_population \
-  --models /path/to/assets/data/models --output artifacts/population/data/models
+  --models /path/to/assets/data/models --reward-gmm /path/to/fitted-gmm.json \
+  --output artifacts/population/data/models
 ```
 
 이 파일들을 사용하려면 `generate --config src/simulate/v4/config/population.yaml`에
-`--assets-root artifacts/population/data/models`를 추가한다. 학습한 GMM을 함께
-내보낼 때는 `export_population --reward-gmm <fitted-gmm.json>`를 사용한다.
+`--assets-root artifacts/population/data/models`를 추가한다.
 
 ### 원천 고객별 프로필 기반 실행
 

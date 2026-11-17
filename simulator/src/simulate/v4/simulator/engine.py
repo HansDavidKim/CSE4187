@@ -270,6 +270,9 @@ class EcommerceSimulator:
             runtime_hashes["fit_joint_latent_shopping"] = hashlib.sha256(path.read_bytes()).hexdigest()
         gaussian_path = self.settings.get("gaussian_reward_model_path")
         gmm_path = self.settings.get("reward_gmm_model_path")
+        gmm_return_only = self.settings.get("reward_gmm_return_only", False)
+        if type(gmm_return_only) is not bool or (gmm_return_only and not gmm_path):
+            raise ValueError("reward_gmm_return_only requires a fitted GMM")
         if gaussian_path and gmm_path:
             raise ValueError("configure one continuous reward model at a time")
         gaussian_block = gaussian_bytes = gaussian_matrices = None
@@ -293,11 +296,19 @@ class EcommerceSimulator:
                         gaussian_block["mixture_weights"] != latent_block["mixture_weights"]):
                     raise ValueError("Gaussian reward components differ from the frozen donor mixture")
                 module = "fit_gaussian_rewards"
-            gaussian_matrices = unpack_matrices(latent_block)
-            if gmm_path:
-                gmm_policy = prepare_bellman(latent_block, gaussian_matrices)
+            if gmm_return_only:
+                from simulate.v4.irl import conditional_return
+
+                draw_return_offset = conditional_return.prepare_conditional_return(
+                    gaussian_block, latent_block["component_offsets"], latent_block["return_activity"]["component_logit_offsets"])
+                runtime_hashes["conditional_return"] = hashlib.sha256(Path(conditional_return.__file__).read_bytes()).hexdigest()
+            else:
+                gaussian_matrices = unpack_matrices(latent_block)
+                if gmm_path:
+                    gmm_policy = prepare_bellman(latent_block, gaussian_matrices)
             path = Path(__file__).parents[1] / "irl" / f"{module}.py"
             runtime_hashes[module] = hashlib.sha256(path.read_bytes()).hexdigest()
+        continuous_shopping = gaussian_block is not None and not gmm_return_only
         retention_mode = self.settings.get("retention_mode", "target")
         signup_mode = self.settings.get("signup_mode", "legacy_bounded_uniform")
         target = float(self.config["churn"]["target_rate"]) if retention_mode == "target" else None
@@ -499,7 +510,9 @@ class EcommerceSimulator:
             context = return_context([session["started_at"] for session in local["sessions"]], local["events"], as_of,
                                      purchase_item_units=quantities if checkout_episodes else None)
             value = float(_logit(return_probability(return_model, context)))
-            if gaussian_block is not None:
+            if gmm_return_only:
+                value += state["conditional_return_offset"]
+            elif continuous_shopping:
                 value += state["gaussian_reward"]["return_offset"]
             elif latent_return_offset is not None:
                 value += latent_return_offset(model, state["latent_reward_component"])
@@ -655,7 +668,7 @@ class EcommerceSimulator:
                         context["previous_action_run_length"] = previous_run_length
                     if latent_block is not None:
                         probabilities = (causal_policy(model, context, None if gmm_path else state["latent_reward_component"],
-                                         state["gaussian_reward"]["policy"]) if gaussian_block is not None else
+                                         state["gaussian_reward"]["policy"]) if continuous_shopping else
                                          causal_policy(model, context, state["latent_reward_component"]))
                     elif causal_policy is not None:
                         probabilities = causal_policy(model, context)
@@ -840,7 +853,7 @@ class EcommerceSimulator:
                      "price_sum": 0, "price_count": 0, "reference_price": None, "first_event_at": None,
                      "will_use_coupon": rng.random() < coupon_use}
             if latent_sampler is not None:
-                if gmm_path:
+                if gmm_path and continuous_shopping:
                     component, scope, state["gaussian_reward"] = sample_gmm_reward(
                         gaussian_block, factors, gmm_policy, profile["profile_id"], rng)
                 else:
@@ -850,7 +863,10 @@ class EcommerceSimulator:
                         scope = "synthetic_population_group"
                     else:
                         component, scope = latent_sampler(model, profile["profile_id"], rng)
-                    if gaussian_block is not None:
+                    if gmm_return_only:
+                        state["conditional_return_offset"] = draw_return_offset(
+                            component, auxiliary_rng(f"{uid}:{candidates}", "conditional_return"))
+                    elif continuous_shopping:
                         state["gaussian_reward"] = sample_reward_policy(model, gaussian_block, component, rng,
                                                                         matrices=gaussian_matrices)
                 state.update(latent_reward_component=component, latent_assignment_scope=scope,
@@ -922,7 +938,9 @@ class EcommerceSimulator:
             if latent_sampler is not None:
                 diagnostic_rows[-1].update(latent_reward_component=state["latent_reward_component"],
                                           latent_assignment_scope=state["latent_assignment_scope"])
-            if gaussian_block is not None:
+            if gmm_return_only:
+                diagnostic_rows[-1]["conditional_return_logit_offset"] = state["conditional_return_offset"]
+            if continuous_shopping:
                 draw = state.pop("gaussian_reward")
                 diagnostic_rows[-1].update({f"gaussian_reward_offset_{action}": float(value)
                                            for action, value in zip(("view", "cart", "remove", "purchase"), draw["action_offsets"])})
@@ -988,11 +1006,13 @@ class EcommerceSimulator:
             unit_tag += "-joint-timing"
         if population is not None:
             unit_tag += "-population"
-        if gmm_path:
+        if gmm_return_only:
+            unit_tag += "-gmm-return"
+        elif gmm_path:
             unit_tag += "-gmm"
-        elif gaussian_block is not None:
+        elif continuous_shopping:
             unit_tag += "-gaussian"
-        version = 12 if gmm_path else 11 if gaussian_block is not None else 10 if latent_return_offset is not None else 9 if latent_block is not None else 8 if causal_policy is not None else 7 if "review" in event_models else 6 if donor_prior is not None or checkout_kernel is not None or retention_mode == "source" else 5
+        version = 12 if gmm_path and continuous_shopping else 11 if continuous_shopping else 10 if latent_return_offset is not None else 9 if latent_block is not None else 8 if causal_policy is not None else 7 if "review" in event_models else 6 if donor_prior is not None or checkout_kernel is not None or retention_mode == "source" else 5
         metadata = {"schema_version": 7, "raw_schema_version": 5 if "review" in event_models else 4,
             "dataset_id": f"cosmetics-source-v{version}-six-event-{unit_tag}-{mode}-{months}m-seed{seed}",
             "seed": seed, "months": months, "currency": model["currency"], "amount_unit": model["minor_unit"],
@@ -1035,7 +1055,9 @@ class EcommerceSimulator:
             "latent_shopping": ({"type": latent_block["type"], "discount": latent_block["discount"],
                 "regularization": latent_block["regularization"], "state_count": latent_block["state_count"],
                 "mixture_weights": latent_block["mixture_weights"], "feature_names": latent_block["feature_names"],
-                "assignment": ("frozen parent dynamics; active reward mixture is specified by reward_gmm"
+                "assignment": ("discrete shopping component with a GMM return draw conditioned on its action offsets"
+                               if gmm_return_only else
+                               "frozen parent dynamics; active reward mixture is specified by reward_gmm"
                                if gmm_path else
                                "one persistent component drawn from the synthetic profile group's aggregate mixture"
                                if population is not None else
@@ -1144,7 +1166,9 @@ class EcommerceSimulator:
                 "model_path": str(gmm_path), "model_sha256": hashlib.sha256(gaussian_bytes).hexdigest(),
                 "type": gaussian_block["type"], "means": gaussian_block["means"], "covariances": gaussian_block["covariances"],
                 "parameter_names": gaussian_block["parameter_names"], "mixture_weights": gaussian_block["mixture_weights"],
-                "assignment": ("one draw per customer using learned GMM source-donor posterior or population prior"
+                "assignment": ("one persistent GMM return draw conditional on the discrete shopping reward"
+                               if gmm_return_only else
+                               "one draw per customer using learned GMM source-donor posterior or population prior"
                                if gaussian_block.get("profile_posteriors") else
                                "one draw per customer using learned GMM population prior"),
                 "visibility": "individual offsets occur only in private diagnostics"}

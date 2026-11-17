@@ -14,6 +14,8 @@ source_simulation:
   coupon_response_model_path: population_coupon.json
   review_model_path: population_review.json
   visit_timing_model_path: population_visit_timing.json
+  reward_gmm_model_path: population_gmm.json
+  reward_gmm_return_only: true
   retention_mode: source
   signup_mode: full_history_uniform
   full_months: 24
