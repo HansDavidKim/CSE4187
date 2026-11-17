@@ -140,3 +140,44 @@ def test_gaussian_sidecar_content_changes_generation_identity(gaussian_fixture):
     path.write_text(json.dumps(gaussian))
     changed = EcommerceSimulator(config).generate(months=3, seed=17, customers=_customers())
     assert first.metadata['generation_fingerprint'] != changed.metadata['generation_fingerprint']
+
+
+def test_learned_gmm_uses_its_own_components_and_private_persistent_offsets(gaussian_fixture, tmp_path):
+    config, gaussian, _ = gaussian_fixture
+    model = json.loads(Path(config['source_simulation']['model_path']).read_text())
+    # Component 5 exists in the fitted GMM, outside the parent's four-policy mixture.
+    gmm = dict(gaussian, type='source_map_reward_gmm', component_count=6,
+               mixture_weights=[1 / 6] * 6, means=[[0.] * 5] * 6,
+               covariances=(np.tile(np.eye(5), (6, 1, 1)) * .025).tolist(),
+               profile_posteriors={p['profile_id']: [0.] * 5 + [1.] for p in model['profiles']})
+    path = tmp_path / 'gmm.json'
+    path.write_text(json.dumps(gmm))
+    config['source_simulation']['reward_gmm_model_path'] = str(path)
+    simulator = EcommerceSimulator(config)
+    result = simulator.generate(months=3, seed=17, customers=_customers())
+    repeat = simulator.generate(months=3, seed=17, customers=_customers())
+    assert result.metadata == repeat.metadata
+    assert result.metadata['simulator_version'] == 'source-shopping-v12'
+    assert result.metadata['reward_gmm']['mixture_weights'] == gmm['mixture_weights']
+    diagnostics = result.tables['diagnostics']
+    assert diagnostics.latent_reward_component.eq(5).all()
+    assert diagnostics.latent_assignment_scope.eq('gmm_source_donor_posterior').all()
+    private = [column for column in diagnostics if column.startswith('gaussian_')]
+    assert len(private) == 5 and diagnostics[private].drop_duplicates().shape[0] == len(_customers())
+    assert not set(private) & set(build_features(result.tables, as_of_at=pd.Timestamp(result.metadata['as_of_at'])))
+    for name in result.tables:
+        pd.testing.assert_frame_equal(result.tables[name], repeat.tables[name])
+        if name in RAW_COLUMNS:
+            assert not set(private) & set(result.tables[name])
+    pairs, _ = paired_retention_rollouts(diagnostics, result.metadata, repetitions=1)
+    assert pairs.simulator_version.eq('source-shopping-v12').all()
+
+
+def test_reward_gmm_rejects_singular_covariance(gaussian_fixture, tmp_path):
+    config, gaussian, _ = gaussian_fixture
+    gmm = dict(gaussian, type='source_joint_reward_gmm', covariances=np.zeros((4, 5, 5)).tolist())
+    path = tmp_path / 'gmm.json'
+    path.write_text(json.dumps(gmm))
+    config['source_simulation']['reward_gmm_model_path'] = str(path)
+    with pytest.raises(ValueError, match='positive definite'):
+        EcommerceSimulator(config).generate(months=3, customers=_customers())

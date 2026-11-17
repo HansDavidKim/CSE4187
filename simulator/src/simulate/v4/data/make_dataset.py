@@ -8,6 +8,12 @@ from types import SimpleNamespace
 from simulate.v4.simulator import EcommerceSimulator
 
 
+REWARD_FITTERS = {
+    "gaussian_reward_model_path": "fit_gaussian_rewards",
+    "reward_gmm_model_path": "fit_joint_reward_gmm",
+}
+
+
 def _fit_command(simulator, name):
     command = [sys.executable, "-m", f"simulate.v4.irl.{name}"]
     settings = simulator.settings
@@ -15,7 +21,7 @@ def _fit_command(simulator, name):
         if settings.get("cosmetics_source"):
             command += ["--cosmetics", str(settings["cosmetics_source"])]
     elif name in {"fit_donor_prior", "fit_checkout_transition", "fit_causal_shopping", "fit_latent_shopping",
-                  "fit_joint_latent_shopping", "fit_visit_timing", "reconstruct_latent_traits", "fit_gaussian_rewards"}:
+                  "fit_joint_latent_shopping", "fit_visit_timing", "reconstruct_latent_traits", *REWARD_FITTERS.values()}:
         if settings.get("prepared_source_cache"):
             command += ["--source-cache", str(settings["prepared_source_cache"])]
     return command
@@ -28,20 +34,23 @@ def _ensure_visit_timing(simulator):
                         "--output", str(path), "--report", str(Path(path).with_suffix(".training.json"))], check=True)
 
 
-def _ensure_gaussian_rewards(simulator):
-    path = simulator.settings.get("gaussian_reward_model_path")
-    if path and not Path(path).exists():
-        returning = simulator.settings.get("return_model_path")
-        if not returning:
-            raise ValueError("Gaussian reward fitting requires a fitted return model")
-        subprocess.run(_fit_command(simulator, "fit_gaussian_rewards") + [
-            "--base", str(simulator.model_path), "--return-model", str(returning),
-            "--output", str(path), "--report", str(Path(path).with_suffix(".training.json"))], check=True)
+def _ensure_reward_model(simulator):
+    for key, module in REWARD_FITTERS.items():
+        path = simulator.settings.get(key)
+        if path and not Path(path).exists():
+            returning = simulator.settings.get("return_model_path")
+            if not returning:
+                raise ValueError("continuous reward fitting requires a fitted return model")
+            subprocess.run(_fit_command(simulator, module) + [
+                "--base", str(simulator.model_path), "--return-model", str(returning),
+                "--output", str(path), "--report", str(Path(path).with_suffix(".training.json"))], check=True)
 
 
 def ensure_source_models(simulator):
     """Fit only missing simulator components with the configured source recipe."""
     settings = simulator.settings
+    if all(settings.get(key) for key in REWARD_FITTERS):
+        raise ValueError("configure one continuous reward model at a time")
     trait_base = settings.get("latent_trait_base_model_path")
     if trait_base:
         parent = Path(trait_base)
@@ -50,7 +59,7 @@ def ensure_source_models(simulator):
         if simulator.model_path.resolve() in {p.resolve() for p in recipe_paths}:
             raise ValueError("latent trait reconstruction requires a separate parent artifact")
         parent_settings = {k: v for k, v in settings.items() if k not in {
-            "latent_trait_base_model_path", "visit_timing_model_path", "gaussian_reward_model_path"}}
+            "latent_trait_base_model_path", "visit_timing_model_path", *REWARD_FITTERS}}
         parent_settings["model_path"] = str(parent)
         ensure_source_models(SimpleNamespace(model_path=parent, settings=parent_settings))
         if not simulator.model_path.exists():
@@ -68,7 +77,7 @@ def ensure_source_models(simulator):
         if trait_invariant_sha256(block) != trait_invariant_sha256(parent_block):
             raise ValueError("latent trait reconstruction changed fitted parent parameters")
         _ensure_visit_timing(simulator)
-        _ensure_gaussian_rewards(simulator)
+        _ensure_reward_model(simulator)
         return
     if settings.get("fit_item_choice") and not settings.get("fit_checkout_episodes"):
         raise ValueError("item-choice fitting requires checkout episodes")
@@ -187,4 +196,4 @@ def ensure_source_models(simulator):
                     raise FileNotFoundError(f"{name} event model needs its configured real source: {source}")
             subprocess.run([sys.executable, "-m", f"simulate.v4.irl.fit_{name}_events", *arguments,
                             "--output", path], check=True)
-    _ensure_gaussian_rewards(simulator)
+    _ensure_reward_model(simulator)

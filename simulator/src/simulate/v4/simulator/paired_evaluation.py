@@ -33,8 +33,8 @@ def paired_retention_rollouts(diagnostics: pd.DataFrame, metadata: dict,
         raise ValueError("metadata must be a dictionary")
     if (isinstance(metadata.get("schema_version"), bool) or
             not isinstance(metadata.get("schema_version"), numbers.Integral) or metadata["schema_version"] != 7 or
-            metadata.get("simulator_version") not in {"source-shopping-v2", "source-shopping-v3", "source-shopping-v4", "source-shopping-v5", "source-shopping-v6", "source-shopping-v7", "source-shopping-v8", "source-shopping-v9", "source-shopping-v10", "source-shopping-v11"}):
-        raise ValueError("paired equation evaluation requires schema 7 and source-shopping-v2 through v11")
+            metadata.get("simulator_version") not in {f"source-shopping-v{version}" for version in range(2, 13)}):
+        raise ValueError("paired equation evaluation requires schema 7 and source-shopping-v2 through v12")
     definition = metadata.get("definition_id")
     if not isinstance(definition, str) or definition not in _HORIZONS:
         raise ValueError("unsupported return outcome definition")

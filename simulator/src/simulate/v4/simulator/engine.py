@@ -240,22 +240,33 @@ class EcommerceSimulator:
             path = Path(__file__).parents[1] / "irl" / "fit_joint_latent_shopping.py"
             runtime_hashes["fit_joint_latent_shopping"] = hashlib.sha256(path.read_bytes()).hexdigest()
         gaussian_path = self.settings.get("gaussian_reward_model_path")
+        gmm_path = self.settings.get("reward_gmm_model_path")
+        if gaussian_path and gmm_path:
+            raise ValueError("configure one continuous reward model at a time")
         gaussian_block = gaussian_bytes = gaussian_matrices = None
-        if gaussian_path:
+        if reward_path := gmm_path or gaussian_path:
             if latent_block is None or latent_return_offset is None or return_model_bytes is None:
-                raise ValueError("Gaussian reward synthesis requires a joint latent shopping and return model")
-            from simulate.v4.irl.fit_gaussian_rewards import sample_reward_policy, validate_gaussian
+                raise ValueError("continuous reward synthesis requires a joint latent shopping and return model")
             from simulate.v4.irl.fit_latent_shopping import unpack_matrices
-            gaussian_bytes = Path(gaussian_path).read_bytes()
+            gaussian_bytes = Path(reward_path).read_bytes()
             gaussian_block = json.loads(gaussian_bytes)
-            validate_gaussian(gaussian_block, hashlib.sha256(model_bytes).hexdigest(),
-                              hashlib.sha256(return_model_bytes).hexdigest())
-            if (gaussian_block["component_count"] != len(latent_block["mixture_weights"]) or
-                    gaussian_block["mixture_weights"] != latent_block["mixture_weights"]):
-                raise ValueError("Gaussian reward components differ from the frozen donor mixture")
+            bindings = (hashlib.sha256(model_bytes).hexdigest(), hashlib.sha256(return_model_bytes).hexdigest())
+            if gmm_path:
+                from simulate.v4.irl.reward_gmm import prepare_bellman, sample_reward as sample_gmm_reward, validate_gmm
+                factors = validate_gmm(gaussian_block, *bindings)
+                module = "reward_gmm"
+            else:
+                from simulate.v4.irl.fit_gaussian_rewards import sample_reward_policy, validate_gaussian
+                validate_gaussian(gaussian_block, *bindings)
+                if (gaussian_block["component_count"] != len(latent_block["mixture_weights"]) or
+                        gaussian_block["mixture_weights"] != latent_block["mixture_weights"]):
+                    raise ValueError("Gaussian reward components differ from the frozen donor mixture")
+                module = "fit_gaussian_rewards"
             gaussian_matrices = unpack_matrices(latent_block)
-            path = Path(__file__).parents[1] / "irl" / "fit_gaussian_rewards.py"
-            runtime_hashes["fit_gaussian_rewards"] = hashlib.sha256(path.read_bytes()).hexdigest()
+            if gmm_path:
+                gmm_policy = prepare_bellman(latent_block, gaussian_matrices)
+            path = Path(__file__).parents[1] / "irl" / f"{module}.py"
+            runtime_hashes[module] = hashlib.sha256(path.read_bytes()).hexdigest()
         retention_mode = self.settings.get("retention_mode", "target")
         signup_mode = self.settings.get("signup_mode", "legacy_bounded_uniform")
         target = float(self.config["churn"]["target_rate"]) if retention_mode == "target" else None
@@ -605,7 +616,7 @@ class EcommerceSimulator:
                         context.update(shopping_history.snapshot(when))
                         context["previous_action_run_length"] = previous_run_length
                     if latent_block is not None:
-                        probabilities = (causal_policy(model, context, state["latent_reward_component"],
+                        probabilities = (causal_policy(model, context, None if gmm_path else state["latent_reward_component"],
                                          state["gaussian_reward"]["policy"]) if gaussian_block is not None else
                                          causal_policy(model, context, state["latent_reward_component"]))
                     elif causal_policy is not None:
@@ -782,12 +793,16 @@ class EcommerceSimulator:
                      "price_sum": 0, "price_count": 0, "reference_price": None, "first_event_at": None,
                      "will_use_coupon": rng.random() < coupon_use}
             if latent_sampler is not None:
-                component, scope = latent_sampler(model, profile["profile_id"], rng)
+                if gmm_path:
+                    component, scope, state["gaussian_reward"] = sample_gmm_reward(
+                        gaussian_block, factors, gmm_policy, profile["profile_id"], rng)
+                else:
+                    component, scope = latent_sampler(model, profile["profile_id"], rng)
+                    if gaussian_block is not None:
+                        state["gaussian_reward"] = sample_reward_policy(model, gaussian_block, component, rng,
+                                                                        matrices=gaussian_matrices)
                 state.update(latent_reward_component=component, latent_assignment_scope=scope,
                              shopping_history=ShoppingHistory(start))
-                if gaussian_block is not None:
-                    state["gaussian_reward"] = sample_reward_policy(model, gaussian_block, component, rng,
-                                                                    matrices=gaussian_matrices)
             state.update(review_rng=auxiliary_rng(uid, "review"),
                          reviews=[], prior_orders=[], review_queue=[], review_diagnostics=[])
             local = {key: [] for key in ("sessions", "events", "orders", "order_items")}
@@ -919,9 +934,11 @@ class EcommerceSimulator:
             unit_tag += "-source-length"
         if visit_timing_model is not None:
             unit_tag += "-joint-timing"
-        if gaussian_block is not None:
+        if gmm_path:
+            unit_tag += "-gmm"
+        elif gaussian_block is not None:
             unit_tag += "-gaussian"
-        version = 11 if gaussian_block is not None else 10 if latent_return_offset is not None else 9 if latent_block is not None else 8 if causal_policy is not None else 7 if "review" in event_models else 6 if donor_prior is not None or checkout_kernel is not None or retention_mode == "source" else 5
+        version = 12 if gmm_path else 11 if gaussian_block is not None else 10 if latent_return_offset is not None else 9 if latent_block is not None else 8 if causal_policy is not None else 7 if "review" in event_models else 6 if donor_prior is not None or checkout_kernel is not None or retention_mode == "source" else 5
         metadata = {"schema_version": 7, "raw_schema_version": 5 if "review" in event_models else 4,
             "dataset_id": f"cosmetics-source-v{version}-six-event-{unit_tag}-{mode}-{months}m-seed{seed}",
             "seed": seed, "months": months, "currency": model["currency"], "amount_unit": model["minor_unit"],
@@ -962,7 +979,9 @@ class EcommerceSimulator:
             "latent_shopping": ({"type": latent_block["type"], "discount": latent_block["discount"],
                 "regularization": latent_block["regularization"], "state_count": latent_block["state_count"],
                 "mixture_weights": latent_block["mixture_weights"], "feature_names": latent_block["feature_names"],
-                "assignment": ("one persistent private component per synthetic customer; full observed source donor trait reconstruction, not heldout forecasting"
+                "assignment": ("frozen parent dynamics; active reward mixture is specified by reward_gmm"
+                               if gmm_path else
+                               "one persistent private component per synthetic customer; full observed source donor trait reconstruction, not heldout forecasting"
                                if latent_block.get("profile_posterior_assignment_scope") == "source_observation_trait_posterior"
                                else "one persistent private component per customer; train-prefix profile posterior or source population prior"),
                 "posterior_bank_scope": latent_block.get("posterior_bank_scope"),
@@ -1048,7 +1067,16 @@ class EcommerceSimulator:
         if purchase_response is not None:
             metadata["coupon_takeup_source"] = "Tianchi O2O observed 30d redemption by purchase history; scenario transfer, not causal uplift"
             metadata["coupon_model_sha256"] = hashlib.sha256(response_bytes).hexdigest()
-        if gaussian_block is not None:
+        if gmm_path:
+            metadata["reward_gmm"] = {
+                "model_path": str(gmm_path), "model_sha256": hashlib.sha256(gaussian_bytes).hexdigest(),
+                "type": gaussian_block["type"], "means": gaussian_block["means"], "covariances": gaussian_block["covariances"],
+                "parameter_names": gaussian_block["parameter_names"], "mixture_weights": gaussian_block["mixture_weights"],
+                "assignment": ("one draw per customer using learned GMM source-donor posterior or population prior"
+                               if gaussian_block.get("profile_posteriors") else
+                               "one draw per customer using learned GMM population prior"),
+                "visibility": "individual offsets occur only in private diagnostics"}
+        elif gaussian_block is not None:
             metadata["gaussian_reward"] = {
                 "model_path": str(gaussian_path), "model_sha256": hashlib.sha256(gaussian_bytes).hexdigest(),
                 "type": gaussian_block["type"], "means": gaussian_block["means"], "variances": gaussian_block["variances"],
@@ -1060,7 +1088,9 @@ class EcommerceSimulator:
         identity = {key: metadata.get(key) for key in ("configuration_sha256", "model_sha256", "return_model_sha256",
             "coupon_model_sha256", "marketing_proxy_sha256", "runtime_code_sha256", "event_models", "visit_timing",
             "seed", "months", "start_at", "end_at")}
-        if gaussian_block is not None:
+        if gmm_path:
+            identity["reward_gmm_model_sha256"] = metadata["reward_gmm"]["model_sha256"]
+        elif gaussian_block is not None:
             identity["gaussian_reward_model_sha256"] = metadata["gaussian_reward"]["model_sha256"]
         identity["n_customers"] = n_customers
         identity["products_input_sha256"] = hashlib.sha256(pd.util.hash_pandas_object(

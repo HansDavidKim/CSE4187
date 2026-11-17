@@ -13,7 +13,8 @@ churn:
 source_simulation:
   outcome_days: 28
   model_path: data/models/shopping_joint_latent_source_traits.json
-  gaussian_reward_model_path: data/models/shopping_gaussian_rewards.json
+  gaussian_reward_model_path: null
+  reward_gmm_model_path: null
   donor_prior_base_model_path: data/models/shopping_profiles_checkout.json
   checkout_transition_base_model_path: data/models/shopping_policy_aligned_v6.json
   retention_mode: source
