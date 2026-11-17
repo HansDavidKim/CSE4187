@@ -126,10 +126,12 @@ def redefine_outcomes(tables, metadata, outcome_days=28, shopping_model=None, vi
         diagnostics = tables["diagnostics"].copy()
         profiles = {str(profile["profile_id"]): profile for profile in (shopping_model or {}).get("profiles", [])}
         groups = (shopping_model or {}).get("home_groups", {})
+        timing_key = ("home_persona" if (visit_timing_model or {}).get("profile_key_scope") == "synthetic_home_group"
+                      else "source_profile_id")
         shares, fallbacks = [], 0
         for row in diagnostics.itertuples():
             if visit_timing_model is not None:
-                shares.append(first_session_share(visit_timing_model, str(getattr(row, "source_profile_id", "")), True, int(outcome_days)))
+                shares.append(first_session_share(visit_timing_model, str(getattr(row, timing_key, "")), True, int(outcome_days)))
                 continue
             profile = profiles.get(str(getattr(row, "source_profile_id", "")), {})
             group_name = profile.get("home_group", getattr(row, "home_persona", None))
@@ -158,9 +160,11 @@ def redefine_outcomes(tables, metadata, outcome_days=28, shopping_model=None, vi
             new_metadata["expected_treatment_churn_rate"] = float(1 - treated.mean())
             new_metadata["expected_churn_rate"] = float(np.mean(1 - factual))
         new_metadata["analytic_outcome_view"] = ({
-            "formula": "p(days)=p30*P(first_native_session_offset<days | source_profile,active_previous30=True)",
+            "formula": ("p(days)=p30*P(first_synthetic_session_offset<days | home_group,active_previous30=True)"
+                        if timing_key == "home_persona" else "p(days)=p30*P(first_native_session_offset<days | source_profile,active_previous30=True)"),
             "generation_window_days": GENERATION_WINDOW_DAYS, "outcome_window_days": int(outcome_days),
-            "timing_source": "exact same profile/active30 source-frequency-weighted regular bank as runtime sampler",
+            "timing_source": ("the same synthetic home-group/active30 schedules as the runtime sampler"
+                              if timing_key == "home_persona" else "exact same profile/active30 source-frequency-weighted regular bank as runtime sampler"),
             "timing_model_type": visit_timing_model['type'],
             "interpretation": "native conditional first-offset CDF of the actual30d timing law; not newly learned28d hazard coefficients",
         } if visit_timing_model is not None else {

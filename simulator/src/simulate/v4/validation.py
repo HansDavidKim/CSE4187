@@ -17,6 +17,7 @@ from scipy.stats import ks_2samp, wasserstein_distance
 
 from simulate.v4.data.loader import check_generation_sidecars
 from simulate.v4.irl.fit_shopping import load_source, prepare_source
+from simulate.v4.simulator.coupon_response import sample_redemption_delay
 from simulate.v4.simulator.outcomes import GENERATION_WINDOW_DAYS, experiment_window_days
 from simulate.v4.simulator.raw_store import cart_at, load_raw_dataset
 
@@ -526,7 +527,7 @@ def audit_coupon_responses(tables, metadata, coupon_response_diagnostics, treatm
             noise = np.random.default_rng(int.from_bytes(hashlib.sha256(key).digest()[:8], "big"))
             uniform = float(noise.random())
             selected = uniform < probability
-            delay = int(noise.choice(source["redemption_delay_days"])) if selected else None
+            delay = sample_redemption_delay(source, noise) if selected else None
             cohorts[cohort] += 1
             mismatches["history_cohort"] += row.history_cohort != cohort
             mismatches["source_cohort"] += row.source_cohort != source_cohort

@@ -1,0 +1,24 @@
+# Source-calibrated synthetic profiles with bundled aggregate assets.
+simulation:
+  seed: 42
+  start_at: '2024-01-01T00:00:00'
+churn:
+  definition: no_visit
+  inactive_days: 28
+source_simulation:
+  outcome_days: 28
+  eligibility_window_days: 28
+  coupon_validity_days: 28
+  model_path: population_shopping.json
+  return_model_path: population_return.json
+  coupon_response_model_path: population_coupon.json
+  review_model_path: population_review.json
+  visit_timing_model_path: population_visit_timing.json
+  retention_mode: source
+  signup_mode: full_history_uniform
+  full_months: 24
+  max_events_per_session: 782
+  coupon_discount: 0.1
+  coupon_send_cost_minor: 100
+toy:
+  message_model_path: message_response_model.json

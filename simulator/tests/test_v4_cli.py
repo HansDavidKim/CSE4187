@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from simulate.v4.cli import DEFAULT_CONFIG, load_config, run
+from simulate.v4.configuration import POPULATION_CONFIG
 
 
 def test_bundled_config_resolves_models_and_calibrations_separately(tmp_path):
@@ -18,6 +19,16 @@ def test_bundled_config_resolves_models_and_calibrations_separately(tmp_path):
     assert Path(config["toy"]["message_model_path"]).is_file()
     assert "search_model_path" not in config["source_simulation"]
     assert "cs_model_path" not in config["source_simulation"]
+
+
+def test_population_config_resolves_bundled_models_from_a_clean_working_directory(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    config = load_config(POPULATION_CONFIG)
+    paths = [Path(value) for key, value in config["source_simulation"].items() if key.endswith("_model_path")]
+    assert paths and all(path.parent == POPULATION_CONFIG.parent and path.is_file() for path in paths)
+    assert Path(config["source_simulation"]["model_path"]).is_file()
+    override = load_config(POPULATION_CONFIG, tmp_path)
+    assert Path(override["source_simulation"]["model_path"]).parent == tmp_path
 
 
 @pytest.mark.parametrize("override_assets", [False, True])

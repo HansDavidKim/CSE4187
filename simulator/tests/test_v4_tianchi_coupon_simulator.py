@@ -2,6 +2,7 @@
 from collections import Counter
 import copy
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -41,6 +42,26 @@ def _config(checkout_fixture, folder, *, redeemed=4, delay=0, legacy_use=0., fir
 
 def _run(config, count=12):
     return EcommerceSimulator(config).generate(months=3,seed=17,customers=_customers(count))
+
+
+def test_coupon_day_histogram_replays_ordered_delays(checkout_fixture, tmp_path):
+    from simulate.v4.simulator.coupon_response import sample_coupon_response, validate_response_model
+
+    config = _config(checkout_fixture, tmp_path)
+    original = json.loads(Path(config["source_simulation"]["coupon_response_model_path"]).read_text())
+    aggregate = copy.deepcopy(original)
+    for group in original["groups"].values():
+        group["redemption_delay_days"][0] = 9
+        group["redemption_delay_days"].sort()
+    for name, group in aggregate["groups"].items():
+        counts = Counter(original["groups"][name]["redemption_delay_days"])
+        group.pop("redemption_delay_days")
+        group["redemption_delay_day_counts"] = [counts[day] for day in range(30)]
+    validate_response_model(aggregate)
+    timestamp = pd.Timestamp("2024-05-01T00:00:00Z")
+    for seed in range(16):
+        assert sample_coupon_response(original, seed, "customer", timestamp, None) == sample_coupon_response(
+            aggregate, seed, "customer", timestamp, None)
 
 
 def _pre_send_cohorts(result):

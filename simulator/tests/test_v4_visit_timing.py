@@ -98,6 +98,29 @@ def test_fallback_uses_only_matching_mode_and_observed_prior_activity(source):
     assert sample_session_offsets(model, 'unknown', False, False, np.random.default_rng(3))[1] == 'regular_pool'
 
 
+def test_population_schedules_drop_donor_keys_and_preserve_visit_counts(source):
+    from simulate.v4.simulator.population_timing import aggregate_visit_timing, materialize_visit_timing
+
+    original = _fit(source[0])
+    calibration = aggregate_visit_timing(original)
+    assert not {"entry_profile_banks", "regular_profile_banks", "entry_pool", "regular_pool"} & calibration.keys()
+    source_metadata = {"dataset": "fixture"}
+    generated = materialize_visit_timing(calibration, source_metadata)
+    assert generated == materialize_visit_timing(calibration, source_metadata)
+    assert not generated["entry_profile_banks"] and not generated["regular_profile_banks"]
+    expected = sum(len(offsets) * n for offsets, n in zip(original["entry_pool"]["offsets_seconds"],
+                                                       original["entry_pool"]["frequencies"]))
+    result = sum(len(offsets) * n for offsets, n in zip(generated["entry_pool"]["offsets_seconds"],
+                                                     generated["entry_pool"]["frequencies"]))
+    assert (result / generated["entry_pool"]["observed_windows"]
+            == pytest.approx(expected / original["entry_pool"]["observed_windows"]))
+
+    profiles = [{"home_group": "group", "profile_id": _pid(uid)} for uid in source[1]]
+    by_group = materialize_visit_timing(aggregate_visit_timing(original, profiles), source_metadata)
+    assert by_group["profile_key_scope"] == "synthetic_home_group"
+    assert set(by_group["entry_profile_banks"]) == set(by_group["regular_profile_banks"]) == {"group"}
+
+
 @pytest.mark.parametrize('bad', ['frequency', 'empty', 'order', 'nan', 'horizon', 'total', 'maturity', 'schema'])
 def test_invalid_source_bank_is_rejected(source, bad):
     model = deepcopy(_fit(source[0])); bank = model['entry_pool']

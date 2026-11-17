@@ -22,16 +22,30 @@ def validate_response_model(model):
         receipts, redeemed = group.get("receipts"), group.get("redeemed")
         probability = group.get("response_probability")
         delays = group.get("redemption_delay_days")
+        histogram = group.get("redemption_delay_day_counts")
         if (type(receipts) is not int or type(redeemed) is not int or not 0 <= redeemed <= receipts
                 or not isinstance(probability, (int, float)) or isinstance(probability, bool)
-                or not math.isfinite(probability) or not 0 <= probability <= 1
-                or not isinstance(delays, list) or len(delays) != redeemed
-                or any(type(day) is not int or not 0 <= day < 30 for day in delays)):
+                or not math.isfinite(probability) or not 0 <= probability <= 1):
             raise ValueError("invalid observed Tianchi coupon counts, probability or delays")
+        if histogram is None:
+            if (not isinstance(delays, list) or len(delays) != redeemed
+                    or any(type(day) is not int or not 0 <= day < 30 for day in delays)):
+                raise ValueError("invalid observed Tianchi coupon delays")
+        elif (delays is not None or not isinstance(histogram, list) or len(histogram) != 30
+              or any(type(count) is not int or count < 0 for count in histogram)
+              or sum(histogram) != redeemed):
+            raise ValueError("coupon redemption day counts must account for all redemptions")
         if receipts and not math.isclose(probability, redeemed / receipts, abs_tol=1e-12):
             raise ValueError("Tianchi response probability must equal observed redeemed/receipts")
     if not model["groups"]["pooled"]["receipts"]:
         raise ValueError("Tianchi response artifact has no supported receipts")
+
+
+def sample_redemption_delay(group, rng):
+    if histogram := group.get("redemption_delay_day_counts"):
+        index = int(rng.integers(group["redeemed"]))
+        return int(np.searchsorted(np.cumsum(histogram), index, side="right"))
+    return int(rng.choice(group["redemption_delay_days"]))
 
 
 def sample_coupon_response(model, seed, customer_id, as_of, last_purchase):
@@ -44,7 +58,7 @@ def sample_coupon_response(model, seed, customer_id, as_of, last_purchase):
     rng = np.random.default_rng(int.from_bytes(hashlib.sha256(key).digest()[:8], "big"))
     uniform = float(rng.random())
     selected = uniform < group["response_probability"]
-    delay = int(rng.choice(group["redemption_delay_days"])) if selected else None
+    delay = sample_redemption_delay(group, rng) if selected else None
     return {"customer_id": customer_id, "as_of_at": as_of, "history_cohort": cohort,
             "source_cohort": scope, "response_probability": group["response_probability"],
             "response_uniform": uniform, "response_selected": selected,

@@ -27,8 +27,8 @@ scripts/                   # 기존 실행 진입점과 SQL 예시
 tests/                     # 회귀 검사
 ```
 
-Git에는 실행 코드·테스트·설정·이 안내만 관리한다. 원자료·학습 가중치·데이터베이스·
-생성 결과·문서·노트북·가상환경·캐시는 로컬에서 사용하고 Git에서 제외한다.
+Git에는 실행 코드·테스트와 합성 프로필 생성에 필요한 집계 설정을 둔다.
+원자료, 원천 고객별 학습 파일, 생성 데이터와 로컬 연구 산출물은 Git에서 제외한다.
 
 ## 실행
 
@@ -37,7 +37,7 @@ Python 3.10 이상에서 저장소의 `simulator/` 디렉터리 기준으로 실
 ```bash
 cd simulator
 python -m pip install -e ".[dev]"
-ecommerce-sim v4 generate --assets-root /path/to/assets --mode small \
+ecommerce-sim v4 generate --config src/simulate/v4/config/population.yaml --mode small \
   --n-customers 500 --months 6 --seed 42 --output artifacts/small
 ecommerce-sim v4 validate --data artifacts/small/raw.sqlite
 ecommerce-sim v4 features --data artifacts/small --output artifacts/features
@@ -45,11 +45,39 @@ ecommerce-sim v4 features --data artifacts/small --output artifacts/features
 
 설치 전에는 `PYTHONPATH=src python -m cli v4 ...`를 사용할 수 있다.
 저장소 루트에서 설치할 때는 `python -m pip install -e "./simulator[dev]"`를 사용한다.
-기본 설정은 [simulator.yaml](src/simulate/v4/config/simulator.yaml)이다.
-`--assets-root`는 `data/models`와 원자료를 가진 디렉터리다. 기존 자료가 다른 위치에
-있으면 해당 경로를 명시한다. 생략하면 현재 디렉터리를
-사용한다. 가중치가 없으면 필요한 경로를 표시하며, 실제 원자료를 준비한 뒤
-`generate --fit-missing`으로 누락 모형을 학습한다. 기존 출력·모형은 덮어쓰지 않는다.
+[population.yaml](src/simulate/v4/config/population.yaml)은 같은 디렉터리의 집계
+설정을 읽어 고객 프로필, 상품 카탈로그, 구매 바구니와 방문 일정을 생성한다.
+학습된 쇼핑·재방문·리뷰 모형과 방문·가격·바구니·리뷰 지연의 집계 분포를 사용한다.
+원천 고객별 관측 프로필을 쓰는 실행과 생성 분포 및 데이터셋 ID가 달라질 수 있다.
+
+합성 프로필 설정은 이산 성향 모형을 사용한다. 별도 시드 122·123으로 각 2,000명·6개월을
+생성해 기존 고객별 프로필 기반 v10과 비교했을 때 평균 오차는 보정 전 0.1296,
+보정한 이산 모형 0.0811, GMM 0.0993이었다. 방문 수·주문 수·28일 미방문율·행동 비중·
+행동 전이의 오차를 같은 가중치로 비교했다.
+
+학습 자료는 [REES46](https://rees46.com/en/datasets)의
+[Cosmetics Shop 행동 기록](https://www.kaggle.com/datasets/mkechinov/ecommerce-events-history-in-cosmetics-shop),
+[Tianchi CCF2016 O2O](https://tianchi.aliyun.com/competition/entrance/231593/information),
+[Amazon Reviews 2023](https://huggingface.co/datasets/McAuley-Lab/Amazon-Reviews-2023),
+[Olist](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce)다.
+
+기존 학습 파일로 집계 모델을 다시 만들 때는 다음 명령을 사용한다.
+
+```bash
+PYTHONPATH=src python -m simulate.v4.irl.export_population \
+  --models /path/to/assets/data/models --output artifacts/population/data/models
+```
+
+이 파일들을 사용하려면 `generate --config src/simulate/v4/config/population.yaml`에
+`--assets-root artifacts/population/data/models`를 추가한다. 학습한 GMM을 함께
+내보낼 때는 `export_population --reward-gmm <fitted-gmm.json>`를 사용한다.
+
+### 원천 고객별 프로필 기반 실행
+
+[simulator.yaml](src/simulate/v4/config/simulator.yaml)에는 원천 고객별 프로필을
+사용하는 실행 설정이 있다. `--assets-root`에 `data/models`를 포함한 디렉터리를
+지정한다. 실제 원자료를 준비하고 `generate --fit-missing`으로 누락 모형을
+학습할 수 있다. 기존 출력·모형은 덮어쓰지 않는다.
 
 v5 기본 설정은 이산 성분 정책(`source-shopping-v10`)을 사용한다. 고객마다 원천
 행동에서 학습한 대표 성향 하나를 배정하고, 해당 성향의 보상 계수와 고객의 방문 이력,
