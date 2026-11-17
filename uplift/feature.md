@@ -1,103 +1,118 @@
 - **담당자: 한유승**
 - **모델:** Uplift
+- **기준:** 시뮬레이터 설계서 v5 (`docs/KIT_feature_simulator_design_v5_daewon.pdf`), raw5 · KIT39
 
 ## 1. 학습 데이터 기준
 
-- **집계 단위:** 시뮬레이터의 주간 합계(`customer_id × reference_week`)만 사용
-    - 모든 기간은 주 단위(시뮬레이터 담당자와 합의). 일·시간 단위 기록은 쓰지 않음
-    - 주는 월요일 00시(Asia/Seoul) 시작. 기준 주를 `w0`라 하고, 개입은 `w0` 시작 시점에 일어남
-    - 활동 없는 주는 0, 가입·관측 전 주는 NULL로 제공됨
-- **실험 조건 (시뮬레이터 확정):**
-    - 대상: `w0` 이전 4주에 방문한 적격 고객. 배정 이후 활동이 없는 고객도 포함
-    - 배정: 고객별 고정 Treatment/Control, 확률 0.5
-    - Treatment: `w0`에 10% 쿠폰 1회 발송, 4주 유효, 추가 발송 없음
+- **입력:** 시뮬레이터의 원시 로그(업무 테이블 7개, `docs/simulator_ERD.md`)와 고객별 배정
+    - v3 때의 주간 합계 대신 원시 로그에서 직접 계산한다. 주간 합계로는 KIT39의 세션·상품·리뷰 단위 Feature를 만들 수 없다
+    - 읽기와 변환은 `uplift/common/raw.py`, `uplift/common/features.py` 한 곳에 두고 T/X/H-learner가 함께 쓴다
+- **기준 시각 `t0`:** 배정·발송 시각. 현지(Asia/Seoul) 월요일 00시, 저장은 UTC
+- **실험 조건 (시뮬레이터 v5):**
+    - 대상: `[t0 − 28일, t0)`에 세션을 시작한 적격 고객. 배정 이후 활동이 없는 고객도 포함
+    - 배정: 고객별 고정 Treatment/Control 1:1, `assignment_probability = 0.5`
+    - Treatment: `t0`에 10% 쿠폰 1회 발송, 28일 유효, 추가 발송 없음. 최고 단가 품목 1개에만 할인
     - Control: 쿠폰 미발송 보장
-- **예측할 대상:** 쿠폰 발송에 따른 향후 4주 유지 확률의 변화
-    - Y = 1: `w0`부터 4주 동안 구매가 1회 이상 있음
-    - Y = 0: 해당 기간에 구매가 없음
-    - 즉 4주 미구매 = 이탈. 시뮬레이터 기본 정의(4주 미방문)와 다른 별도 정의
-- **과거 기록 사용 기간:** `w0` 이전 12주
-    - 주문 수·방문 수는 그중 최근 4주로 집계
-    - 마지막 구매·방문 주는 12주 안에서 찾습니다. 기록이 없으면 null 로 처리
-- **데이터 형태:** 고객별 집계표
-    - 고객 1명당 1행
-    - 각 행에 `고객 ID + 기준 주 + feature + T + Y`
+- **예측할 대상:** 쿠폰 발송에 따른 향후 28일 유지 확률의 변화
+    - Y = 1: `[t0, t0 + 28일)`에 주문이 1건 이상
+    - Y = 0: 해당 기간에 주문 없음
+    - 시뮬레이터 기본 이탈 정의(28일 미방문)와 다른 정의다. 시뮬레이터의 `no_purchase_labels`(`future_no_order_28d`)와 같은 정의
+- **데이터 형태:** 적격 고객 1명당 1행. `customer_id, t0, treatment, Feature, y`
 
-## 2. 필요한 입력 Feature
+## 2. 입력 Feature
 
-필수로 필요한 것부터 작성. 표기: 최근 4주 = `[w0 − 4, w0)`, 직전 4주 = `[w0 − 8, w0 − 4)`, 과거 12주 = `[w0 − 12, w0)`. NULL인 주(가입·관측 전)는 합계에서 제외.
+시뮬레이터의 KIT39와 같은 이름·순서·산식을 쓴다. 모든 Feature는 `event_at < t0`인 기록만 읽는다.
 
-| Feature 이름 | 계산 방법 | 필요한 주간 컬럼 |
+- 최근 창 `W30 = [t0 − 30일, t0)`, 직전 창 `[t0 − 60일, t0 − 30일)`. 실험 창(28일)과 길이가 다르다
+- `C30` = 최근 30일에 시작하고 `t0` 전에 끝난 세션
+- 빈 분모·이력 없음은 NULL, 관측된 무행동의 횟수·합계는 0
+- 금액은 원천 통화의 minor 단위(원화 아님)
+
+### 2.1 모델 입력 36개
+
+| 번호 | Feature | 계산 | NULL |
+| --- | --- | --- | --- |
+| F01 | `visit_recency_days` | 마지막 세션 시작부터 경과 일수 | 방문 없음 |
+| F02 | `purchase_recency_days` | 마지막 주문부터 경과 일수 | 구매 없음 |
+| F03 | `observed_tenure_days` | 최초 세션부터 경과 일수 | 방문 없음 |
+| F04 | `session_count_30d` | W30에 시작한 세션 수 | |
+| F05 | `view_count_30d` | W30의 view 수 | |
+| F06 | `purchase_count_30d` | W30의 주문 수 | |
+| F07 | `net_spend_30d` | W30의 `paid_minor` 합 | |
+| F08 | `mean_net_order_value_30d` | W30의 `paid_minor` 평균 | 주문 없음 |
+| F09 | `mean_session_duration_minutes_30d` | C30의 평균 체류 시간(분) | C30 없음 |
+| F10 | `views_per_session_30d` | C30의 view 수 / C30 세션 수 | C30 없음 |
+| F11 | `orders_per_session_30d` | C30의 주문 수 / C30 세션 수 | C30 없음 |
+| F12 | `mean_purchase_gap_days` | 전체 과거 주문 사이 평균 간격 | 주문 2건 미만 |
+| F13 | `intervisit_start_gap_mean_days_90d` | 뒤쪽 시작이 최근 90일인 세션 시작 간격의 평균 | 간격 없음 |
+| F14 | `intervisit_start_gap_cv_90d` | 같은 간격의 표본 표준편차 / 평균 | 간격 2개 미만, 평균 0 |
+| F15 | `unique_purchase_products_30d` | W30 주문 상품의 종류 수 | |
+| F16 | `purchased_qty_30d` | W30 주문 상품 수량 합 | |
+| F17 | `mean_basket_qty_30d` | F16 / F06 | 주문 없음 |
+| F18 | `cart_qty_current` | `t0` 직전 장바구니 잔존 수량 | |
+| F19 | `cart_sku_current` | 잔존 상품 종류 수 | |
+| F20 | `cart_gross_value_current` | 잔존 수량 × 상품 단가 합(할인 전) | |
+| F21 | `last_session_min_viewed_price` | `t0` 전에 끝난 마지막 세션의 view 표시 단가 최솟값 | 세션·view 없음 |
+| F22 | `last_session_max_viewed_price` | 같은 세션의 최댓값 | 세션·view 없음 |
+| F23 | `last_session_start_hour` | 같은 세션의 현지 시작 시(0–23) | 세션 없음 |
+| F24 | `last_session_start_weekday` | 같은 세션의 현지 요일(월 0 – 일 6) | 세션 없음 |
+| F28 | `orders_delta_30d` | 주문 수: 최근 30일 − 직전 30일 | |
+| F29 | `net_spend_delta_30d` | 결제액 합: 최근 − 직전 | |
+| F30 | `mean_net_order_value_delta_30d` | 결제액 평균: 최근 − 직전 | 한 창이라도 주문 없음 |
+| F31 | `unique_purchase_products_delta_30d` | 구매 상품 종류 수: 최근 − 직전 | |
+| F32 | `purchased_qty_delta_30d` | 구매 수량 합: 최근 − 직전 | |
+| F33 | `review_count_30d` | W30에 도착한 review 수 | |
+| F34 | `mean_review_rating_30d` | 같은 review의 별점 평균 | 리뷰 없음 |
+| F35 | `cart_adds_per_nonpurchase_session_30d` | C30 중 주문 없는 세션의 cart 수 / 그 세션 수 | 해당 세션 없음 |
+| F36 | `cart_removes_per_nonpurchase_session_30d` | 같은 세션의 remove 수 / 그 세션 수 | 해당 세션 없음 |
+| F37 | `review_last_order_mean_rating` | 가장 최근에 리뷰가 도착한 구매의 별점 평균 | 유효 리뷰 없음 |
+| F38 | `review_recency_days` | 마지막 유효 리뷰 도착부터 경과 일수 | 유효 리뷰 없음 |
+| F39 | `review_non5_share_30d` | W30 유효 리뷰의 5점 미만 비율(구매별로 구한 뒤 평균) | 유효 리뷰 없음 |
+
+- 장바구니(F18–F20)는 과거 cart·remove·구매를 `(event_at, event_id)` 순서로 재생한다. `buy_now` 구매는 차감하지 않고, 그 외에는 보유량 한도까지 차감한다
+- 유효 리뷰(F37–F39)는 본인의 실제 구매·상품·주문행에 연결된 `product_star_scenario` 별점이다. 구매 × 상품마다 한 번만 센다
+
+### 2.2 계산하지만 입력에서 빼는 3개
+
+| 번호 | Feature | 계산 |
 | --- | --- | --- |
-| `weeks_since_last_purchase` | `w0` − 과거 12주 중 `purchases > 0`인 마지막 주 | `purchases` |
-| `weeks_since_last_session` | `w0` − 과거 12주 중 `sessions > 0`인 마지막 주 | `sessions` |
-| `purchase_count_4w` | 최근 4주 `purchases` 합 | `purchases` |
-| `session_count_4w` | 최근 4주 `sessions` 합 | `sessions` |
+| F25 | `coupon_uses_30d` | W30 주문에 사용된 쿠폰 수 |
+| F26 | `coupon_redemption_recency_days` | 마지막 쿠폰 사용 구매부터 경과 일수 |
+| F27 | `coupon_discount_amount_30d` | W30 쿠폰 사용 주문의 할인액 합 |
 
-`purchases`는 주문 수다. 구매 세션 수는 별도 컬럼이며 쓰지 않는다.
+- 기본 정책은 실험 전 쿠폰을 만들지 않아 전 고객이 0 / NULL / 0이다. 과거 쿠폰 이력이 있는 시나리오에서만 입력에 넣는다(`schema.FEATURES`)
 
-### 2.1 추가 Feature (시뮬레이터 설계서 v3 부록 A에서 선별)
+### 2.3 관측 범위에 따른 NULL
 
-T/X/H-learner의 base learner 입력으로 쓸 처치 전 공변량. 설계서의 Feature를 주간 합계로 계산할 수 있게 바꾼 것. 모두 `w0` 이전 주만 사용.
+관측 시작(`observation_start_at`)이 가입보다 늦은 자료에서만 해당한다.
 
-위 필수 4개는 설계서의 F02·F01·F06·F04에 대응한다.
+| 대상 | 관측돼야 하는 구간 |
+| --- | --- |
+| 전체 | `t0`가 가입 시각 이후. 아니면 39개 모두 NULL |
+| 이름이 `_30d`로 끝나는 Feature | `max(t0 − 30일, 가입)` 이후 |
+| `_delta_30d` | `max(t0 − 60일, 가입)` 이후 |
+| F13, F14 | `max(t0 − 90일, 가입)` 이후 |
+| F18–F20 | 가입 시점부터 |
 
-| 대응 번호 | Feature 이름 | 계산 방법 | 결측 | 선별 이유 |
-| --- | --- | --- | --- | --- |
-| F03 | `observed_tenure_weeks` | `w0` − NULL이 아닌 최초 주 | — | 관측 이력 길이. 신규/기존 고객 구분 |
-| F05 | `view_count_4w` | 최근 4주 `views` 합 | 0 | 구매 전 관심도 |
-| F07 | `net_spend_4w` | 최근 4주 `net_revenue`(할인 후 실제 결제액) 합 | 0 | 구매 규모 |
-| F08 | `mean_net_order_value_4w` | `net_spend_4w / purchase_count_4w` | 주문 0건이면 null | 객단가. 10% 할인의 체감 크기 |
-| F09 | `mean_session_minutes_4w` | 최근 4주 `session_minutes` 합 / `session_count_4w` | 방문 0회면 null | 참여도 |
-| F10 | `views_per_session_4w` | `view_count_4w / session_count_4w` | 방문 0회면 null | 탐색 강도 |
-| F11 | `orders_per_session_4w` | `purchase_count_4w / session_count_4w` | 방문 0회면 null | 방문당 전환 강도 |
-| F12 대체 | `purchase_weeks_12w` | 과거 12주 중 `purchases > 0`인 주 수 | 0 | 구매 규칙성 |
-| F13 대체 | `session_weeks_12w` | 과거 12주 중 `sessions > 0`인 주 수 | 0 | 방문 규칙성 |
-| F18 | `cart_qty_w0` | `w0` 시작 시점 장바구니 잔존 수량 | — | 미완료 구매 의도. 쿠폰 반응 후보 |
-| F19 | `cart_sku_w0` | `w0` 시작 시점 장바구니 상품 종류 수 | — | 위와 동일 |
-| F20 | `cart_gross_value_w0` | `w0` 시작 시점 장바구니 금액(할인 전) | — | 쿠폰 적용 시 할인 금액 규모 |
-| F28 | `orders_delta_4w` | 최근 4주 주문 수 − 직전 4주 주문 수 | 0 | 구매 추세 (이탈 진행 신호) |
-| F29 | `net_spend_delta_4w` | 최근 4주 결제액 − 직전 4주 결제액 | 0 | 구매 추세 |
+### 2.4 입력 금지
 
-- 넣지 않은 것
-    - 과거 쿠폰 사용·발송 Feature(F25–F27, 발송 횟수·경과 주): 기본 시나리오에는 실험 전 쿠폰 이력이 없어 전부 상수가 됨. 이력이 있는 시나리오를 쓸 때만 추가
-    - F15–F17, F30–F32: 위 Feature와 정보가 겹치고 주문 상품 단위 집계가 필요
-    - F14, F21–F24: 세션·이벤트 단위 기록이 필요
-- 입력 금지: ST/P/SD/LC 반응 타입·persona·life cycle, `w0`에 새로 발송하는 처치 쿠폰, `w0` 이후 주의 기록
+- 배정·실제 발송·`t0` 이후의 사용과 기록
+- life-cycle, source donor, 잠재 성분, 사후 반응 타입(`diagnostics`, `evaluation_only`)
+- `customer_id`, `t0`, `dataset_id`는 연결용이며 입력이 아니다
 
-## 3. 정답과 추가 정보
+## 3. 정답과 시뮬레이터에서 읽는 것
 
-- **학습 정답의 정의:**
-    - `w0`부터 4주 동안 `purchases` 합이 1 이상이면 Y = 1
-    - 해당 기간에 구매 없으면 이탈 Y = 0
-    - uplift는 `쿠폰 발송시 유지 확률 - 미발송 시 유지 확률`
-- **정답을 확인할 미래 기간:**
-    - `[w0, w0 + 4)`. 이 기간 다 채운 고객만 학습에 사용
-- **시뮬레이터에게 요청하는 필요한 정보:**
+- **정답:** `[t0, t0 + 28일)`에 주문 1건 이상이면 Y = 1. `observation_end_at`이 `t0 + 28일`보다 이르면 NULL로 두고 학습에서 제외
+- **uplift:** `쿠폰 발송 시 유지 확률 − 미발송 시 유지 확률`
+- **T:** 배정군 그대로(ITT). 쿠폰 사용 여부로 다시 나누지 않는다
 
-    | 데이터 | 받을 필드 | 받을 기간 |
-    | --- | --- | --- |
-    | 실험 고객 목록 | `customer_id`, `treatment` — 발송군 `1`, 미발송군 `0`, `w0`, `dataset_id`, seed | 실험당 1회. 적격 고객 전원 |
-    | 고객별 주간 합계 | `customer_id`, `reference_week`, `sessions`, `purchases`, `net_revenue` | `[w0 − 12, w0 + 4)` |
-    | 주간 추가 컬럼 | `views`, `session_minutes` | `[w0 − 4, w0)` |
-    | 장바구니 상태 | `w0` 시작 시점의 수량·종류 수·금액 | 고객당 1회 |
-    | 평가용 (입력 금지) | 쌍대 실행의 고객별 발송/미발송 유지 결과, ST/P/SD/LC 잠재 진단값 | 실험당 1회 |
+| 파일 (실행 디렉터리) | 읽는 내용 |
+| --- | --- |
+| `raw.sqlite` | 업무 테이블 7개 전체 기간 |
+| `raw.manifest.json` | `observation_start_at`, `observation_end_at`, `dataset_id`, seed, SQLite 체크섬 |
+| `treatments.parquet` | `customer_id`, `as_of_at`(= `t0`), `treatment`, `assignment_probability` |
+| `evaluation_only/` (평가 때만) | 쌍대 rollout, 잠재 진단 |
 
-## 4. 확인이 필요한 사항 - 담당자와 협의
+## 4. 확인이 필요한 사항
 
-- 시뮬레이터 담당자 답변으로 확정된 내용:
-    - 주간 합계는 `customer_id × reference_week`. 비활동 주는 0, 가입·관측 전은 NULL
-    - `purchases`는 주문 수, 금액은 할인 후 실제 결제액
-    - 고객별 고정 배정(확률 0.5), `w0`에 1회 발송, 4주 유효, 추가 발송 없음, Control 미발송 보장
-    - 결정·발송·사용은 구분해서 기록. 발송 실패는 현재 없음
-    - 기본 시나리오에는 실험 전 쿠폰 이력이 없음
-    - 적격 고객은 `w0` 이전 4주 방문자
-    - 기간은 모두 주 단위: 과거 12주, 최근 4주, 결과 4주
-    - ST/P/SD/LC는 평가용 잠재 진단값으로 제공, `dataset_id`·seed 기록됨
-- 아직 합의가 필요한 내용:
-    - 정답 정의: 시뮬레이터 기본은 미래 4주 미방문. 여기서는 4주 미구매이므로 이 정의의 `definition_id`를 따로 받아야 함
-    - 쌍대 실행(구현 중)의 4주 유지 평가를 위 4주 미구매 정의로도 출력할 수 있는지. 정의가 다르면 실제 uplift와 직접 비교할 수 없음
-    - 조회·세션 시간·장바구니는 원시 로그에서 계산 가능하다고 했으므로, 주간 컬럼(`views`, `session_minutes`)과 `w0` 장바구니 상태로 내보내 줄 수 있는지와 컬럼 이름
-    - 발송 실패 상태가 반영되면 실패 고객도 Treatment로 유지(ITT)
-
----
+시뮬레이터 담당자에게 물을 내용은 `plan.md` 2절에 정리했다.

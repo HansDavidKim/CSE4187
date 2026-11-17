@@ -6,10 +6,11 @@
 | 경로 | 내용 |
 | --- | --- |
 | `Tlearner/`, `Xlearner/`, `Hlearner/` | 세 uplift 모델. 모두 `fit(X, t, y)` 후 `predict(X)`로 `p0, p1, uplift_score` 반환 |
-| `common/schema.py` | 시뮬레이터와 합의한 컬럼 이름, 기간(4주·12주), feature 목록 |
-| `common/features.py` | 고객별 주간 합계 → 고객 1명당 1행 학습 데이터셋 |
+| `common/schema.py` | 시뮬레이터 v5 계약: 원시 테이블 컬럼, 기간(28일·30일), KIT39 목록 |
+| `common/raw.py` | 시뮬레이터 실행 디렉터리(`raw.sqlite`, 배정)를 읽어 `RawData`로 반환. 세 모델 공용 |
+| `common/features.py` | 원시 로그 → KIT39 + T + y, 고객 1명당 1행 학습 데이터셋. 세 모델 공용 |
 | `common/evaluate.py` | Qini curve, Qini 계수, 분위별 실제 uplift |
-| `common/synthetic.py` | 시뮬레이터가 나오기 전까지 쓰는 임시 데이터 (점검용) |
+| `common/synthetic.py` | 시뮬레이터 실행 결과가 없을 때 쓰는 임시 원시 로그 (점검용) |
 | `train.py` | 세 모델 학습·비교·저장 |
 
 ## 실행
@@ -18,7 +19,7 @@
 
 ```bash
 pip install -r uplift/requirements.txt
-python -m uplift.train                     # 임시 데이터로 점검
-python -m uplift.train --dataset data.csv  # build_dataset 결과로 학습
+python -m uplift.train                                    # 임시 원시 로그로 점검
+python -m uplift.train --data simulator/artifacts/v5_raw  # 시뮬레이터 실행 디렉터리로 학습
 python -m pytest uplift/tests
 ```

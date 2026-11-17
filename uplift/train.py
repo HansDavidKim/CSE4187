@@ -1,9 +1,9 @@
 """T/X/H-learner 학습과 비교 (UC-02, UC-03).
 
-    python -m uplift.train                      # 임시 데이터로 파이프라인 점검
-    python -m uplift.train --dataset data.csv   # build_dataset 결과로 학습
+    python -m uplift.train                              # 임시 원시 로그로 파이프라인 점검
+    python -m uplift.train --data simulator/artifacts/v5_raw   # 시뮬레이터 실행 디렉터리로 학습
 
---dataset은 common.features.build_dataset이 만든 표(customer_id, w0, feature, treatment, y)다.
+세 모델 모두 같은 입력 단계를 쓴다: common.raw.load_raw -> common.features.build_dataset.
 """
 
 import argparse
@@ -15,6 +15,7 @@ from sklearn.model_selection import train_test_split
 from .common import schema as S
 from .common.evaluate import against_truth, ate, qini_coefficient
 from .common.features import build_dataset
+from .common.raw import load_raw
 from .common.synthetic import make_synthetic
 from .Hlearner import HLearner
 from .Tlearner import TLearner
@@ -25,31 +26,33 @@ LEARNERS = {"tlearner": TLearner, "xlearner": XLearner, "hlearner": HLearner}
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
-    ap.add_argument("--dataset", help="학습 데이터셋 CSV. 없으면 임시 데이터를 만든다")
-    ap.add_argument("--n", type=int, default=5000, help="임시 데이터의 고객 수")
+    ap.add_argument("--data", help="시뮬레이터 실행 디렉터리(raw.sqlite가 있는 곳). 없으면 임시 데이터를 만든다")
+    ap.add_argument("--n", type=int, default=2000, help="임시 데이터의 고객 수")
     ap.add_argument("--out", default="uplift/artifacts", help="모델과 결과를 저장할 디렉토리")
-    ap.add_argument("--propensity", type=float, default=0.5, help="배정 확률")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
     truth = None
-    if args.dataset:
-        data = pd.read_csv(args.dataset)
+    if args.data:
+        raw = load_raw(args.data)
     else:
         print("[주의] 시뮬레이터 데이터가 아닌 임시 데이터다. 아래 수치는 파이프라인 점검용이다.")
-        customers, weekly, cart, truth = make_synthetic(args.n, args.seed)
-        data = build_dataset(customers, weekly, cart)
+        raw, truth = make_synthetic(args.n, args.seed)
         truth = truth.set_index(S.CUSTOMER_ID)["uplift"]
+    propensity = float(raw.assignments["assignment_probability"].iloc[0])
 
-    data = data.dropna(subset=[S.LABEL])  # 결과 4주가 다 관측된 고객만
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    data = build_dataset(raw)
+    data.to_parquet(out / "dataset.parquet", index=False)
+    data = data.dropna(subset=[S.LABEL])  # 결과 28일이 다 관측된 고객만
     train, test = train_test_split(data, test_size=0.3, stratify=data[S.TREATMENT],
                                    random_state=args.seed)
     print(f"train {len(train)}명, test {len(test)}명, test ATE {ate(test[S.TREATMENT], test[S.LABEL]):+.4f}")
 
-    out = Path(args.out)
     rows = []
     for key, cls in LEARNERS.items():
-        model = cls().fit(train[S.FEATURES], train[S.TREATMENT], train[S.LABEL], args.propensity)
+        model = cls().fit(train[S.FEATURES], train[S.TREATMENT], train[S.LABEL], propensity)
         model.save(out / f"{key}.pkl")
         pred = model.predict(test[S.FEATURES])
         row = {"model": model.name,

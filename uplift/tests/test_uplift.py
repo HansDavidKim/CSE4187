@@ -1,79 +1,182 @@
+import hashlib
+import json
+import sqlite3
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from uplift.common import schema as S
 from uplift.common.evaluate import qini_coefficient, qini_curve
-from uplift.common.features import build_dataset
+from uplift.common.features import _replay_cart, build_dataset, build_features, build_labels
+from uplift.common.raw import RawData, load_raw, normalize_tables
 from uplift.common.synthetic import make_synthetic
 from uplift.Hlearner import HLearner
 from uplift.Tlearner import TLearner
 from uplift.Xlearner import XLearner
 
+T0 = pd.Timestamp("2026-06-01 00:00", tz="Asia/Seoul").tz_convert("UTC")  # 월요일 00시
+ago = lambda days, minutes=0: T0 - pd.Timedelta(days=days) + pd.Timedelta(minutes=minutes)
+
 
 @pytest.fixture(scope="module")
 def raw():
-    return make_synthetic(1500, seed=1)
+    return make_synthetic(1500, seed=1)[0]
 
 
 @pytest.fixture(scope="module")
 def data(raw):
-    customers, weekly, cart, _ = raw
-    return build_dataset(customers, weekly, cart)
+    return build_dataset(raw)
 
 
-def test_dataset_shape(data):
-    assert list(data.columns) == [S.CUSTOMER_ID, S.W0, S.TREATMENT, *S.FEATURES, S.LABEL]
+def hand_tables():
+    """고객 1명. 세션 4개(100·50·10·2일 전)와 t0 3일 뒤 구매 1건."""
+    event = lambda sid, at, kind, pid=None, qty=None, price=None, **extra: {
+        "customer_id": "A", "session_id": sid, "event_at": at, "event_type": kind, "product_id": pid,
+        "quantity": qty, "unit_price_minor": price, **extra}
+    events = [
+        event("S1", ago(100, 1), "view", "P1", price=1000),
+        event("S1", ago(100, 2), "cart", "P1", 1, 1000),
+        event("S1", ago(100, 3), "cart", "P2", 1, 500),
+        event("S2", ago(50, 5), "view", "P2", price=500),
+        event("S2", ago(50, 10), "purchase"),  # O1: 장바구니의 P1 구매
+        event(None, ago(40), "review", "P1", related_purchase_event_id=5, order_line_no=1, rating=5,
+              rating_kind=S.PRODUCT_REVIEW_KIND),
+        event("S3", ago(10, 1), "view", "P3", price=300),
+        event("S3", ago(10, 2), "view", "P1", price=1000),
+        event("S3", ago(10, 3), "cart", "P3", 1, 300),
+        event("S3", ago(10, 4), "cart", "P3", 1, 300),
+        event("S3", ago(10, 5), "remove_from_cart", "P3", 1, 300),
+        event("S3", ago(10, 20), "purchase"),  # O2: P1 2개 바로 구매
+        event(None, ago(5), "review", "P1", related_purchase_event_id=12, order_line_no=1, rating=4,
+              rating_kind=S.PRODUCT_REVIEW_KIND),
+        event("S4", ago(2, 1), "view", "P2", price=500),
+        event("S4", ago(2, 2), "cart", "P2", 1, 500),
+        event("S5", ago(-3, 1), "purchase"),  # 결과 기간의 구매
+    ]
+    events = pd.DataFrame(events)
+    events.insert(0, "event_id", range(1, len(events) + 1))
+    session = lambda sid, start, minutes: {"session_id": sid, "customer_id": "A", "started_at": start,
+                                           "ended_at": start + pd.Timedelta(minutes=minutes)}
+    order = lambda oid, event_id, source, paid: {"order_id": oid, "purchase_event_id": event_id,
+                                                  "checkout_source": source, "coupon_id": None,
+                                                  "discount_minor": 0, "paid_minor": paid}
+    item = lambda oid, pid, qty: {"order_id": oid, "line_no": 1, "product_id": pid, "quantity": qty}
+    return normalize_tables({
+        "customers": pd.DataFrame({"customer_id": ["A"], "signed_up_at": [ago(100)]}),
+        "products": pd.DataFrame({"product_id": ["P1", "P2", "P3"], "unit_price_minor": [1000, 500, 300]}),
+        "sessions": pd.DataFrame([session("S1", ago(100), 10), session("S2", ago(50), 20),
+                                  session("S3", ago(10), 30), session("S4", ago(2), 5),
+                                  session("S5", ago(-3), 5)]),
+        "events": events,
+        "orders": pd.DataFrame([order("O1", 5, "cart", 1000), order("O2", 12, "buy_now", 2000),
+                                order("O3", 16, "buy_now", 300)]),
+        "order_items": pd.DataFrame([item("O1", "P1", 1), item("O2", "P1", 2), item("O3", "P3", 1)]),
+        "coupons": pd.DataFrame(columns=S.RAW_COLUMNS["coupons"]),
+    })
+
+
+SNAP = pd.DataFrame({S.CUSTOMER_ID: ["A"], S.T0: [T0]})
+
+
+def test_dataset_shape(raw, data):
+    assert list(data.columns) == [S.CUSTOMER_ID, S.T0, S.TREATMENT, *S.KIT39, S.LABEL]
     assert len(data) == 1500 and data[S.CUSTOMER_ID].is_unique
-    assert data[S.LABEL].isin([0, 1]).all()
+    assert data[S.LABEL].isin([0, 1]).all() and data[S.LABEL].nunique() == 2
+    assert len(S.KIT39) == 39 and len(S.FEATURES) == 36
+    assert (data["session_count_30d"] >= 1).all()  # 적격 고객은 직전 28일에 방문했다
+    assert data[S.FEATURES].notna().any().all()  # 전부 NULL인 feature가 없다
 
 
 def test_features_by_hand():
-    w0 = pd.Timestamp("2026-06-01")
-    week = lambda o: w0 + pd.Timedelta(weeks=o)
-    rows = []
-    for o in range(-12, 4):
-        r = {S.CUSTOMER_ID: 7, S.REFERENCE_WEEK: week(o), "sessions": 0.0, "purchases": 0.0,
-             "net_revenue": 0.0, "views": 0.0, "session_minutes": 0.0}
-        if o < -9:  # 가입 전
-            r.update(dict.fromkeys(S.WEEKLY_COLUMNS, np.nan))
-        rows.append(r)
-    weekly = pd.DataFrame(rows).set_index(S.REFERENCE_WEEK)
-    weekly.loc[week(-6), ["sessions", "purchases", "net_revenue"]] = [2, 2, 3000]
-    weekly.loc[week(-2), ["sessions", "purchases", "net_revenue", "views", "session_minutes"]] = [
-        3, 1, 1000, 12, 30]
-    weekly.loc[week(-1), ["sessions", "views"]] = [1, 4]
-    weekly.loc[week(2), "purchases"] = 1
-    customers = pd.DataFrame({S.CUSTOMER_ID: [7], S.TREATMENT: [1], S.W0: [w0]})
-    cart = pd.DataFrame({S.CUSTOMER_ID: [7], "cart_qty": [2], "cart_sku": [1], "cart_gross_value": [500]})
-
-    row = build_dataset(customers, weekly.reset_index(), cart).iloc[0]
+    row = build_features(hand_tables(), SNAP).iloc[0]
+    gaps = np.array([50.0, 40.0, 8.0])
     expected = {
-        "weeks_since_last_purchase": 2, "weeks_since_last_session": 1, "purchase_count_4w": 1,
-        "session_count_4w": 4, "observed_tenure_weeks": 9, "view_count_4w": 16,
-        "net_spend_4w": 1000, "mean_net_order_value_4w": 1000, "mean_session_minutes_4w": 7.5,
-        "views_per_session_4w": 4, "orders_per_session_4w": 0.25, "purchase_weeks_12w": 2,
-        "session_weeks_12w": 3, "cart_qty_w0": 2, "cart_sku_w0": 1, "cart_gross_value_w0": 500,
-        "orders_delta_4w": -1, "net_spend_delta_4w": -2000, S.LABEL: 1,
+        "visit_recency_days": 2, "purchase_recency_days": 10 - 20 / 1440, "observed_tenure_days": 100,
+        "session_count_30d": 2, "view_count_30d": 3, "purchase_count_30d": 1, "net_spend_30d": 2000,
+        "mean_net_order_value_30d": 2000, "mean_session_duration_minutes_30d": 17.5,
+        "views_per_session_30d": 1.5, "orders_per_session_30d": 0.5,
+        "mean_purchase_gap_days": 40 + 10 / 1440,
+        "intervisit_start_gap_mean_days_90d": gaps.mean(),
+        "intervisit_start_gap_cv_90d": gaps.std(ddof=1) / gaps.mean(),
+        "unique_purchase_products_30d": 1, "purchased_qty_30d": 2, "mean_basket_qty_30d": 2,
+        "cart_qty_current": 3, "cart_sku_current": 2, "cart_gross_value_current": 2 * 500 + 300,
+        "last_session_min_viewed_price": 500, "last_session_max_viewed_price": 500,
+        "last_session_start_hour": 0, "last_session_start_weekday": 5,
+        "coupon_uses_30d": 0, "coupon_discount_amount_30d": 0,
+        "orders_delta_30d": 0, "net_spend_delta_30d": 1000, "mean_net_order_value_delta_30d": 1000,
+        "unique_purchase_products_delta_30d": 0, "purchased_qty_delta_30d": 1,
+        "review_count_30d": 1, "mean_review_rating_30d": 4,
+        "cart_adds_per_nonpurchase_session_30d": 1, "cart_removes_per_nonpurchase_session_30d": 0,
+        "review_last_order_mean_rating": 4, "review_recency_days": 5, "review_non5_share_30d": 1,
     }
     for name, value in expected.items():
         assert row[name] == pytest.approx(value), name
+    assert np.isnan(row["coupon_redemption_recency_days"])
+    assert set(expected) | {"coupon_redemption_recency_days"} == set(S.KIT39)
+    assert build_labels(hand_tables(), SNAP, T0 + pd.Timedelta(days=28)).iloc[0] == 1
 
 
-def test_future_weeks_do_not_change_features(raw, data):
-    customers, weekly, cart, _ = raw
-    w0 = customers[S.W0].iloc[0]
-    changed = weekly.copy()
-    future = changed[S.REFERENCE_WEEK] >= w0
-    changed.loc[future, S.WEEKLY_COLUMNS] = 99.0
-    pd.testing.assert_frame_equal(build_dataset(customers, changed, cart)[S.FEATURES], data[S.FEATURES])
+def test_unobserved_history_is_null():
+    # 관측이 t0 45일 전에 시작: 최근 30일 창은 유지, 60일·90일 범위와 현재 장바구니는 NULL
+    row = build_features(hand_tables(), SNAP, observation_start=ago(45)).iloc[0]
+    assert row["session_count_30d"] == 2 and row["visit_recency_days"] == 2
+    for name in ("orders_delta_30d", "intervisit_start_gap_mean_days_90d", "cart_qty_current"):
+        assert np.isnan(row[name]), name
+    # 가입 시각이 기준 시각이면 전부 NULL
+    early = pd.DataFrame({S.CUSTOMER_ID: ["A"], S.T0: [ago(100)]})
+    assert build_features(hand_tables(), early).iloc[0].isna().all()
+
+
+def test_cart_replay_checkout_sources():
+    at = lambda m: ago(1, m)
+    move = lambda i, pid, kind="cart": {"customer_id": "A", "product_id": pid, "event_at": at(i), "event_id": i,
+                                        "event_type": kind, "quantity": 1}
+    events = pd.DataFrame([move(1, "A"), move(2, "B"), move(3, "C"), move(4, "C", "remove_from_cart")])
+    item = lambda i, pid, qty, source: {"customer_id": "A", "product_id": pid, "event_at": at(i),
+                                        "purchase_event_id": i, "quantity": qty, "checkout_source": source}
+    # mixed: A 2개 구매 -> 보유한 1개만 차감. buy_now: B는 그대로 남는다.
+    items = pd.DataFrame([item(5, "A", 2, "mixed"), item(6, "B", 1, "buy_now")])
+    cart = _replay_cart(events, items)
+    assert dict(zip(cart["product_id"], cart["qty"])) == {"B": 1}
+
+
+def test_future_records_do_not_change_features(raw, data):
+    cut = {name: frame.copy() for name, frame in raw.tables.items()}
+    cut["sessions"] = cut["sessions"][cut["sessions"]["started_at"] < T0]
+    cut["events"] = cut["events"][cut["events"]["event_at"] < T0]
+    cut["orders"] = cut["orders"][cut["orders"]["purchase_event_id"].isin(cut["events"]["event_id"])]
+    cut["order_items"] = cut["order_items"][cut["order_items"]["order_id"].isin(cut["orders"]["order_id"])]
+    past_only = RawData(cut, raw.assignments, raw.observation_start, raw.observation_end, {})
+    pd.testing.assert_frame_equal(build_dataset(past_only)[S.KIT39], data[S.KIT39])
 
 
 def test_unobserved_outcome_is_null(raw):
-    customers, weekly, cart, _ = raw
-    w0 = customers[S.W0].iloc[0]
-    cut = weekly[weekly[S.REFERENCE_WEEK] < w0 + pd.Timedelta(weeks=3)]  # 결과 주 1개 누락
-    assert build_dataset(customers, cut, cart)[S.LABEL].isna().all()
+    early = RawData(raw.tables, raw.assignments, raw.observation_start,
+                    raw.observation_end - pd.Timedelta(days=1), {})
+    assert build_dataset(early)[S.LABEL].isna().all()
+
+
+def test_load_raw_reads_simulator_run(raw, data, tmp_path):
+    database = tmp_path / S.RAW_DATABASE
+    with sqlite3.connect(database) as connection:
+        for name, frame in raw.tables.items():
+            frame = frame.copy()
+            for column in S.TIME_COLUMNS.intersection(frame.columns):
+                frame[column] = frame[column].map(lambda v: v.isoformat(), na_action="ignore")
+            frame.to_sql(name, connection, index=False)
+    connection.close()
+    manifest = {"database_sha256": hashlib.sha256(database.read_bytes()).hexdigest(),
+                "metadata": {"observation_start_at": raw.observation_start.isoformat(),
+                             "observation_end_at": raw.observation_end.isoformat()}}
+    (tmp_path / S.RAW_MANIFEST).write_text(json.dumps(manifest))
+    raw.assignments.rename(columns={S.T0: "as_of_at"}).to_parquet(tmp_path / S.ASSIGNMENT_FILE)
+
+    loaded = load_raw(tmp_path)
+    pd.testing.assert_frame_equal(build_dataset(loaded), data, check_dtype=False)
+    (tmp_path / S.RAW_MANIFEST).write_text(json.dumps({**manifest, "database_sha256": "0"}))
+    with pytest.raises(ValueError):
+        load_raw(tmp_path)
 
 
 @pytest.mark.parametrize("cls", [TLearner, XLearner, HLearner])
