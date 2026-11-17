@@ -1,6 +1,7 @@
 """Materialize public KIT39 features and factual experiment tables beside raw SQLite."""
 from __future__ import annotations
 
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -98,7 +99,7 @@ def materialize_features(dataset, output, as_of_at=None):
     output.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}-", dir=output.parent))
     try:
-        with sqlite3.connect(staging / "features.sqlite") as connection:
+        with closing(sqlite3.connect(staging / "features.sqlite")) as connection, connection:
             for name, frame in frames.items():
                 _sql_frame(frame).to_sql(name, connection, index=False, if_exists="fail")
                 frame.to_parquet(staging / ("feature_store.parquet" if name == "features" else f"{name}.parquet"), index=False)

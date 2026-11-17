@@ -120,6 +120,31 @@ def test_sidecar_experiment_coverage_and_explicit_new_snapshot(dataset, tmp_path
     assert manifest["omitted"] == {} and set(manifest["file_sha256"]) >= {"features.sqlite", "feature_store.parquet"}
 
 
+def test_feature_database_is_closed_before_publication(dataset, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from simulate.v4 import storage
+
+    connections = []
+    publish = storage.os.rename
+
+    def connect(path):
+        connection = sqlite3.connect(path)
+        connections.append(connection)
+        return connection
+
+    def rename(staging, output):
+        (connection,) = connections
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
+        publish(staging, output)
+
+    monkeypatch.setattr(storage, "sqlite3", SimpleNamespace(connect=connect))
+    monkeypatch.setattr(storage, "os", SimpleNamespace(rename=rename))
+    output = tmp_path / "features"
+    materialize_features(dataset, output)
+    assert (output / "features.sqlite").is_file()
+
+
 def test_failed_publication_leaves_no_partial_feature_database(dataset, tmp_path, monkeypatch):
     from simulate.v4 import storage
     output = tmp_path / "failed"
