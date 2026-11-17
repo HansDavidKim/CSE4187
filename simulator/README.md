@@ -36,7 +36,7 @@ Python 3.10 이상에서 저장소의 `simulator/` 디렉터리 기준으로 실
 
 ```bash
 cd simulator
-python -m pip install -e ".[dev]"
+python -m pip install -r requirements.txt
 ecommerce-sim v4 generate --config src/simulate/v4/config/population.yaml --mode small \
   --n-customers 500 --months 6 --seed 42 --output artifacts/small
 ecommerce-sim v4 validate --data artifacts/small/raw.sqlite
@@ -127,10 +127,10 @@ Bellman 잔차가 기준을 충족하면 정책을 사용하고, 계산이 수�
 
 ### 쿠폰 효과 보정
 
-합성 프로필 기본 설정은 발송에 따른 방문 효과, 10% 할인에 따른 추가 구매 효과,
-발생한 구매에서의 쿠폰 사용을 각각 모의한다. 구매는 장바구니와 쇼핑 상태에 따른
-행동 확률로 생성된다. 쿠폰 사용은 이 중 유효기간과 사용 가능 시점을 충족하는 구매에
-기록한다.
+`population.yaml`과 `simulator.yaml`은 발송에 따른 방문 효과, 10% 할인에 따른 추가
+구매 효과, 발생한 구매에서의 쿠폰 사용을 각각 모의한다. 구매는 장바구니와 쇼핑 상태에
+따른 행동 확률로 생성된다. 쿠폰 사용은 이 중 유효기간과 사용 가능 시점을 충족하는 구매에
+기록한다. 아래 계수는 합성 프로필에서 보정했고 원천 고객별 프로필에도 같은 값을 적용한다.
 
 - [Hillstrom 이메일 실험](https://blog.minethatdata.com/2008/03/minethatdata-e-mail-analytics-and-data.html?m=0)의
   발송군과 미발송군에서 14일 방문율 차이 +6.09%p와 구매율 차이 +0.50%p를 구했다.

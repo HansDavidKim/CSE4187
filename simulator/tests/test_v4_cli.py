@@ -15,6 +15,7 @@ def test_bundled_config_resolves_models_and_calibrations_separately(tmp_path):
     assert config["source_simulation"]["outcome_days"] == 28
     assert config["source_simulation"]["eligibility_window_days"] == 28
     assert config["source_simulation"]["coupon_validity_days"] == 28
+    assert config["source_simulation"]["coupon_effect_calibration"] == load_config(POPULATION_CONFIG)["source_simulation"]["coupon_effect_calibration"]
     assert config["source_simulation"]["max_events_per_session"] == 782
     assert Path(config["toy"]["message_model_path"]).is_file()
     assert "search_model_path" not in config["source_simulation"]

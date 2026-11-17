@@ -40,6 +40,7 @@ def source_config(tmp_path_factory):
     config["source_simulation"]["return_model_path"] = None
     config["source_simulation"]["coupon_response_model_path"] = None
     config["source_simulation"]["visit_timing_model_path"] = None
+    config["source_simulation"].pop("coupon_effect_calibration")
     for name in ("search", "review", "cs"):
         config["source_simulation"][f"{name}_model_path"] = None
     return config

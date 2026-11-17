@@ -719,16 +719,12 @@ class EcommerceSimulator:
                             probabilities["purchase"] *= price_purchase_weight
                     actions = list(probabilities)
                     p = np.array(list(probabilities.values()))
-                    response_record = state.get("coupon_response")
-                    response_ready = (coupon_effects is None and purchase_response is not None and treatment and not state["coupon_used"]
-                                      and response_record["response_selected"]
-                                      and response_record["response_ready_at"] <= when < coupon_expires_at)
-                    if not p.sum() and not response_ready:
+                    if not p.sum():
                         # An observed remove-only start with unknown initial cart cannot be fabricated in a complete empty-cart history.
                         limited = True
                         termination_reason = "infeasible_initial_action" if decision == 0 else "no_nonterminal_support"
                         break
-                    action = actions[int(rng.choice(len(actions), p=p / p.sum()))] if p.sum() else None
+                    action = actions[int(rng.choice(len(actions), p=p / p.sum()))]
                     if action == "end":
                         limited, termination_reason = False, "causal_policy_end"
                         break
@@ -740,18 +736,6 @@ class EcommerceSimulator:
                         break
                     flush_reviews(uid, state, local, next_time)
                     when, prior_gap = next_time, gap
-                    if (purchase_response is not None and treatment and not state["coupon_used"]
-                            and response_record["response_selected"]
-                            and response_record["response_ready_at"] <= when < coupon_expires_at
-                            and (coupon_effects is None or action == "purchase")):
-                        # shortcut: legacy O2O draws substitute the action; use coupon_effect_calibration for a propensity-based purchase.
-                        response_record.update(opportunity_at=when, baseline_action=action,
-                                               promoted_purchase=action != "purchase")
-                        action = "purchase"
-                    elif action is None:
-                        # The coupon can expire during the gap to an otherwise unsupported action.
-                        limited, termination_reason = True, "no_nonterminal_support"
-                        break
                     decision_offer = offer_seen
                     interaction_units = 1
                     if action == "view":
@@ -793,6 +777,7 @@ class EcommerceSimulator:
                         token = event("purchase", offer=decision_offer)
                         order_id = f"{uid}:O{state['purchases'] + 1}"
                         gross = sum(quantity * products_by_id[pid]["unit_price_minor"] for pid, quantity in basket.items())
+                        response_record = state.get("coupon_response")
                         use_coupon = (treatment and not state["coupon_used"]
                                       and (response_record["response_selected"] and response_record["response_ready_at"] <= when
                                            if purchase_response is not None else state["will_use_coupon"])
@@ -834,7 +819,8 @@ class EcommerceSimulator:
                         state["coupon_used"] |= use_coupon
                         schedule_review(uid, state, when, token, order_id, basket)
                         if use_coupon and purchase_response is not None:
-                            response_record.update(coupon_used=True, purchase_event_id=token)
+                            response_record.update(opportunity_at=when, baseline_action="purchase",
+                                                   coupon_used=True, purchase_event_id=token)
                     if shopping_history is not None:
                         shopping_history.record_action(sid, when, action, quantity=interaction_units,
                             view_price_minor=price if action == "view" else None)
@@ -1161,8 +1147,9 @@ class EcommerceSimulator:
                 "source": purchase_response.get("source"),
                 "type": "observational_response_scenario", "window_days": 30,
                 "cohort_clock": "purchase history strictly before sending; no observed purchase is not never purchased",
-                "mechanism": "one keyed response draw per coupon; first actual shopping decision at/after sampled source redemption day becomes purchase",
-                "probability_scope": "source receipts transferred to a shopping opportunity; realized redemption can be lower when no eligible opportunity occurs",
+                "mechanism": "one keyed response draw per coupon, applied only at an eligible purchase sampled from the shopping policy",
+                "requires_policy_purchase": True,
+                "probability_scope": "source receipt rates and response timing transferred to already sampled eligible purchases",
                 "replaces": "dunnhumby will_use_coupon gate; no multiplication of response rates",
                 "causal_effect_identified": False, "full_purchase_counterfactual_replay": False,
                 "response_type_scope": "ST/P/SD/LC remain Hillstrom visit-proxy diagnostics, not purchase effect types",

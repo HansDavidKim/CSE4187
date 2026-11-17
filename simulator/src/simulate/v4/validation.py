@@ -495,8 +495,8 @@ def audit_coupon_responses(tables, metadata, coupon_response_diagnostics, treatm
                               suffixes=("", "_assignment"), indicator=True)
     if not joined._merge.eq("both").all():
         raise ValueError("coupon response diagnostics must cover all assignment snapshots")
+    declaration = metadata.get("coupon_purchase_response") or {}
     if response_model is None:
-        declaration = metadata.get("coupon_purchase_response") or {}
         path = Path(declaration["model_path"])
         model_bytes = path.read_bytes()
         if hashlib.sha256(model_bytes).hexdigest() != declaration.get("model_sha256"):
@@ -509,6 +509,7 @@ def audit_coupon_responses(tables, metadata, coupon_response_diagnostics, treatm
     if calibration is not None and not isinstance(calibration, dict):
         raise ValueError("coupon effect calibration must be an object")
     odds_multiplier = calibration.get("redemption_odds_multiplier", 1.) if calibration is not None else 1.
+    requires_policy_purchase = calibration is not None or declaration.get("requires_policy_purchase") is True
     groups = response_model["groups"]
     orders = _order_events(tables)
     by_event = orders.set_index("purchase_event_id")
@@ -562,8 +563,8 @@ def audit_coupon_responses(tables, metadata, coupon_response_diagnostics, treatm
                 continue
             mismatches["unselected_or_control_used"] += not selected or not treated
             mismatches["promotion_flag"] += row.promoted_purchase != (row.baseline_action != "purchase")
-            if calibration is not None:
-                mismatches["forced_calibrated_purchase"] += row.promoted_purchase
+            if requires_policy_purchase:
+                mismatches["forced_purchase"] += row.promoted_purchase
             mismatches["baseline_action"] += pd.notna(row.baseline_action) and row.baseline_action not in {"view", "cart", "remove", "purchase"}
             if pd.isna(row.purchase_event_id) or row.purchase_event_id not in by_event.index:
                 mismatches["used_purchase_event_fk"] += 1

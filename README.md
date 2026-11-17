@@ -12,6 +12,6 @@
 
 ```bash
 cd simulator
-python -m pip install -e ".[dev]"
+python -m pip install -r requirements.txt
 PYTHONPATH=src python -m pytest -q
 ```

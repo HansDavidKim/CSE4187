@@ -247,10 +247,18 @@ def test_audit_recovers_scaled_coupon_odds_and_natural_checkout(coupon_response_
     forced = diagnostic.copy()
     forced.loc[0, ["baseline_action", "promoted_purchase"]] = ["view", True]
     report = audit.audit_coupon_responses(tables, metadata, forced, treatments, model)
-    assert not report["passed"] and report["mismatch_counts"]["forced_calibrated_purchase"] == 1
+    assert not report["passed"] and report["mismatch_counts"]["forced_purchase"] == 1
     metadata["coupon_effect_calibration"]["redemption_odds_multiplier"] = 1.
     report = audit.audit_coupon_responses(tables, metadata, diagnostic, treatments, model)
     assert not report["passed"] and report["mismatch_counts"]["response_probability"] == 2
+
+
+def test_audit_distinguishes_new_checkout_policy_from_existing_outputs(coupon_response_records):
+    tables, metadata, diagnostic, treatments, model = coupon_response_records
+    assert audit.audit_coupon_responses(tables, metadata, diagnostic, treatments, model)["passed"]
+    metadata["coupon_purchase_response"] = {"requires_policy_purchase": True}
+    report = audit.audit_coupon_responses(tables, metadata, diagnostic, treatments, model)
+    assert not report["passed"] and report["mismatch_counts"]["forced_purchase"] == 1
 
 
 @pytest.mark.parametrize("mutation,field",[("clock","used_response_clock"),("fk","used_purchase_event_fk"),

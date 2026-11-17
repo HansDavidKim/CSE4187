@@ -13,12 +13,13 @@ from simulate.v4.simulator.engine import EcommerceSimulator
 from simulate.v4.simulator.raw_store import RAW_COLUMNS, cart_at, discount_minor, validate_raw_dataset
 
 
-def _config(checkout_fixture, folder, *, redeemed=4, delay=0, legacy_use=0., first_action="view", sessions=4):
+def _config(checkout_fixture, folder, *, redeemed=4, delay=0, legacy_use=0., first_action="view", sessions=4,
+            decisions=1):
     config, model = copy.deepcopy(checkout_fixture)
     folder.mkdir(parents=True, exist_ok=True)
     for profile in model["profiles"]:
-        profile.update(session_first_action_counts={first_action:1}, session_choice_lengths=[1],
-                       session_lengths=[1], session_counts_active_30d=[sessions], idle_gap_seconds=[86400.])
+        profile.update(session_first_action_counts={first_action:1}, session_choice_lengths=[decisions],
+                       session_lengths=[decisions], session_counts_active_30d=[sessions], idle_gap_seconds=[86400.])
     groups = {name:dict(receipts=4,redeemed=redeemed,response_probability=redeemed/4,
                        redemption_delay_days=[delay]*redeemed)
               for name in ("no_observed_purchase","purchased_within_28d","lapsed_purchase")}
@@ -140,7 +141,7 @@ def _pre_send_cohorts(result):
     assert tables["coupon_response_diagnostics"].set_index("customer_id").history_cohort.to_dict()==expected
 
 
-def test_zero_purchase_single_action_users_make_real_coupon_orders_and_draw_once(checkout_fixture,tmp_path,monkeypatch):
+def test_natural_purchases_redeem_once_and_draw_once(checkout_fixture,tmp_path,monkeypatch):
     import simulate.v4.simulator.engine as engine
     actual=engine.sample_coupon_response
     calls=[]
@@ -148,32 +149,32 @@ def test_zero_purchase_single_action_users_make_real_coupon_orders_and_draw_once
         calls.append((args[2],args[3],args[4]))
         return actual(*args)
     monkeypatch.setattr(engine,"sample_coupon_response",sample)
-    result=_run(_config(checkout_fixture,tmp_path,legacy_use=0.))
+    result=_run(_config(checkout_fixture,tmp_path,legacy_use=0.,first_action="purchase"))
     tables=result.tables
     t0=pd.Timestamp(result.metadata["as_of_at"])
     orders=tables["orders"].merge(tables["events"][["event_id","customer_id","event_at"]],
         left_on="purchase_event_id",right_on="event_id",validate="one_to_one")
+    used=orders.loc[orders.coupon_id.notna()]
     arms=tables["treatments"].set_index("customer_id").treatment
     diag=tables["coupon_response_diagnostics"].set_index("customer_id")
-    assert not orders.empty
-    assert orders.event_at.ge(t0).all() and orders.customer_id.map(arms).eq(1).all()
-    assert orders.coupon_id.notna().all() and orders.coupon_id.is_unique
-    assert orders.customer_id.is_unique  # Many opportunities still consume one coupon once.
+    assert not used.empty
+    assert used.event_at.ge(t0).all() and used.customer_id.map(arms).eq(1).all()
+    assert used.coupon_id.is_unique and used.customer_id.is_unique
     assert len(calls)==len(tables["customers"]) and len({call[0] for call in calls})==len(calls)
-    assert all(last is None and at==t0 for _,at,last in calls)
-    assert diag.loc[orders.customer_id,"promoted_purchase"].all()
-    assert diag.loc[orders.customer_id,"baseline_action"].eq("view").all()
-    assert set(diag.loc[diag.coupon_used,"purchase_event_id"].astype(int))==set(orders.purchase_event_id)
+    assert all(last < at == t0 for _,at,last in calls)
+    assert not diag.promoted_purchase.any()
+    assert diag.loc[used.customer_id,"baseline_action"].eq("purchase").all()
+    assert set(diag.loc[diag.coupon_used,"purchase_event_id"].astype(int))==set(used.purchase_event_id)
     assert diag.loc[diag.treatment.eq(0),"response_status"].eq("control").all()
     assert diag.loc[diag.treatment.eq(0),"purchase_event_id"].isna().all()
-    _pre_send_cohorts(result)  # Future promoted purchases cannot reclassify the send-time cohort.
+    _pre_send_cohorts(result)
     validate_raw_dataset({name:tables[name] for name in RAW_COLUMNS},result.metadata)
 
 
 def test_tianchi_success_bypasses_legacy_use_probability_without_multiplication(checkout_fixture,tmp_path):
-    left=_run(_config(checkout_fixture,tmp_path/"zero",legacy_use=0.))
-    right=_run(_config(checkout_fixture,tmp_path/"one",legacy_use=1.))
-    assert not left.tables["orders"].empty
+    left=_run(_config(checkout_fixture,tmp_path/"zero",legacy_use=0.,first_action="purchase"))
+    right=_run(_config(checkout_fixture,tmp_path/"one",legacy_use=1.,first_action="purchase"))
+    assert left.tables["orders"].coupon_id.notna().any()
     for name in RAW_COLUMNS:
         pd.testing.assert_frame_equal(left.tables[name],right.tables[name])
     pd.testing.assert_frame_equal(left.tables["coupon_response_diagnostics"],right.tables["coupon_response_diagnostics"])
@@ -192,25 +193,29 @@ def test_zero_response_never_uses_legacy_gate_even_for_natural_purchases(checkou
     _pre_send_cohorts(result)
 
 
-def test_zero_response_does_not_manufacture_a_purchase_for_zero_purchase_users(checkout_fixture,tmp_path):
-    result=_run(_config(checkout_fixture,tmp_path,redeemed=0,legacy_use=1.))
+@pytest.mark.parametrize("redeemed", [0, 4])
+def test_redemption_draw_does_not_create_purchases_for_view_only_users(checkout_fixture,tmp_path,redeemed):
+    result=_run(_config(checkout_fixture,tmp_path,redeemed=redeemed,legacy_use=1.))
     assert result.tables["orders"].empty and result.tables["order_items"].empty
     assert result.tables["events"].event_type.eq("view").all()
+    assert result.tables["coupon_response_diagnostics"].response_selected.eq(redeemed == 4).all()
 
 
 def test_sampled_day29_response_waits_for_actual_session_and_preserves_28d_outcome(checkout_fixture,tmp_path):
-    result=_run(_config(checkout_fixture,tmp_path,delay=29,sessions=31))
+    result=_run(_config(checkout_fixture,tmp_path/"delay",delay=29,sessions=31,first_action="purchase"))
+    baseline=_run(_config(checkout_fixture,tmp_path/"baseline",redeemed=0,sessions=31,first_action="purchase"))
     tables=result.tables
     t0=pd.Timestamp(result.metadata["as_of_at"])
     bought=tables["orders"].merge(tables["events"][["event_id","session_id","event_at"]],
         left_on="purchase_event_id",right_on="event_id",validate="one_to_one")
+    bought=bought.loc[bought.coupon_id.notna()]
     assert not bought.empty
     assert bought.event_at.ge(t0+pd.Timedelta(days=29)).all()
     assert bought.event_at.lt(t0+pd.Timedelta(days=30)).all()
     visits=tables["sessions"].set_index("session_id")
     assert bought.event_at.eq(bought.session_id.map(visits.started_at)).all()
-    assert tables["labels"].future_revenue_28d.eq(0).all()
-    assert tables["labels"].future_revenue_30d.gt(0).any()
+    pd.testing.assert_series_equal(tables["labels"].future_revenue_28d,baseline.tables["labels"].future_revenue_28d)
+    assert tables["labels"].future_revenue_30d.lt(baseline.tables["labels"].future_revenue_30d).any()
     used=tables["coupon_response_diagnostics"].loc[lambda frame:frame.coupon_used]
     assert used.source_delay_days.eq(29).all()
     assert pd.to_datetime(used.opportunity_at,utc=True).ge(pd.to_datetime(used.response_ready_at,utc=True)).all()
@@ -220,14 +225,15 @@ def test_sampled_day29_response_waits_for_actual_session_and_preserves_28d_outco
 
 @pytest.mark.parametrize("delay", [28, 29])
 def test_coupon_expiry_blocks_response_at_or_after_day_28(checkout_fixture, tmp_path, delay):
-    config = _config(checkout_fixture, tmp_path, delay=delay, sessions=31)
+    config = _config(checkout_fixture, tmp_path, delay=delay, sessions=31, first_action="purchase")
     config["source_simulation"]["coupon_validity_days"] = 28
     result = _run(config)
     t0 = pd.Timestamp(result.metadata["as_of_at"])
     expiry = t0 + pd.Timedelta(days=28)
     assert result.tables["sessions"].started_at.ge(expiry).any()
     assert result.tables["coupons"].expires_at.eq(expiry).all()
-    assert result.tables["orders"].empty
+    assert result.tables["events"].query("event_type == 'purchase'").event_at.ge(expiry).any()
+    assert result.tables["orders"].coupon_id.isna().all()
     treated = result.tables["coupon_response_diagnostics"].query("treatment == 1")
     assert treated.response_selected.all()
     assert treated.response_ready_at.ge(expiry).all()
@@ -261,12 +267,18 @@ def test_response_noise_is_keyed_by_customer_not_batch_or_global_rng(checkout_fi
     pd.testing.assert_frame_equal(large.loc[subset.index],subset)
 
 
-def test_promoted_checkout_reconciles_persistent_cart_and_integer_money(checkout_fixture,tmp_path):
-    result=_run(_config(checkout_fixture,tmp_path,first_action="cart",legacy_use=0.))
+def test_coupon_checkout_reconciles_persistent_cart_and_integer_money(checkout_fixture,tmp_path,monkeypatch):
+    from simulate.v4.irl import fit_shopping as shopping
+
+    monkeypatch.setattr(shopping, "choice_probabilities", lambda *_: {
+        action: float(action == "purchase") for action in shopping.ACTIONS
+    })
+    result=_run(_config(checkout_fixture,tmp_path,first_action="cart",legacy_use=0.,decisions=2))
     tables=result.tables
-    assert not tables["orders"].empty
+    used=tables["orders"].loc[tables["orders"].coupon_id.notna()]
+    assert not used.empty
     purchases=tables["events"].set_index("event_id")
-    for order in tables["orders"].itertuples(index=False):
+    for order in used.itertuples(index=False):
         event=purchases.loc[order.purchase_event_id]
         before=Counter(cart_at(tables,event.customer_id,event.event_at,order.purchase_event_id))
         items=tables["order_items"].loc[tables["order_items"].order_id.eq(order.order_id)]
