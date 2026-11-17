@@ -178,18 +178,18 @@ def prepare_population(population, products, rng):
 
 
 def align_checkout_basket(basket, profile, products_by_id, rng):
-    """Draw some purchase lines from the same synthetic assortment as the offers."""
+    """Reuse preferred SKUs while preserving the selected checkout price."""
     share = profile["checkout_preference_share"]
     if not share:
         return basket
-    favorites = [sku for sku in profile["product_weights"] if sku not in basket]
+    favorites_by_price = defaultdict(list)
+    for sku in reversed(profile["product_weights"]):
+        if sku not in basket:
+            favorites_by_price[products_by_id[sku]["unit_price_minor"]].append(sku)
     result = {}
     for sku, quantity in basket.items():
-        price = products_by_id[sku]["unit_price_minor"]
+        favorites = favorites_by_price.get(products_by_id[sku]["unit_price_minor"])
         if favorites and rng.random() < share:
-            closest = min(favorites, key=lambda item: abs(products_by_id[item]["unit_price_minor"] - price))
-            if abs(products_by_id[closest]["unit_price_minor"] - price) <= price / 2:
-                sku = closest
-                favorites.remove(sku)
+            sku = favorites.pop()
         result[sku] = quantity
     return result

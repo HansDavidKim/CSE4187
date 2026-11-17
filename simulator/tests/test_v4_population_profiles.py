@@ -35,9 +35,11 @@ def test_population_generates_reproducible_profiles_and_baskets_without_source_i
     assert sum(template["observed_count"] for template in templates) == 8
 
 
-def test_population_checkout_reuses_price_matched_favorites_without_changing_quantities():
-    products = {"A": {"unit_price_minor": 100}, "B": {"unit_price_minor": 500}, "C": {"unit_price_minor": 105}}
-    profile = {"product_weights": {"C": 1}, "checkout_preference_share": 1.0}
-    basket = {"A": 2, "B": 4}
-    assert align_checkout_basket(basket, profile, products, np.random.default_rng(42)) == {"C": 2, "B": 4}
-    assert basket == {"A": 2, "B": 4}
+def test_population_checkout_reuses_favorites_at_the_selected_price():
+    products = {sku: {"unit_price_minor": price}
+                for sku, price in {"A": 100, "B": 100, "C": 100, "D": 500, "E": 505}.items()}
+    profile = {"product_weights": {"B": 3, "C": 2, "E": 1}, "checkout_preference_share": 1.0}
+    basket = {"A": 2, "B": 4, "D": 1}
+    aligned = align_checkout_basket(basket, profile, products, np.random.default_rng(42))
+    assert aligned == {"C": 2, "B": 4, "D": 1}
+    assert basket == {"A": 2, "B": 4, "D": 1}

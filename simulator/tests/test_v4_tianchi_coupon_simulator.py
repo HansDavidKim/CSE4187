@@ -86,6 +86,36 @@ def test_calibrated_redemption_cannot_create_a_purchase(checkout_fixture, tmp_pa
     assert not diagnostics.coupon_used.any()
 
 
+@pytest.mark.parametrize("gap, purchases_expected", [(.5, True), (1., False), (2., False)])
+def test_price_odds_use_purchase_event_timestamp(checkout_fixture, tmp_path, monkeypatch, gap, purchases_expected):
+    from simulate.v4.irl import fit_shopping, fit_visit_timing as timing
+
+    config = _config(checkout_fixture, tmp_path, decisions=2)
+    settings = config["source_simulation"]
+    model_path = Path(settings["model_path"])
+    model = json.loads(model_path.read_text())
+    for profile in model["profiles"]:
+        profile["choice_gap_seconds"] = [gap]
+    model_path.write_text(json.dumps(model))
+    clock_path = tmp_path / "timing.json"
+    clock_path.write_text(json.dumps({"source": model["source"], "type": "fixture"}))
+    settings.update(visit_timing_model_path=str(clock_path), coupon_effect_calibration={
+        "contact_days": 14, "contact_visit_lift": 0., "induced_purchase_log_odds": 0.,
+        "price_days": 1, "price_purchase_log_odds": 40., "redemption_odds_multiplier": 0.,
+    })
+    monkeypatch.setattr(timing, "validate_model", lambda model: None)
+    monkeypatch.setattr(timing, "sample_session_offsets", lambda *args: ([86399.], "fixture"))
+    monkeypatch.setattr(timing, "first_session_share", lambda *args: 1.)
+    monkeypatch.setattr(fit_shopping, "choice_probabilities", lambda *args: {
+        "view": .999999, "cart": 0., "remove": 0., "purchase": .000001, "end": 0.,
+    })
+    result = _run(config)
+    cutoff = pd.Timestamp(result.metadata["as_of_at"]) + pd.Timedelta(days=1)
+    purchases = result.tables["events"].query("event_type == 'purchase'")
+    assert (not purchases.empty) == purchases_expected
+    assert purchases.event_at.lt(cutoff).all()
+
+
 def test_coupon_day_histogram_replays_ordered_delays(checkout_fixture, tmp_path):
     from simulate.v4.simulator.coupon_response import sample_coupon_response, validate_response_model
 

@@ -220,6 +220,13 @@ def test_retention_reads_kit39_and_mature_labels_at_exact_snapshot(dataset, tmp_
     expected = pd.read_parquet(output / "feature_store.parquet", columns=["customer_id", *EXPANDED_FEATURES])
     pd.testing.assert_frame_equal(x, expected.loc[expected.customer_id.eq("u"), list(EXPANDED_FEATURES)].reset_index(drop=True))
 
+    explicit = tmp_path / "explicit"
+    materialize_features(dataset, explicit, as_of_at=T0.tz_convert("Asia/Seoul"))
+    explicit_snapshots, explicit_x, explicit_y = load_retention_inputs(explicit)
+    pd.testing.assert_frame_equal(explicit_snapshots, snapshots)
+    pd.testing.assert_frame_equal(explicit_x, x)
+    pd.testing.assert_series_equal(explicit_y, y)
+
     later = tmp_path / "later"
     materialize_features(dataset, later, as_of_at=T0 + pd.Timedelta(days=1))
     with pytest.raises(ValueError, match="same snapshot"):
@@ -252,6 +259,11 @@ def test_uplift_reader_aligns_assignment_inputs_and_preserves_censoring(dataset,
     assert customers.attrs == weekly.attrs == cart.attrs == {
         "dataset_id": "v4-contract", "currency": "SOURCE_UNSPECIFIED", "amount_unit": "0.01", "seed": 3,
     }
+    explicit = tmp_path / "explicit"
+    materialize_features(dataset, explicit, as_of_at=T0)
+    for loaded, automatic in zip(load_uplift_inputs(explicit), (customers, weekly, cart)):
+        pd.testing.assert_frame_equal(loaded, automatic)
+
     weekly_path = features / "weekly_panel.parquet"
     pd.read_parquet(weekly_path).assign(purchases=1).to_parquet(weekly_path, index=False)
     with pytest.raises(ValueError, match="weekly_panel.parquet differs from its manifest"):

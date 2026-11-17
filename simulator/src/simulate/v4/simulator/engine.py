@@ -18,8 +18,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import yaml
 
+from ..configuration import DEFAULT_CONFIG, load_config
 from .raw_store import RAW_COLUMNS, discount_minor, save_raw_dataset
 from .outcomes import experiment_window_days, redefine_outcomes
 from .lifecycle import build_observed_lifecycle
@@ -81,9 +81,8 @@ class EcommerceSimulator:
 
     def __init__(self, config: str | Path | dict | None = None):
         if config is None:
-            from ..configuration import load_config
-            config = load_config()
-        self.config = yaml.safe_load(Path(config).read_text()) if isinstance(config, (str, Path)) else config
+            config = DEFAULT_CONFIG
+        self.config = load_config(config) if isinstance(config, (str, Path)) else config
         settings = self.config.get("source_simulation", {})
         self.model_path = Path(settings.get("model_path", "data/models/shopping_profiles.json"))
         self.settings = settings
@@ -711,26 +710,41 @@ class EcommerceSimulator:
                         probabilities["remove"] = 0.0
                     if causal_policy is None or termination_mode == "source_length":
                         probabilities["end"] = 0.0
-                    if (coupon_effects is not None and treatment and t0 <= when < coupon_expires_at
-                            and (state["last_purchase"] is None or state["last_purchase"] < t0)):
-                        if induced_visit and when < contact_until:
-                            probabilities["purchase"] *= induced_purchase_weight
-                        if when < price_until:
-                            probabilities["purchase"] *= price_purchase_weight
                     actions = list(probabilities)
-                    p = np.array(list(probabilities.values()))
+                    p = np.array(list(probabilities.values()), dtype=float)
                     if not p.sum():
                         # An observed remove-only start with unknown initial cart cannot be fabricated in a complete empty-cart history.
                         limited = True
                         termination_reason = "infeasible_initial_action" if decision == 0 else "no_nonterminal_support"
                         break
-                    action = actions[int(rng.choice(len(actions), p=p / p.sum()))]
+                    gap_key = "choice_gap_seconds" if checkout_episodes else "event_gap_seconds"
+                    next_time, gap_rng_state = None, None
+                    if (coupon_effects is not None and treatment and t0 <= when < coupon_expires_at
+                            and (when < price_until or (induced_visit and when < contact_until))
+                            and (state["last_purchase"] is None or state["last_purchase"] < t0)):
+                        # Keep the seeded action draw before the gap while gating the odds at the emitted time.
+                        action_draw = rng.random()
+                        gap_rng_state = rng.bit_generator.state if decision and probabilities.get("end", 0.) else None
+                        gap = float(sample(profile, gap_key, [0.0])) if decision else 0.0
+                        next_time = when + pd.Timedelta(seconds=gap)
+                        purchase_index = actions.index("purchase")
+                        if induced_visit and next_time < contact_until:
+                            p[purchase_index] *= induced_purchase_weight
+                        if next_time < price_until:
+                            p[purchase_index] *= price_purchase_weight
+                        cdf = (p / p.sum()).cumsum()
+                        cdf /= cdf[-1]
+                        action = actions[cdf.searchsorted(action_draw, side="right")]
+                    else:
+                        action = actions[int(rng.choice(len(actions), p=p / p.sum()))]
                     if action == "end":
+                        if gap_rng_state is not None:
+                            rng.bit_generator.state = gap_rng_state
                         limited, termination_reason = False, "causal_policy_end"
                         break
-                    gap_key = "choice_gap_seconds" if checkout_episodes else "event_gap_seconds"
-                    gap = float(sample(profile, gap_key, [0.0])) if decision else 0.0
-                    next_time = when + pd.Timedelta(seconds=gap)
+                    if next_time is None:
+                        gap = float(sample(profile, gap_key, [0.0])) if decision else 0.0
+                        next_time = when + pd.Timedelta(seconds=gap)
                     if next_time >= upper or (scheduled is not None and next_time > session_upper):
                         limited, termination_reason = True, "scheduled_next_start" if session_upper < upper else "window_end"
                         break
