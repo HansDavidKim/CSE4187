@@ -1,0 +1,48 @@
+{
+  "model_type": "toy_descriptive_coupon_response",
+  "source": "dunnhumby_complete_journey",
+  "price_sensitive_subtype_weights": {
+    "coupon_heavy": 0.25609756097560976,
+    "sale_seeking": 0.7439024390243902
+  },
+  "groups": {
+    "coupon_heavy": {
+      "households": 84,
+      "assignments": 609,
+      "used_assignments": 297,
+      "coupon_use_probability": 0.4877250409165303,
+      "coupon_logit": -0.049109704034748604
+    },
+    "sale_seeking": {
+      "households": 244,
+      "assignments": 1493,
+      "used_assignments": 107,
+      "coupon_use_probability": 0.07224080267558529,
+      "coupon_logit": -2.5527671931906117
+    },
+    "baseline": {
+      "households": 1256,
+      "assignments": 5106,
+      "used_assignments": 485,
+      "coupon_use_probability": 0.09514487079091621,
+      "coupon_logit": -2.252374166933832
+    }
+  },
+  "coupon_effect_month_profile": [
+    1.0,
+    0.181,
+    0.009
+  ],
+  "first_redemptions_by_30_day_bin": [
+    747,
+    135,
+    7
+  ],
+  "limitation": "Coupon use conditional on targeted campaigns, not purchase uplift or causal response sign; online persona-to-offline-group mapping is assumed.",
+  "source_files_sha256": {
+    "campaign_table.csv": "a716f88953c9ddf8847e191d862e8d022afd19cf7419f52cbe6dde950a121f21",
+    "campaign_desc.csv": "632535c6bcdd97b5681e84c2c0652ddc4eaca8a0f899a3bb37dae8dbdc089684",
+    "coupon_redempt.csv": "70a98f3bfb28be0dd850f19c8d806d2a23e44014546651367b21538db6fba1f8",
+    "dunnhumby_promo_clusters.parquet": "7708f220d9d8064dffbf53545ecaa030311181b20b225afab813d43d2376505d"
+  }
+}

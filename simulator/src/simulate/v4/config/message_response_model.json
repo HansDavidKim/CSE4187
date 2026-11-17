@@ -1,0 +1,147 @@
+{
+  "model_type": "toy_hillstrom_email_proxy",
+  "source": "hillstrom_randomized_email_experiment",
+  "source_url": "https://www.kaggle.com/datasets/bofulee/kevin-hillstrom-minethatdata-e-mailanalytics",
+  "outcome_window_days": 14,
+  "proxy_history_median": 158.11,
+  "proxy_history_upper_quartile": 325.65749999999997,
+  "persona_to_proxy": {
+    "vip_loyal": "vip_loyal",
+    "regular_loyal": "regular_loyal",
+    "price_sensitive": "pooled",
+    "explorer": "pooled",
+    "declining": "declining",
+    "newcomer": "newcomer"
+  },
+  "observed": {
+    "pooled": {
+      "control_n": 21306,
+      "treated_n": 42694,
+      "control_visit_rate": 0.10616727682343002,
+      "treated_visit_rate": 0.16704923408441466,
+      "control_conversion_rate": 0.005726086548390125,
+      "treated_conversion_rate": 0.010680657703658593,
+      "visit_logit_shift": 0.5236780416030882,
+      "visit_logit_shift_se": 0.025745297653071538,
+      "conversion_logit_shift": 0.6254153248415069,
+      "conversion_logit_shift_se": 0.10210154365645394
+    },
+    "declining": {
+      "control_n": 3461,
+      "treated_n": 6922,
+      "control_visit_rate": 0.1014157757873447,
+      "treated_visit_rate": 0.17032649523259175,
+      "control_conversion_rate": 0.004622941346431667,
+      "treated_conversion_rate": 0.01054608494654724,
+      "visit_logit_shift": 0.5973508919666259,
+      "visit_logit_shift_se": 0.06471760710841322,
+      "conversion_logit_shift": 0.8068184002180745,
+      "conversion_logit_shift_se": 0.2732173722132552
+    },
+    "newcomer": {
+      "control_n": 10695,
+      "treated_n": 21449,
+      "control_visit_rate": 0.0788218793828892,
+      "treated_visit_rate": 0.14163830481607534,
+      "control_conversion_rate": 0.0037400654511453952,
+      "treated_conversion_rate": 0.010070399552426687,
+      "visit_logit_shift": 0.6563091102926268,
+      "visit_logit_shift_se": 0.04087122673986226,
+      "conversion_logit_shift": 0.9867846409325285,
+      "conversion_logit_shift_se": 0.1716136338060967
+    },
+    "regular_loyal": {
+      "control_n": 2429,
+      "treated_n": 4986,
+      "control_visit_rate": 0.16261836146562372,
+      "treated_visit_rate": 0.21018852787805856,
+      "control_conversion_rate": 0.009880609304240428,
+      "treated_conversion_rate": 0.013838748495788207,
+      "visit_logit_shift": 0.31441521143263174,
+      "visit_logit_shift_se": 0.06502010056974962,
+      "conversion_logit_shift": 0.3276111458963591,
+      "conversion_logit_shift_se": 0.23627078763892664
+    },
+    "unmapped": {
+      "control_n": 3426,
+      "treated_n": 6742,
+      "control_visit_rate": 0.1290134267367192,
+      "treated_visit_rate": 0.18762978344704836,
+      "control_conversion_rate": 0.006713368359603036,
+      "treated_conversion_rate": 0.008454464550578463,
+      "visit_logit_shift": 0.44356555167627776,
+      "visit_logit_shift_se": 0.059730377913954934,
+      "conversion_logit_shift": 0.21964783848647773,
+      "conversion_logit_shift_se": 0.24573947275754177
+    },
+    "vip_loyal": {
+      "control_n": 1295,
+      "treated_n": 2595,
+      "control_visit_rate": 0.1783783783783784,
+      "treated_visit_rate": 0.2319845857418112,
+      "control_conversion_rate": 0.014671814671814672,
+      "treated_conversion_rate": 0.01579961464354528,
+      "visit_logit_shift": 0.32912110935064565,
+      "visit_logit_shift_se": 0.08614199867841074,
+      "conversion_logit_shift": 0.06154440957763718,
+      "conversion_logit_shift_se": 0.27668266109801837
+    }
+  },
+  "response_lift": {
+    "positive": 1.5,
+    "neutral": 0.0,
+    "negative": -0.5
+  },
+  "persona_response_weights": {
+    "vip_loyal": {
+      "positive": 0.47106055148002013,
+      "neutral": 0.31256182808226685,
+      "negative": 0.21637762043771291
+    },
+    "regular_loyal": {
+      "positive": 0.4078959622640923,
+      "neutral": 0.5117441925168366,
+      "negative": 0.08035984521907114
+    },
+    "price_sensitive": {
+      "positive": 0.6729962618054247,
+      "neutral": 0.21229874042589394,
+      "negative": 0.1147049977686813
+    },
+    "explorer": {
+      "positive": 0.6643464342818178,
+      "neutral": 0.24689805052032185,
+      "negative": 0.08875551519786037
+    },
+    "declining": {
+      "positive": 0.7698619529632885,
+      "neutral": 0.09273724984366649,
+      "negative": 0.13740079719304493
+    },
+    "newcomer": {
+      "positive": 0.8079966086945943,
+      "neutral": 0.1545921481039015,
+      "negative": 0.037411243201504144
+    }
+  },
+  "visit_lift_scale": 0.55,
+  "persona_purchase_lift_scale": {
+    "vip_loyal": 0.1028479313723912,
+    "regular_loyal": 0.5730833741216914,
+    "price_sensitive": 0.656850968220548,
+    "explorer": 0.6568509682205478,
+    "declining": 0.742863409241772,
+    "newcomer": 0.8269450233151641
+  },
+  "effect_month_profile": [
+    1.0
+  ],
+  "limitations": [
+    "Email is used as a proxy for push_notification; channel effects may differ.",
+    "Only group-average treatment effects are identified; individual positive, neutral and negative type probabilities are a maximum-entropy toy decomposition using declared support.",
+    "Price sensitivity and browsing intent are not observed, so those personas use the pooled email result.",
+    "Persona-specific conversion shifts are noisy, especially VIP; no shrinkage is applied.",
+    "Outcomes are observed for two weeks only; later months are set to zero, not measured."
+  ],
+  "source_file_sha256": "0e5893329d8b93cefecc571777672028290ab69865718020c78c7284f291aece"
+}
