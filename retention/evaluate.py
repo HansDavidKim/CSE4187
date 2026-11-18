@@ -1,29 +1,54 @@
 """Probability quality, customer-cluster intervals, PR and SHAP artifacts."""
 from pathlib import Path
 import json
+import warnings
 import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from sklearn.metrics import (roc_auc_score, average_precision_score, log_loss, brier_score_loss,
-                             precision_recall_curve, precision_score, recall_score)
+                             precision_recall_curve, precision_score, recall_score, f1_score, confusion_matrix)
 from sklearn.calibration import calibration_curve
 
 
-def metrics(y, p):
-    return {"rows": len(y), "prevalence": float(np.mean(y)),
+def metrics(y, p, threshold=None):
+    """Report probability quality and the operating point, including small cohorts."""
+    y, p = np.asarray(y), np.asarray(p, dtype=float)
+    if not len(y):
+        return {"rows": 0, "prevalence": None, "roc_auc": None, "pr_auc": None, "log_loss": None, "brier": None}
+    result = {"rows": len(y), "positives": int(y.sum()), "negatives": int((y == 0).sum()),
+        "prevalence": float(np.mean(y)), "mean_probability": float(p.mean()),
         "roc_auc": float(roc_auc_score(y, p)) if len(np.unique(y)) == 2 else None,
         "pr_auc": float(average_precision_score(y, p)) if np.sum(y) else None,
         "log_loss": float(log_loss(y, p, labels=[0, 1])), "brier": float(brier_score_loss(y, p))}
+    if threshold is not None:
+        decisions = p >= threshold
+        result.update(threshold=float(threshold), precision=float(precision_score(y, decisions, zero_division=0)),
+                      recall=float(recall_score(y, decisions, zero_division=0)),
+                      f1=float(f1_score(y, decisions, zero_division=0)),
+                      flagged=int(decisions.sum()), flagged_fraction=float(decisions.mean()),
+                      confusion_matrix=confusion_matrix(y, decisions, labels=[0, 1]).tolist())
+    return result
+
+
+def subgroup_metrics(meta, p, threshold):
+    """Keep policy and observed-history subgroup sizes visible."""
+    output = {}
+    for column in ("policy_id", "history_group"):
+        if column in meta:
+            output[column] = {}
+            for key, idx in meta.groupby(column, dropna=False).indices.items():
+                output[column][str(key)] = metrics(meta.iloc[idx].y, np.asarray(p)[idx], threshold)
+    return output
 
 
 def cluster_auc_interval(meta, p, seed=42, repeats=100):
-    users = meta.customer_id.unique(); rng = np.random.default_rng(seed)
-    groups = {u: np.flatnonzero(meta.customer_id.to_numpy() == u) for u in users}
+    groups = list(meta.groupby("customer_id", sort=False).indices.values())
+    rng = np.random.default_rng(seed)
     values, y = [], meta.y.to_numpy()
     for _ in range(repeats):
-        idx = np.concatenate([groups[u] for u in rng.choice(users, len(users), replace=True)])
+        idx = np.concatenate([groups[i] for i in rng.integers(len(groups), size=len(groups))])
         if len(np.unique(y[idx])) == 2:
             values.append(roc_auc_score(y[idx], p[idx]))
     return list(map(float, np.quantile(values, [.025, .975]))) if values else None
@@ -49,11 +74,13 @@ def probability_plots(meta, predictions, out):
     fig.tight_layout(); fig.savefig(out / "probability_and_pr.png", dpi=150); plt.close(fig)
 
 
-def shap_artifacts(model, x, out):
+def shap_artifacts(model, x, out, meta=None, model_name="tree", scored_model=None, seed=42):
+    """Explain a reproducible tree sample and identify the explained customer."""
     import shap
-    imputer, learner = model.steps[0][1], model.steps[-1][1]
-    data = imputer.transform(x.iloc[:200])
-    names = list(imputer.get_feature_names_out(x.columns))
+    sample = x.sample(n=min(200, len(x)), random_state=seed)
+    learner = model.steps[-1][1]
+    data = model[:-1].transform(sample)
+    names = list(model[:-1].get_feature_names_out(x.columns))
     explainer = shap.TreeExplainer(learner)
     values = explainer.shap_values(data)
     if isinstance(values, list):
@@ -63,7 +90,24 @@ def shap_artifacts(model, x, out):
         values = values[:, :, -1]
     ranking = pd.DataFrame({"feature": names, "mean_abs_shap": np.abs(values).mean(axis=0)}).sort_values("mean_abs_shap", ascending=False)
     ranking.to_csv(Path(out) / "shap_importance.csv", index=False)
-    shap.summary_plot(values, data, feature_names=names, max_display=10, show=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        shap.summary_plot(values, data, feature_names=names, max_display=10, show=False)
     plt.tight_layout(); plt.savefig(Path(out) / "shap_summary.png", dpi=150); plt.close()
-    pd.DataFrame({"feature": names, "value": data[0], "shap_value": values[0]}).to_csv(Path(out) / "shap_customer.csv", index=False)
+    expected = np.asarray(explainer.expected_value).reshape(-1)[-1]
+    local = pd.DataFrame({"feature": names, "value": data[0], "shap_value": values[0],
+                          "explained_model": model_name, "scored_model": scored_model or model_name,
+                          "expected_value": float(expected), "output_scale": str(explainer.model.model_output)})
+    if meta is not None:
+        row = meta.loc[sample.index[0]]
+        for key in ("dataset_id", "customer_id", "as_of_at", "as_of", "snapshot_id"):
+            if key in row:
+                local[key] = row[key]
+    local.to_csv(Path(out) / "shap_customer.csv", index=False)
+    (Path(out) / "shap_metadata.json").write_text(json.dumps({
+        "explained_model": model_name, "scored_model": scored_model or model_name,
+        "scope": "Tree raw output before optional probability calibration",
+        "feature_values": "After train-fitted clipping and imputation",
+        "output_scale": str(explainer.model.model_output), "sample_rows": len(sample), "seed": seed,
+        "expected_value": float(expected)}, indent=2), encoding="utf-8")
     return ranking.head(10).feature.tolist()
