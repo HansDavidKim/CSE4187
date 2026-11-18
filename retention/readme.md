@@ -1,106 +1,185 @@
-﻿# Retention 구현 및 실행
+# Retention
 
-확정된 7종 입력을 받아 기준시각별 피처·정답을 만들고 **LightGBM, CatBoost, XGBoost, LSTM, GRU**를 비교한다. 상수 확률·방문 최근성 로지스틱 기준선과 ML+DL 고정 평균 앙상블도 포함한다. 모든 프로젝트 출력은 `retention/`에 저장한다.
+시뮬레이터의 고객 행동으로 **향후 28일 미방문 확률**을 예측한다. 학습·배치 추론·독립 실행 평가·분포 모니터링을 제공하고, 전략 파트가 Uplift·CLV와 같은 고객·시점으로 결과를 연결할 수 있게 한다.
 
-## 실행 환경
+**2026-11-18 인계 상태** — 기본 파이프라인과 통합 실행은 검증했다. 전체 규모 테스트 AUC는 **0.7587**로 요구 기준 **0.78에 미달**한다. 마지막에 추가한 장기 이력 피처 후보는 기본 설정에서 꺼져 있으며, 추가 이후 전체 회귀 검증은 남아 있다.
 
-프로젝트 루트의 PowerShell에서 실행한다. activate 여부와 무관하게 프로젝트 가상환경의 Python을 명시한다.
+## 1. 예측 문제와 데이터 계약
 
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r retention/requirements-lock.txt
-.\.venv\Scripts\python.exe -m pip check
-.\.venv\Scripts\python.exe -m pytest retention/tests -q -o cache_dir=retention/.pytest_cache
-```
-
-`requirements.txt`는 직접 의존성 범위, `requirements-lock.txt`는 이 Windows/Python 3.12 환경에서 설치·검증한 정확한 버전이다. 다른 OS/Python의 바이너리 호환성까지 보장하는 범용 lock은 아니다. 현재 PyTorch는 CPU 빌드이며 CUDA를 요구하지 않는다.
-
-## 입력 파일
-
-한 디렉터리에 다음 이름의 파일을 둔다. 각 테이블은 CSV 또는 Parquet 중 하나만 제공한다. ID는 문자열로 보존하며, CSV의 ID 앞자리 0도 유지한다.
-
-| 파일명 | 필드 |
+| 항목 | 현재 기준 |
 | --- | --- |
-| `customers.parquet` 또는 `.csv` | `customer_id`, `signed_up_at` |
-| `sessions.parquet` 또는 `.csv` | `session_id`, `customer_id`, `started_at`, `ended_at` |
-| `events.parquet` 또는 `.csv` | `event_id`, `customer_id`, `session_id`, `event_at`, `event_type` |
-| `orders.parquet` 또는 `.csv` | `order_id`, `customer_id`, `session_id`, `purchased_at` |
-| `items.parquet` 또는 `.csv` | `order_id`, `product_id`, `unit_price`, `quantity` |
-| `coupons.parquet` 또는 `.csv` | `coupon_id`, `customer_id`, `policy`; 선택 `sent_at`, `expires_at` |
-| `redemptions.parquet` 또는 `.csv` | `coupon_id`, `order_id` |
+| 적격 고객 | 기준시각 `t0` 직전 28일에 방문했고 `t0` 전에 가입한 고객 |
+| 정답 | `[t0, t0+28일)`에 새 세션 시작이 없으면 이탈 1, 있으면 0 |
+| 입력 경계 | `t0` 이전 기록. 진행 중 세션의 미래 종료 결과는 완료 세션 통계에서 제외 |
+| 학습 입력 | 동일 실행의 공식 피처 디렉터리와 `raw.sqlite`·`raw.manifest.json` |
+| 피처 기간 | KIT39의 30일·60일·90일 정의를 사용. 예측 기간은 28일 |
+| 실험 조건 | 고객별 1:1 고정 배정. 발송군은 기준일에 10% 쿠폰 1회, 28일 유효. 대조군 미발송, 결과 구간 중 추가 발송 없음 |
+| 라벨 관측 | 결과 28일을 모두 관측한 고객으로 학습·성능 평가 |
+| 시간·금액 | 시간대가 있는 기준시각을 UTC로 정규화. 금액은 원천 통화·최소 단위 유지 |
 
-빈 테이블도 해당 스키마를 가진 파일로 제공한다. 내부 persona·canonical type·미래 gap 등 추가 컬럼은 모델 입력으로 읽지 않는다. 쿠폰 사용 시각은 연결 주문의 `purchased_at`이며, 주문금액은 상품 단가×수량을 주문별로 먼저 합산한다. 환불·취소를 임의로 생성하지 않는다.
+학습은 시뮬레이터 공개 API `load_retention_inputs()`의 KIT39와 성숙한 라벨을 사용한다. 데이터셋 ID·원장 체크섬·피처 버전·고객·snapshot·기준시각·통화·단위를 대조하고, 실제 미래 세션과 쿠폰 발송으로 라벨·정책을 확인한다.
 
-`sent_at`·`expires_at`은 컬럼 자체를 생략할 수 있다. 제공한다면 컬럼 내 시각은 완전해야 하며 일부 행만 미확인인 경우 검증에서 안내한다. 해당 시각이 없으면 과거 발송·유효 쿠폰 피처는 계산하지 않는다. `policy`가 단순 문자열인 경우 할인율로 임의 변환하지 않는다.
+raw schema 5는 전체 SQLite 체크섬을 확인한 뒤 필요한 행·열을 조회한다. 학습은 추가 피처와 라벨 확인에 필요한 구간을 읽고, 추론은 공식 피처 재구성에 필요한 과거 이력을 읽는다. 이전 raw schema는 공식 전체 로더를 사용한다.
 
-세션은 고객+세션 ID 조합으로 연결한다. 결측 세션 ID는 공통 가짜 세션으로 묶지 않으며, 결측 종료 시각으로 미래의 완료 세션 길이를 만들지 않는다. 동일 timestamp 안의 이벤트는 행동별 개수/존재를 묶어 시퀀스로 사용하므로 파일 행 순서와 무관하다.
+## 2. 빠른 실행
 
-## End-to-end smoke test
+모든 명령은 **프로젝트 루트**에서 실행한다. 프로젝트 `.venv`의 Python을 명시한다. 의존성 범위는 [requirements.txt](requirements.txt), 현재 Windows/Python 3.12 환경의 설치 기록은 [requirements-lock.txt](requirements-lock.txt)에 있다.
 
-아래 명령은 외부 데이터 대신 **7종 입력 계약에 맞는 테스트 전용 합성 fixture**를 만든다. 실제 고객 생성기나 쿠폰 인과효과를 재현한 데이터가 아니다. 새 경로를 사용해야 하며 기존 데이터는 덮어쓰지 않는다.
+다음 명령은 500명·6개월 데이터를 두 seed로 생성하고, 첫 실행에서 학습한 모델을 다음 실행에 고정 적용한다. 생성은 기존 시뮬레이터의 `target` 모드·목표 이탈률 20% 설정을 사용한다. 실제 이탈률은 실행마다 측정한다.
 
 ```powershell
-.\.venv\Scripts\python.exe -m retention fixture --output retention/artifacts/demo/input --customers 120
-.\.venv\Scripts\python.exe -m retention validate --input retention/artifacts/demo/input --output retention/artifacts/demo/validation
-.\.venv\Scripts\python.exe -m retention train --config retention/artifacts/demo/input/smoke_config.yaml
-.\.venv\Scripts\python.exe -m retention predict --bundle retention/artifacts/demo/smoke_run/bundle.joblib --input retention/artifacts/demo/input --as-of 2024-10-01 --output retention/artifacts/demo/inference
+$env:PYTHONDONTWRITEBYTECODE = '1'
+.\.venv\Scripts\python.exe -m pip check
+.\.venv\Scripts\python.exe -m retention experiment --config retention/config.yaml --output retention/artifacts/demo --customers 500 --months 6 --seeds 42 43
 ```
 
-fixture는 2024-10-01 이전 기록만 포함하므로 마지막 추론은 미래 정답 없이 실행된다. 재학습 시에는 `train --output retention/artifacts/새실행명`으로 새 출력 경로를 지정할 수 있다.
+주요 결과는 `demo/model/`과 `demo/seed_43/evaluation/`에 생성된다. 기존 실험을 재실행하면 설정·원천이 일치하는 완성 데이터를 재사용한다. 설정을 바꾼 실험에는 새 출력 경로를 사용한다.
 
-## 실제 데이터로 학습
-
-1. 받은 7종 파일을 `retention/input/` 또는 읽기 가능한 입력 경로에 둔다. 원본은 수정하지 않는다.
-2. `config.yaml`에서 입력/출력 경로, 기준시각 범위, `test_start`, 실제 `observation_end`와 `observation_assumption`을 설정한다. 기본 예시의 `REPLACE` 문구는 실제 확인 내용으로 바꿔야 실행된다.
-3. 입력 검증 후 학습하고 `comparison.md`, `metrics.json`, `input_validation.json`을 확인한다.
+원장만으로 배치 추론할 때는 실제 데이터셋의 기준시각을 지정한다.
 
 ```powershell
-.\.venv\Scripts\python.exe -m retention validate --input retention/input --output retention/artifacts/real_validation
+$retentionAsOf = (Get-Content -Raw -Encoding UTF8 retention/artifacts/demo/seed_42/dataset/raw.manifest.json | ConvertFrom-Json).metadata.as_of_at
+.\.venv\Scripts\python.exe -m retention predict --bundle retention/artifacts/demo/model/bundle.joblib --input retention/artifacts/demo/seed_42/dataset --as-of $retentionAsOf --output retention/artifacts/demo/prediction
+```
+
+이미 생성된 데이터로 학습하려면 [config.yaml](config.yaml)의 `input_dir`, `feature_dir`, `output_dir`을 지정한다. 경로는 프로젝트 루트 기준이다.
+
+```powershell
+.\.venv\Scripts\python.exe -m retention validate --input retention/input/dataset --features retention/input/features --output retention/artifacts/validation
 .\.venv\Scripts\python.exe -m retention train --config retention/config.yaml
-.\.venv\Scripts\python.exe -m retention predict --bundle retention/artifacts/real_run_001/bundle.joblib --input retention/input --as-of 2026-01-01 --output retention/artifacts/real_inference
 ```
 
-이탈 기본값은 향후 30일 새 세션 시작 없음이다. `target: purchase`로 바꾸면 주문 발생 기준을 사용한다. 가입 후 최소 30일·최근 30일 방문 고객을 초기 대상으로 한다. 제외 고객은 추론에서 사유와 함께 반환하고 확률을 임의로 채우지 않는다.
+## 3. 설정과 학습 방식
 
-시각은 UTC로 통일한다. 입력은 기준시각 미만, 정답은 기준시각 이상·기간 끝 미만이다. 실제 수집 누락 여부와 종료가 불명확하면 정답의 의미도 보장되지 않으므로 확인한 가정을 설정에 남긴다. 파일의 마지막 이벤트를 자동으로 수집 종료라고 가정하지 않는다.
+| 설정 | 기본값과 의미 |
+| --- | --- |
+| `policy_condition` | `observed_experiment_mix`는 발송·미발송군을 함께 학습한 관측 정책의 위험. `no_new_coupon`은 실제 미발송군으로 별도 학습 |
+| `calibration` | `auto`. 보정용 고객에서 sigmoid를 학습하고, 별도 선택 고객의 Log Loss·Brier가 모두 개선될 때 적용. `none`·`sigmoid`도 지원 |
+| `extra_features` | `true`. KIT39에 구매 주기 이상·여정 단계·시퀀스 요약·상대 변화율 10개를 추가해 49개 후보 생성 |
+| `history_features` | 미설정 시 `false`. 관측된 장기 방문·구매·행동 비율 9개를 추가하는 실험 후보 |
+| `max_length` | 최근 128개 timestamp 행동 그룹. 같은 시각의 행동은 개수로 묶음 |
+| `trials / iterations / epochs` | 3 / 120 / 12. 초기 튜닝·학습 예산 |
+| `psi_threshold / ks_alpha` | 0.2 / 0.01. 분포 변화 알림 기준 |
+| `max_metric_drop` | 검증 AUC·Precision·Recall 대비 0.05 초과 하락 시 알림 |
 
-충분한 기간·클래스 표본이 없어 5개 시간 fold 또는 독립 Early Stopping 분할을 구성할 수 없으면 명시적으로 실패한다. 임의 랜덤 분할로 대체하지 않는다. 데이터 길이가 짧으면 기간·표본 설정을 재검토해야 한다.
+비교 모델은 상수 확률·방문 최근성 로지스틱, LightGBM·CatBoost·XGBoost, PyTorch LSTM·GRU, 선택한 ML·DL의 1:1 평균 앙상블이다.
 
-## 학습 및 비교 방식
+고객을 60/20/20으로 분리한다. 60% 안에서 트리의 5-fold 튜닝과 DL의 내부 Early Stopping을 수행한다. 기본 `auto` 보정은 선택용 20%를 보정용 10%·최종 선택용 10%로 나눈다. 모델은 선택 고객의 ROC-AUC, 동률이면 Log Loss로 고르고, 임계값은 같은 선택 고객의 F1로 정한다. 최종 테스트 20%는 결과 보고에 사용한다.
 
-- 51개 내부 피처: RFM, 변화율 5종, 세션 품질, 구매 주기, 시간대, 여정, 시각 그룹 기반 시퀀스 요약, 쿠폰 이력. 정의는 실행별 `feature_dictionary.md`에 저장한다.
-- ML 3종은 같은 purged rolling-origin 5-fold와 제한된 Optuna 탐색으로 비교한다. 클래스 가중치는 해당 학습 표본에서만 계산한다.
-- LSTM·GRU는 PyTorch의 검증된 표준 레이어를 사용한다. 두 모델은 같은 입력·은닉 크기·최대 epoch 예산을 사용하지만 파라미터 수까지 같지는 않다. 시각 그룹의 행동 개수는 학습 가능한 투영층으로 임베딩하고 packed sequence로 padding을 제외한다.
-- 각 DL의 epoch는 공통 외부 검증보다 앞선 별도 내부 시간 구간에서 Early Stopping으로 선택한다. 이후 고정 epoch로 다시 학습한다.
-- 공통 개발 검증에서 선택한 트리와 RNN의 확률을 1:1 평균해 앙상블 후보를 만든다. 최종 모델과 임계값은 개발 검증에서 정하고 마지막 테스트로 바꾸지 않는다.
-- AUC, PR-AUC, Log Loss, Brier, 보정 그래프와 고객 단위 bootstrap AUC 구간을 보고한다. 불균형 가중치가 확률 보정에 불리할 수 있어 AUC만 보고 운영 적합성을 판단하지 않는다.
-- SHAP은 검증에서 선택한 트리의 전역 상위 10개·대표 고객 기여값을 저장한다. 이는 이탈의 인과 원인이 아니다.
+검증 예측을 생성한 학습 모델을 최종 저장한다. 학습 분할의 0.5%·99.5% 분위수로 수치를 클리핑하고, 중앙값 대체·결측 지시자·시퀀스 정규화도 학습 자료에서 적합한다. 미관측, 분모 0, 간격 표본 부족은 결측으로 표현한다.
 
-## 주요 출력
+피처 사전, 학습 표본의 결측·상수 통계, KIT39·전체 후보·리뷰 제외·최근 방문일의 개발 비교를 저장한다. 장기 이력을 켜면 장기 이력 제외 비교도 추가한다. 최종 사용 피처 수는 학습 자료의 전체 결측 여부에 따라 달라진다.
+
+## 4. 독립 평가와 모니터링
+
+```powershell
+.\.venv\Scripts\python.exe -m retention evaluate --bundle retention/artifacts/demo/model/bundle.joblib --input retention/artifacts/demo/seed_43/dataset --features retention/artifacts/demo/seed_43/features --output retention/artifacts/demo/manual_evaluation
+```
+
+기본 평가 경로는 다른 데이터셋·생성 seed를 요구한다. 같은 학습 실행의 재현에는 `--allow-training-data`를 명시한다. `--features`를 생략하면 원장에서 피처와 정답을 계산하며, `--as-of`로 시각을 지정할 수 있다. 결과 기간이 덜 관측되면 확률·분포와 라벨 대기 상태를 기록한다.
+
+평가에는 모델별 AUC·bootstrap 구간·PR-AUC·Log Loss·Brier, 고정 임계값의 Precision·Recall·F1·혼동행렬·대상 인원, 정책·이력 길이별 결과를 포함한다. ML AUC 0.78 달성 여부는 검증에서 선택한 트리로 판정한다.
+
+모니터링은 학습 자료에서 고정한 분포와 새 실행을 PSI·KS로 비교한다. 결측률도 PSI에 포함하고 KS는 Benjamini–Hochberg로 다중 검정을 보정한다. 같은 모델 버전의 시점별 성능을 기록한다. seed 변경은 표본 변동을, 시작일 변경은 다른 기준시점의 결과를 확인하는 데 사용한다. 분포 변화 탐지는 통제된 변화 시나리오로 별도 확인한다.
+
+실제 배정군과 미래 방문 기록으로 A/B 이탈률 차이·p-value·95% 구간을 계산한다. 기본 표본 설계는 이탈률 20%, 절대 감소 5%p, 유의수준 0.05, 목표 검정력 0.8이다.
+
+## 5. Uplift·CLV 연결과 Python API
+
+`--integrate`를 추가하면 기존 Uplift T/X/H와 CLV 공개 API로 모델을 학습하고 새 실행의 결과를 연결한다. CLV의 미래 52주 평가를 위해 아래 예시는 24개월을 생성한다.
+
+```powershell
+.\.venv\Scripts\python.exe -m retention experiment --config retention/config.yaml --output retention/artifacts/integration_demo --customers 500 --months 24 --seeds 101 102 103 --integrate
+```
+
+| 파트 | 전달하는 값 |
+| --- | --- |
+| Retention | 정책 조건이 명시된 28일 미방문 확률 |
+| Uplift | 28일 구매확률의 발송 효과. `p0`는 미발송 구매확률 |
+| CLV | 향후 52주 할인 후 실결제금액. 출력명은 `predicted_clv_12m` |
+
+`dataset_id`·`customer_id`·실제 기준시각·통화·금액 단위를 맞춰 결합한다. Retention의 `as_of_at`, Uplift의 `w0`, CLV 출력의 `reference_week`를 같은 순간으로 정규화한다. 시뮬레이터 주간 행의 `reference_week`는 그 주의 시작이다.
+
+```python
+from pathlib import Path
+import pandas as pd
+from retention.api import predict_retention, evaluate_retention
+
+root = Path("retention/artifacts/demo")
+bundle = root / "model" / "bundle.joblib"
+as_of = pd.read_parquet(root / "model" / "samples.parquet").as_of_at.iloc[0]
+
+predictions = predict_retention(bundle, root / "seed_42" / "dataset", as_of)
+report = evaluate_retention(
+    bundle, root / "seed_43" / "dataset", root / "api_evaluation",
+    feature_dir=root / "seed_43" / "features",
+)
+```
+
+`predict_retention()`은 파일 저장 없이 DataFrame을 반환한다. 학습 API `train_retention(config)`도 제공하며, 설정 읽기는 `retention.pipeline.read_config()`를 사용한다.
+
+예측에는 식별 키, `churn_probability`, `predicted_churn`, `status`, 타깃·기간·정책 조건·임계값·모델 버전이 포함된다. 부적격 고객은 확률을 비워 두고 제외 상태를 반환한다.
+
+## 6. 결과 파일과 코드 위치
+
+모든 출력은 `retention/` 아래에 저장한다. `artifacts/`·`input/`은 Git 제외 대상이므로 새 checkout에서는 데이터를 준비하거나 생성한다.
 
 | 파일 | 내용 |
 | --- | --- |
-| `comparison.md`, `metrics.json` | 모델 비교·선택 근거·한계 |
-| `cross_validation.csv`, `best_params.json` | ML 3종의 탐색·5-fold 결과 |
-| `splits.json`, `samples.parquet` | 시간 분할과 성숙한 정답·고객 키 |
-| `feature_dictionary.md`, `features.parquet`, `sequences.npz` | 피처 정의·파일 기반 피처 저장·시퀀스 |
-| `selection.json` | 개발 검증 선택 모델·앙상블 구성·임계값 |
-| `lstm.pt`, `gru.pt`, `*_early_stopping.json`, `*_training_log.json` | DL 파라미터·epoch 선택·학습 로그 |
-| `bundle.joblib` | 입력 변환과 전체 모델을 포함한 배치 추론 묶음 |
-| `test_predictions.parquet`, `validation_predictions.parquet` | 같은 표본의 모델별 확률 |
-| `shap_summary.png`, `shap_importance.csv`, `shap_customer.csv` | SHAP 설명 |
-| `probability_and_pr.png` | 확률 보정·Precision/Recall 곡선 |
-| `run_manifest.json`, `config.json`, `input_validation.json` | 실행 환경·원본 식별·입력 검증·가정 |
+| `bundle.joblib`, `run_status.json` | 모델·전처리·보정기·모니터링 기준과 완료 상태. 새 학습의 완료 표시는 `complete` |
+| `config.json`, `input_validation.json`, `run_manifest.json` | 설정·원천·체크섬·버전·환경·시간·메모리 |
+| `samples.parquet`, `split_membership.parquet`, `splits.json` | 라벨·고객 키·튜닝/보정/선택/테스트 분할 |
+| `feature_dictionary.md`, `feature_quality.csv`, `feature_ablation.csv` | 피처 산식·결측 규칙·학습 분포·개발 비교 |
+| `metrics.json`, `requirements_report.json`, `comparison.md` | 모델 성능·수치 기준 달성 여부·선택 근거 |
+| `selection.json`, `cross_validation.csv`, `best_params.json` | 보정·임계값·튜닝 결과 |
+| `lstm.pt`, `gru.pt`, 학습·Early Stopping 로그 | DL 모델과 epoch 선택 기록 |
+| `shap_*.csv/json/png` | 설명 모델·고객·시각·기준값·출력 척도와 트리 기여 |
+| `predictions.parquet`, `runtime_profile.json` | 배치 예측과 입력·피처·추론 처리 비용 |
+| `evaluation.json`, `monitoring_report.json`, `ab_test_report.json/md` | 독립 평가·분포/성능 알림·실제 A/B 분석 |
+| `combined_predictions.parquet`, `monitoring_history.csv` | 파트별 점수 결합과 반복 실행의 성능 이력 |
 
-`joblib` 모델은 이 프로젝트에서 생성한 신뢰할 수 있는 파일만 로드한다. 외부에서 받은 임의 pickle/joblib을 로드하지 않는다.
+학습은 작업 디렉터리에서 완성한 뒤 최종 경로에 공개한다. 실패한 작업에는 오류 상태를 남긴다. 기존 완성 모델의 경로로 새 학습을 실행하면 새 경로를 요구한다. SHAP은 선택한 트리의 보정 전 출력을 설명하며, 실제 우승 모델과 설명 모델을 각각 기록한다.
 
-## 범위와 현재 한계
+| 코드 | 역할 |
+| --- | --- |
+| [simulator_input.py](simulator_input.py) | 공식 입력·원장 검증, SQL 조회, 추가 피처·시퀀스 |
+| [dataset.py](dataset.py) | 고객 분할·내부 5-fold, 기존 시간순 분할 |
+| [models.py](models.py), [sequence.py](sequence.py) | 트리·기준선·전처리·확률 보정, LSTM·GRU |
+| [feature_dictionary.py](feature_dictionary.py) | 피처별 산식·결측·비즈니스 의미 |
+| [pipeline.py](pipeline.py), [evaluate.py](evaluate.py) | 학습·저장·추론·지표·SHAP |
+| [api.py](api.py), [monitoring.py](monitoring.py), [experiments.py](experiments.py) | 공개 API·분포 모니터링·반복 생성·파트 연결 |
+| [data.py](data.py), [features.py](features.py), [fixture.py](fixture.py) | 기존 7종 CSV/Parquet 계약과 fixture 경로 |
+| [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) | 합의와 구현 계획 |
 
-- 현재 결과는 확정 입력 스키마의 smoke test다. 테스트용 합성 데이터의 높은 AUC를 실데이터 AUC≥0.78 달성으로 주장하지 않는다.
-- 일반 Retention 확률을 제공하며 추가 쿠폰 미발송 조건의 인과적 위험을 보장하지 않는다. T/X/H 학습은 Uplift 담당자의 역할이다.
-- 과제의 공용 `docs/`·`results/` 대신 동등 자료를 `retention/artifacts/` 안에 생성한다. 다른 디렉터리를 수정하지 않는 작업 범위를 따른다.
-- DuckDB로 계약 컬럼을 읽되 현재 피처 생성은 메모리에 적재된 테이블을 사용한다. 대규모 실데이터의 메모리·처리량은 아직 검증하지 않았다. 로더를 고객 파티션으로 확장할 필요가 있는지는 실제 규모에서 측정한다.
-- 직접 작성한 부분은 데이터 처리·모델 연결·학습/평가 흐름이다. 트리 알고리즘과 LSTM/GRU 셀을 재구현하거나 검증되지 않은 사전학습 가중치를 가져오지 않았다.
+## 7. 확인된 결과와 남은 작업
 
-참조: 프로젝트의 `RETENTION_REQUIRED_FEATURES.md`, `docs/request.md`의 피처·ML·DL 요구사항, `논문.pdf` §3.3·§4. 논문 내부 합성 uplift 규칙을 예측 입력으로 사용하지 않는다.
+실측 결과는 `retention/artifacts/implementation_verification/`에 있다.
 
-구현 API 확인 자료: [XGBoost Python API](https://xgboost.readthedocs.io/en/stable/python/python_api.html), [PyTorch LSTM](https://docs.pytorch.org/docs/stable/generated/torch.nn.LSTM.html), [PyTorch GRU](https://docs.pytorch.org/docs/stable/generated/torch.nn.GRU.html), [packed sequence](https://docs.pytorch.org/docs/main/generated/torch.nn.utils.rnn.pack_padded_sequence.html), [LightGBM의 클래스 가중치와 확률 보정 주의](https://lightgbm.readthedocs.io/en/stable/_modules/lightgbm/sklearn.html).
+| 검증 | 마지막 확인 결과 |
+| --- | --- |
+| 테스트·환경 | 테스트 36개 통과, `pip check` 통과 |
+| 전체 데이터 | 20,000명·24개월·seed 42, 이벤트 7,429,128건, 이탈률 19.04% |
+| 전체 모델 | 검증에서 CatBoost 선택. 테스트 4,000명 AUC 0.7587 |
+| 독립 평가 | seed 43의 2,000명 AUC 0.7448. 별도 6개월·500명 실행 AUC 0.7473 |
+| 원장 재추론 | 20,000명 추론 완료. 보류 테스트 4,000명의 식별 키·예측값 일치 |
+| 3개 파트 연결 | 500명·24개월의 두 독립 실행에서 Retention·Uplift·CLV 결과 연결 완료 |
+| 처리 비용 | 한 번의 전체 실행에서 생성·저장 약 29분, 공식 피처 생성 약 10분, 학습 약 3분, 원장 추론 약 5분 |
+| 메모리 | 공식 피처 생성 등을 포함한 동일 프로세스의 최대 RSS 약 9.4 GiB |
+
+장기 이력 9개 후보를 더한 개발 비교에서는 기존 피처 대비 개선이 없었다. CatBoost의 선택 구간 AUC는 0.7852에서 0.7827이었다. `history_features`는 현재 기본 설정에서 꺼져 있다. 테스트 36개 통과 기록은 이 후보 코드 추가 전이며, 이후 전체 회귀 테스트는 다시 실행해야 한다.
+
+남은 작업은 ML 테스트 AUC 0.78 달성을 위한 개발 검증, 변경 후 회귀 테스트, 추가 튜닝을 수행할 경우 새 seed의 최종 독립 평가다. 최종 전략의 대상 선정·ROI는 전략 파트의 실행 코드가 연결되면 검증한다. 현재 통합 검증은 세 모델의 예측·정답·키 연결 범위까지 확인했다.
+
+`MODEL_COMPARISON.md`에는 초기 7종 fixture 결과가 남아 있다. 현재 공식 시뮬레이터의 성능은 위 표와 실행별 `metrics.json`·`evaluation.json`을 기준으로 확인한다.
+
+## 8. 테스트와 작업 재개
+
+```powershell
+$env:PYTHONDONTWRITEBYTECODE = '1'
+$retentionTestTemp = Join-Path $env:TEMP ("retention-tests-" + [guid]::NewGuid().ToString("N"))
+.\.venv\Scripts\python.exe -m pytest retention/tests -q -p no:cacheprovider --basetemp $retentionTestTemp
+```
+
+작업을 재개할 때는 현재 설정, 위 검증 상태, 마지막 실행의 `run_status.json`을 먼저 확인한다. 변경 범위는 Retention 내부이며 외부 파트의 공개 계약을 사용한다. 외부 변경이 필요한 장애는 원인과 필요한 변경을 사용자에게 먼저 설명한다. 기간 기준은 합의된 28일을 적용한다.
+
+기존 fixture는 `python -m retention fixture --output retention/input/fixture --customers 120`으로 생성할 수 있다. 생성된 설정은 과거 30일 타깃·시간순 평가를 점검하는 별도 경로다. 현재 기본 설정과 제출 검증은 위의 28일 시뮬레이터 경로를 사용한다.

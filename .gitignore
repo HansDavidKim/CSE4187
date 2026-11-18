@@ -3,3 +3,9 @@ __pycache__/
 *.egg-info/
 .venv
 uplift/artifacts/
+
+/retention/*.pdf
+/retention/*.pptx
+/retention/*.txt
+!/retention/requirements.txt
+!/retention/requirements-lock.txt

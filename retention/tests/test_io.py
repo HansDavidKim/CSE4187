@@ -21,9 +21,14 @@ def test_csv_contract_projection_and_leading_zero_ids(tmp_path, records):
     assert records.metadata["validation"]["counts"]["orders"] > 0
 
 
-def test_training_requires_collection_assumption():
+def test_training_requires_collection_assumption(tmp_path):
+    config = tmp_path / "legacy.yaml"
+    config.write_text(
+        "input_dir: input\noutput_dir: output\nfirst_as_of: 2024-01-01\n"
+        "last_as_of: 2024-04-01\nobservation_end: 2024-05-01\n"
+        "test_start: 2024-03-01\nobservation_assumption: REPLACE\n", encoding="utf-8")
     with pytest.raises(ValueError, match="observation_assumption"):
-        read_config(Path(__file__).resolve().parents[1] / "config.yaml")
+        read_config(config)
 
 
 def test_output_cannot_escape_retention(tmp_path):

@@ -1,6 +1,7 @@
 """Mature labels and purged rolling-origin splits."""
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from .data import timestamp
 from .features import FeatureBuilder, DAY
 
@@ -76,3 +77,25 @@ def early_stop_split(meta, train):
         if len(fit) and meta.loc[fit, "y"].nunique() == 2 and meta.loc[val, "y"].nunique() == 2:
             return fit, val
     raise ValueError("Insufficient history for a purged early-stopping split")
+
+
+def experiment_splits(meta, seed):
+    """Hold out customers for selection and test before the five tuning folds."""
+    if meta.customer_id.duplicated().any() or meta.as_of_at.nunique() != 1:
+        raise ValueError("Experiment splits require one row per customer at a common cutoff")
+    rows = meta.sort_values("customer_id").index.to_numpy()
+    try:
+        dev, test = train_test_split(rows, test_size=.2, stratify=meta.loc[rows, "y"], random_state=seed)
+        fit, validation = train_test_split(dev, test_size=.25, stratify=meta.loc[dev, "y"], random_state=seed)
+        if meta.loc[fit, "y"].value_counts().reindex([0, 1], fill_value=0).min() < 5:
+            raise ValueError("training partition needs at least five customers of each class")
+        inner_fit, inner_stop = train_test_split(
+            fit, test_size=.2, stratify=meta.loc[fit, "y"], random_state=seed)
+        for part in (test, validation, inner_fit, inner_stop):
+            if meta.loc[part, "y"].nunique() != 2:
+                raise ValueError("each evaluation partition needs both classes")
+    except ValueError as exc:
+        raise ValueError(f"Insufficient experiment customers for stratified holdouts and five folds: {exc}") from exc
+    splitter = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
+    folds = [(fit[a], fit[b]) for a, b in splitter.split(fit, meta.loc[fit, "y"])]
+    return folds, dev, test, fit, validation, inner_fit, inner_stop
