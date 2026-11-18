@@ -1,0 +1,23 @@
+# Paths relative to the repository root. Both inputs must come from the same run.
+input_mode: simulator
+input_dir: retention/input/dataset
+feature_dir: retention/input/features
+output_dir: retention/artifacts/simulator_run_001
+target: visit
+horizon_days: 28
+policy_condition: observed_experiment_mix
+calibration: auto
+ablation: true
+psi_threshold: 0.2
+ks_alpha: 0.01
+max_metric_drop: 0.05
+extra_features: true
+seed: 42
+max_length: 128
+trials: 3
+iterations: 120
+epochs: 12
+hidden: 24
+batch_size: 128
+bootstrap_repeats: 100
+data_role: simulator_experiment
