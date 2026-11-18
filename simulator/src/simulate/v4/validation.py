@@ -17,6 +17,7 @@ from scipy.stats import ks_2samp, wasserstein_distance
 
 from simulate.v4.data.loader import check_generation_sidecars
 from simulate.v4.irl.fit_shopping import load_source, prepare_source
+from simulate.v4.simulator.coupon_response import sample_redemption_delay, scale_redemption_probability
 from simulate.v4.simulator.outcomes import GENERATION_WINDOW_DAYS, experiment_window_days
 from simulate.v4.simulator.raw_store import cart_at, load_raw_dataset
 
@@ -494,8 +495,8 @@ def audit_coupon_responses(tables, metadata, coupon_response_diagnostics, treatm
                               suffixes=("", "_assignment"), indicator=True)
     if not joined._merge.eq("both").all():
         raise ValueError("coupon response diagnostics must cover all assignment snapshots")
+    declaration = metadata.get("coupon_purchase_response") or {}
     if response_model is None:
-        declaration = metadata.get("coupon_purchase_response") or {}
         path = Path(declaration["model_path"])
         model_bytes = path.read_bytes()
         if hashlib.sha256(model_bytes).hexdigest() != declaration.get("model_sha256"):
@@ -504,6 +505,11 @@ def audit_coupon_responses(tables, metadata, coupon_response_diagnostics, treatm
     if (response_model.get("type") != "tianchi_o2o_descriptive_response" or response_model.get("inactivity_days") != 28
             or response_model.get("window_days") != 30):
         raise ValueError("unsupported coupon response scenario model")
+    calibration = metadata.get("coupon_effect_calibration")
+    if calibration is not None and not isinstance(calibration, dict):
+        raise ValueError("coupon effect calibration must be an object")
+    odds_multiplier = calibration.get("redemption_odds_multiplier", 1.) if calibration is not None else 1.
+    requires_policy_purchase = calibration is not None or declaration.get("requires_policy_purchase") is True
     groups = response_model["groups"]
     orders = _order_events(tables)
     by_event = orders.set_index("purchase_event_id")
@@ -521,12 +527,12 @@ def audit_coupon_responses(tables, metadata, coupon_response_diagnostics, treatm
                       if t0 - last <= pd.Timedelta(days=28) else "lapsed_purchase")
             source_cohort = cohort if groups[cohort]["receipts"] else "pooled"
             source = groups[source_cohort]
-            probability = source["response_probability"]
+            probability = scale_redemption_probability(source["response_probability"], odds_multiplier)
             key = json.dumps(["tianchi-coupon-response-v1", int(metadata["seed"]), row.customer_id, t0.isoformat()]).encode()
             noise = np.random.default_rng(int.from_bytes(hashlib.sha256(key).digest()[:8], "big"))
             uniform = float(noise.random())
             selected = uniform < probability
-            delay = int(noise.choice(source["redemption_delay_days"])) if selected else None
+            delay = sample_redemption_delay(source, noise) if selected else None
             cohorts[cohort] += 1
             mismatches["history_cohort"] += row.history_cohort != cohort
             mismatches["source_cohort"] += row.source_cohort != source_cohort
@@ -557,6 +563,8 @@ def audit_coupon_responses(tables, metadata, coupon_response_diagnostics, treatm
                 continue
             mismatches["unselected_or_control_used"] += not selected or not treated
             mismatches["promotion_flag"] += row.promoted_purchase != (row.baseline_action != "purchase")
+            if requires_policy_purchase:
+                mismatches["forced_purchase"] += row.promoted_purchase
             mismatches["baseline_action"] += pd.notna(row.baseline_action) and row.baseline_action not in {"view", "cart", "remove", "purchase"}
             if pd.isna(row.purchase_event_id) or row.purchase_event_id not in by_event.index:
                 mismatches["used_purchase_event_fk"] += 1

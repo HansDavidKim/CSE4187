@@ -236,6 +236,31 @@ def test_coupon_responses_use_strict_history_and_preserve_optional_old_datasets(
     assert audit.audit_coupon_responses(tables,metadata,diagnostic,treatments,model)["passed"]
 
 
+def test_audit_recovers_scaled_coupon_odds_and_natural_checkout(coupon_response_records):
+    tables, metadata, diagnostic, treatments, model = coupon_response_records
+    for name in ("pooled", "purchased_within_28d"):
+        model["groups"][name].update(receipts=2, response_probability=.5)
+    diagnostic["response_probability"] = .99
+    diagnostic.loc[0, ["baseline_action", "promoted_purchase"]] = ["purchase", False]
+    metadata["coupon_effect_calibration"] = {"redemption_odds_multiplier": 99.}
+    assert audit.audit_coupon_responses(tables, metadata, diagnostic, treatments, model)["passed"]
+    forced = diagnostic.copy()
+    forced.loc[0, ["baseline_action", "promoted_purchase"]] = ["view", True]
+    report = audit.audit_coupon_responses(tables, metadata, forced, treatments, model)
+    assert not report["passed"] and report["mismatch_counts"]["forced_purchase"] == 1
+    metadata["coupon_effect_calibration"]["redemption_odds_multiplier"] = 1.
+    report = audit.audit_coupon_responses(tables, metadata, diagnostic, treatments, model)
+    assert not report["passed"] and report["mismatch_counts"]["response_probability"] == 2
+
+
+def test_audit_distinguishes_new_checkout_policy_from_existing_outputs(coupon_response_records):
+    tables, metadata, diagnostic, treatments, model = coupon_response_records
+    assert audit.audit_coupon_responses(tables, metadata, diagnostic, treatments, model)["passed"]
+    metadata["coupon_purchase_response"] = {"requires_policy_purchase": True}
+    report = audit.audit_coupon_responses(tables, metadata, diagnostic, treatments, model)
+    assert not report["passed"] and report["mismatch_counts"]["forced_purchase"] == 1
+
+
 @pytest.mark.parametrize("mutation,field",[("clock","used_response_clock"),("fk","used_purchase_event_fk"),
     ("cohort","history_cohort"),("uniform","response_uniform"),("unused","used_order_count"),
     ("promotion","promotion_flag"),("control","unselected_or_control_used"),

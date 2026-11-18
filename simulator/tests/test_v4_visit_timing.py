@@ -98,6 +98,29 @@ def test_fallback_uses_only_matching_mode_and_observed_prior_activity(source):
     assert sample_session_offsets(model, 'unknown', False, False, np.random.default_rng(3))[1] == 'regular_pool'
 
 
+def test_population_schedules_drop_donor_keys_and_preserve_visit_counts(source):
+    from simulate.v4.simulator.population_timing import aggregate_visit_timing, materialize_visit_timing
+
+    original = _fit(source[0])
+    calibration = aggregate_visit_timing(original)
+    assert not {"entry_profile_banks", "regular_profile_banks", "entry_pool", "regular_pool"} & calibration.keys()
+    source_metadata = {"dataset": "fixture"}
+    generated = materialize_visit_timing(calibration, source_metadata)
+    assert generated == materialize_visit_timing(calibration, source_metadata)
+    assert not generated["entry_profile_banks"] and not generated["regular_profile_banks"]
+    expected = sum(len(offsets) * n for offsets, n in zip(original["entry_pool"]["offsets_seconds"],
+                                                       original["entry_pool"]["frequencies"]))
+    result = sum(len(offsets) * n for offsets, n in zip(generated["entry_pool"]["offsets_seconds"],
+                                                     generated["entry_pool"]["frequencies"]))
+    assert (result / generated["entry_pool"]["observed_windows"]
+            == pytest.approx(expected / original["entry_pool"]["observed_windows"]))
+
+    profiles = [{"home_group": "group", "profile_id": _pid(uid)} for uid in source[1]]
+    by_group = materialize_visit_timing(aggregate_visit_timing(original, profiles), source_metadata)
+    assert by_group["profile_key_scope"] == "synthetic_home_group"
+    assert set(by_group["entry_profile_banks"]) == set(by_group["regular_profile_banks"]) == {"group"}
+
+
 @pytest.mark.parametrize('bad', ['frequency', 'empty', 'order', 'nan', 'horizon', 'total', 'maturity', 'schema'])
 def test_invalid_source_bank_is_rejected(source, bad):
     model = deepcopy(_fit(source[0])); bank = model['entry_pool']
@@ -140,3 +163,20 @@ def test_shorter_outcome_uses_exact_sampler_bank_and_preserves_factual_records(s
     legacy, original = redefine_outcomes(tables, metadata, shopping_model=old_model)
     assert 'positive_idle_gap' in original['analytic_outcome_view']['formula']
     assert legacy['diagnostics'].first_session_within_28d_share.tolist() != shares.tolist()
+
+
+def test_calibrated_return_view_preserves_contact_horizon(source):
+    from simulate.v4.simulator.outcomes import redefine_outcomes
+    from test_v4_outcome_definitions import outcome_fixture
+
+    tables, metadata, _ = outcome_fixture()
+    timing = _fit(source[0])
+    timing['regular_profile_banks']['pA'] = {'1': _pack(Counter({(day * 86400.,): 1 for day in (1, 7, 20, 29)}))}
+    metadata['coupon_effect_calibration'] = {'contact_days': 14}
+    diagnostics = tables['diagnostics']
+    diagnostics['coupon_return_probability_30d'] = diagnostics.no_coupon_return_probability_30d
+    profile = diagnostics.source_profile_id.eq('pA')
+    diagnostics.loc[profile, ['no_coupon_return_probability_30d', 'coupon_return_probability_30d']] = [.4, .5]
+    for days, expected in ((3, .15), (14, .3), (28, .4), (30, .5)):
+        view, _ = redefine_outcomes(tables, metadata, outcome_days=days, visit_timing_model=timing)
+        assert view['diagnostics'].loc[profile, f'coupon_return_probability_{days}d'].item() == pytest.approx(expected)

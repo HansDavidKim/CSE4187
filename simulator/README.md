@@ -27,8 +27,8 @@ scripts/                   # 기존 실행 진입점과 SQL 예시
 tests/                     # 회귀 검사
 ```
 
-Git에는 실행 코드·테스트·설정·이 안내만 관리한다. 원자료·학습 가중치·데이터베이스·
-생성 결과·문서·노트북·가상환경·캐시는 로컬에서 사용하고 Git에서 제외한다.
+Git에는 실행 코드·테스트와 합성 프로필 생성에 필요한 집계 설정을 둔다.
+원자료, 원천 고객별 학습 파일, 생성 데이터와 로컬 연구 산출물은 Git에서 제외한다.
 
 ## 실행
 
@@ -36,8 +36,8 @@ Python 3.10 이상에서 저장소의 `simulator/` 디렉터리 기준으로 실
 
 ```bash
 cd simulator
-python -m pip install -e ".[dev]"
-ecommerce-sim v4 generate --assets-root /path/to/assets --mode small \
+python -m pip install -r requirements.txt
+ecommerce-sim v4 generate --config src/simulate/v4/config/population.yaml --mode small \
   --n-customers 500 --months 6 --seed 42 --output artifacts/small
 ecommerce-sim v4 validate --data artifacts/small/raw.sqlite
 ecommerce-sim v4 features --data artifacts/small --output artifacts/features
@@ -45,11 +45,46 @@ ecommerce-sim v4 features --data artifacts/small --output artifacts/features
 
 설치 전에는 `PYTHONPATH=src python -m cli v4 ...`를 사용할 수 있다.
 저장소 루트에서 설치할 때는 `python -m pip install -e "./simulator[dev]"`를 사용한다.
-기본 설정은 [simulator.yaml](src/simulate/v4/config/simulator.yaml)이다.
-`--assets-root`는 `data/models`와 원자료를 가진 디렉터리다. 기존 자료가 다른 위치에
-있으면 해당 경로를 명시한다. 생략하면 현재 디렉터리를
-사용한다. 가중치가 없으면 필요한 경로를 표시하며, 실제 원자료를 준비한 뒤
-`generate --fit-missing`으로 누락 모형을 학습한다. 기존 출력·모형은 덮어쓰지 않는다.
+두 설치 방식 모두 `pyproject.toml`의 pandas 2.3.3 고정을 적용한다.
+[population.yaml](src/simulate/v4/config/population.yaml)은 같은 디렉터리의 집계
+설정을 읽어 고객 프로필, 상품 카탈로그, 구매 바구니와 방문 일정을 생성한다.
+학습된 쇼핑·재방문·리뷰 모형과 방문·가격·바구니·리뷰 지연의 집계 분포를 사용한다.
+원천 고객별 관측 프로필을 쓰는 실행과 생성 분포 및 데이터셋 ID가 달라질 수 있다.
+
+합성 프로필 설정은 이산 쇼핑 정책과 GMM 재방문 모형을 사용한다. 각 고객의 쇼핑
+보상에 따른 재방문 오프셋을 GMM에서 한 번 뽑아 전체 이력에 적용한다. GMM의
+학습 범위에서 벗어난 쇼핑 보상에는 이산 모형의 재방문 오프셋을 적용한다.
+구매 바구니의 상품은 같은 단가의 선호 SKU로만 바꿔, 가격 전이 모형이 선택한
+주문의 금액과 수량을 보존한다.
+
+동일 단가 상품 교체 규칙 적용 전, 별도 시드 222·223으로 각 2,000명·6개월을
+생성해 고객별 프로필 기반 v10과 비교했다.
+방문 수·주문 수·28일 미방문율·행동 비중·행동 전이의 오차를 같은 가중치로 비교했을 때
+평균 오차는 이산 모형 0.1136, 전체 GMM 0.0810, 결합 모형 0.0642였다.
+
+학습 자료는 [REES46](https://rees46.com/en/datasets)의
+[Cosmetics Shop 행동 기록](https://www.kaggle.com/datasets/mkechinov/ecommerce-events-history-in-cosmetics-shop),
+[Tianchi CCF2016 O2O](https://tianchi.aliyun.com/competition/entrance/231593/information),
+[Amazon Reviews 2023](https://huggingface.co/datasets/McAuley-Lab/Amazon-Reviews-2023),
+[Olist](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce)다.
+
+기존 학습 파일로 집계 모델을 다시 만들 때는 다음 명령을 사용한다.
+
+```bash
+PYTHONPATH=src python -m simulate.v4.irl.export_population \
+  --models /path/to/assets/data/models --reward-gmm /path/to/fitted-gmm.json \
+  --output artifacts/population/data/models
+```
+
+이 파일들을 사용하려면 `generate --config src/simulate/v4/config/population.yaml`에
+`--assets-root artifacts/population/data/models`를 추가한다.
+
+### 원천 고객별 프로필 기반 실행
+
+[simulator.yaml](src/simulate/v4/config/simulator.yaml)에는 원천 고객별 프로필을
+사용하는 실행 설정이 있다. `--assets-root`에 `data/models`를 포함한 디렉터리를
+지정한다. 실제 원자료를 준비하고 `generate --fit-missing`으로 누락 모형을
+학습할 수 있다. 기존 출력·모형은 덮어쓰지 않는다.
 
 v5 기본 설정은 이산 성분 정책(`source-shopping-v10`)을 사용한다. 고객마다 원천
 행동에서 학습한 대표 성향 하나를 배정하고, 해당 성향의 보상 계수와 고객의 방문 이력,
@@ -94,6 +129,34 @@ Bellman 잔차가 기준을 충족하면 정책을 사용하고, 계산이 수�
 실제 구매한 상품별 최대 한 번이다. 금액은 원자료의 통화·단위를 유지한다.
 잠재 성향과 미래 정답은 예측 피처에 포함하지 않는다.
 
+### 쿠폰 효과 보정
+
+`population.yaml`과 `simulator.yaml`은 발송에 따른 방문 효과, 10% 할인에 따른 추가
+구매 효과, 발생한 구매에서의 쿠폰 사용을 각각 모의한다. 구매는 장바구니와 쇼핑 상태에
+따른 행동 확률로 생성된다. 쿠폰 사용은 이 중 유효기간과 사용 가능 시점을 충족하는 구매에
+기록한다. 아래 계수는 합성 프로필에서 보정했고 원천 고객별 프로필에도 같은 값을 적용한다.
+
+- [Hillstrom 이메일 실험](https://blog.minethatdata.com/2008/03/minethatdata-e-mail-analytics-and-data.html?m=0)의
+  발송군과 미발송군에서 14일 방문율 차이 +6.09%p와 구매율 차이 +0.50%p를 구했다.
+  발송은 첫 방문 후보가 14일 안에 있는 경우의 방문 확률에만 직접 영향을 준다.
+  발송으로 유도된 방문에서의 구매 확률을 보정해 발송군 전체의 구매율 차이를 맞췄다.
+- [Gubela 외 실험 §4.1·표 2](https://doi.org/10.1007/s10796-022-10283-4)의
+  할인 없는 뉴스레터 대비 10% 할인 뉴스레터의 12일 구매율 차이 +0.32%p를
+  할인에 따른 추가 효과의 기준으로 썼다. 실제 실험의 할인은 장바구니에 적용됐다.
+- [Gopalakrishnan·Park 실험 표 2](https://thearf-org-unified-admin.s3.amazonaws.com/MSI/2020/06/MSI_Report_19-106-1.pdf)의
+  7일 구매자 중 사용 비중 16.4%(0.56% ÷ 3.42%)에 맞춰 Tianchi 사용 오즈를
+  조정했다. Tianchi는 구매 이력별 상대 오즈와 사용 지연 분포를 제공한다. 비중의 기준이
+  된 실험은 20달러 이상 구매에 7달러를 할인했다.
+
+시드 310–313에서 각 2,000명·6개월을 생성했다. 같은 고객과 난수로 효과 없음,
+발송 효과만, 발송과 할인 효과를 모두 켠 경우를 비교해 `coupon_effect_calibration`의
+계수를 적합했다. 동일 단가 교체 규칙을 적용한 후 별도 시드 324–331에서 각
+2,000명·6개월을 생성해 다시 평가했다. 14일 발송 방문 효과는 +5.89%p,
+14일 발송 구매 효과는 +0.575%p, 12일 할인 추가 구매 효과는 +0.475%p였다.
+같은 표본에서 7일 구매자 129명 중 26명(20.2%)이 쿠폰을 사용했다.
+이 기준들을 다른 상품과 발송 조건에 옮겨 적용했으므로 28일 효과와 고객별 효과는
+시뮬레이션 추정치다.
+
 평가 전용 반응 결과는 업무 기록과 다른 경로로 내보낸다.
 
 ```bash
@@ -111,8 +174,10 @@ v5의 공통 입력 `kit39-review-cart-v3`는 v4 사전의 39개 컬럼과 순�
 따른다. F21–24는 기준시점 전에 끝난 마지막 세션을 전체 관측 이력에서 찾는다.
 30일 집계, 두 30일 창의 차이, 90일 방문 간격은 각자 필요한 구간이 관측된
 경우만 계산한다. 가입 이후 장바구니 이력이 일부 빠지면 현재 장바구니는
-결측으로 둔다. 기존 `kit39-review-cart-v2` 산출물은 기록된 버전으로 읽는다.
-미방문 정답은 배정 직전 28일 적격 고객의 배정 후 28일을 관측해서 계산한다.
+결측으로 둔다. 미방문 정답은 배정 직전 28일 적격 고객의 배정 후 28일을
+관측해서 계산한다. `kit39-review-cart-v2` 산출물도 이 적격성과 정답 정의를
+기록한 경우 Retention 로더로 읽을 수 있다. 30일 적격성을 사용한 과거 자료는
+현재 설정으로 다시 생성해야 한다.
 
 ```python
 from simulate.v4.data.loader import load_retention_inputs
@@ -140,10 +205,8 @@ raw DB의 UTC 시각은 `2025-01-05T15:00:00.000000000+00:00` 형식으로 바�
 
 ```python
 from simulate.v4.data.loader import load_uplift_inputs
-from uplift.common.features import build_dataset
 
 customers, weekly, cart = load_uplift_inputs("artifacts/features")
-training = build_dataset(customers, weekly, cart)
 ```
 
 `w0`는 서울 월요일 00시의 배정 시점이다. 주간 `session_minutes`는 초를 분으로

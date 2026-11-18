@@ -58,14 +58,18 @@ def _divide(a, b):
 
 def _label_rows(tables, as_of_at=None):
     customers = tables["customers"]
-    if as_of_at is not None:
-        return pd.DataFrame({"customer_id": customers.customer_id, "as_of_at": _utc(as_of_at)})
-    if "labels" in tables:
-        labels = tables["labels"].copy()
+    labels = tables.get("labels")
+    if labels is not None:
         aliases = {"user_id": "customer_id", "snapshot_at": "as_of_at"}
-        for old, new in aliases.items():
-            if new not in labels and old in labels:
-                labels[new] = labels[old]
+        labels = labels.rename(columns={old: new for old, new in aliases.items() if new not in labels})
+    if as_of_at is not None:
+        cutoff = _utc(as_of_at)
+        snapshots = pd.DataFrame({"customer_id": customers.customer_id, "as_of_at": cutoff})
+        if labels is not None and {"customer_id", "as_of_at", "snapshot_id"} <= set(labels):
+            keys = labels.loc[_utc(labels.as_of_at).eq(cutoff), ["customer_id", "snapshot_id"]]
+            snapshots = snapshots.merge(keys, on="customer_id", how="left", validate="one_to_one")
+        return snapshots
+    if labels is not None:
         if "as_of_at" not in labels:
             raise ValueError("Labels must specify as_of_at; raw history is not an outcome definition")
         labels["as_of_at"] = _utc(labels.as_of_at)
@@ -88,7 +92,7 @@ def _label_rows(tables, as_of_at=None):
 
 
 def build_features(tables: dict[str, Any], as_of_at=None) -> pd.DataFrame:
-    """Compute KIT39 from strict past records; an explicit snapshot does not select labels."""
+    """Compute KIT39 from strict past records; an explicit cutoff imports only matching snapshot IDs."""
     if as_of_at is not None and (pd.isna(pd.Timestamp(as_of_at)) or pd.Timestamp(as_of_at).tzinfo is None):
         raise ValueError("Feature as_of_at must be a timezone-aware timestamp")
     if not _canonical(tables):
@@ -124,7 +128,7 @@ def build_features(tables: dict[str, Any], as_of_at=None) -> pd.DataFrame:
     observation_start = _utc(metadata.get("observation_start_at"))
     rows = []
     for t0, snapshots in labels.groupby("as_of_at", sort=True):
-        snapshot_ids = snapshots.set_index("customer_id")["snapshot_id"].to_dict() if "snapshot_id" in snapshots else {}
+        snapshot_ids = snapshots.set_index("customer_id")["snapshot_id"].dropna().to_dict() if "snapshot_id" in snapshots else {}
         t30, t60, t90 = (t0 - pd.Timedelta(days=n) for n in (30, 60, 90))
         ev = raw["events"].loc[raw["events"].event_at.lt(t0) & raw["events"].event_type.isin(EVENTS)].sort_values(["event_at", "event_id"])
         ss = raw["sessions"].loc[raw["sessions"].started_at.lt(t0)]
