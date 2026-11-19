@@ -11,6 +11,7 @@ import tempfile
 import pandas as pd
 
 from simulate.v4.data.weekly import build_experiment_log, build_weekly_panel
+from simulate.v4.simulator.outcomes import experiment_window_days
 from simulate.v4.simulator.paired_evaluation import PAIRED_METHOD_VERSION, paired_retention_rollouts
 
 
@@ -31,14 +32,15 @@ def _horizon(tables, metadata):
     days = int(durations[0])
     if metadata.get("outcome_window_days", days) != days:
         raise ValueError("label and metadata outcome windows differ")
-    if metadata.get("definition_id") != f"future_no_session_{days}d_active30d":
+    eligibility_days = experiment_window_days(metadata, "eligibility_window_days")
+    if metadata.get("definition_id") != f"future_no_session_{days}d_active{eligibility_days}d":
         raise ValueError("paired retention requires the matching no-session definition")
-    return days
+    return days, eligibility_days
 
 
 def build_no_purchase_labels(tables, metadata, experiment):
     """A separate order-based outcome using the same explicit observation window."""
-    days = _horizon(tables, metadata)
+    days, eligibility_days = _horizon(tables, metadata)
     columns = ["customer_id", "as_of_at", "snapshot_id", "outcome_end_at", "eligible_at_assignment"]
     result = experiment[columns].copy()
     count_column = f"order_count_{days}d"
@@ -57,8 +59,8 @@ def build_no_purchase_labels(tables, metadata, experiment):
     result["no_purchase_churn"] = result[count_column].eq(0).astype("Int8")
     result["is_censored"] = result[count_column].isna()
     result["observation_status"] = result.is_censored.map({False: "complete", True: "immature"})
-    result["definition_id"] = f"future_no_order_{days}d_active30d"
-    result["outcome_window_days"], result["eligibility_window_days"] = days, 30
+    result["definition_id"] = f"future_no_order_{days}d_active{eligibility_days}d"
+    result["outcome_window_days"], result["eligibility_window_days"] = days, eligibility_days
     for column in ("dataset_id", "seed", "currency", "amount_unit"):
         result[column] = metadata[column]
     return result
@@ -71,7 +73,8 @@ def export_tables(tables, metadata, output, evaluation_output, repetitions=32):
         raise ValueError("paired evaluation must have a separate evaluation_only destination")
     if isinstance(repetitions, bool) or not isinstance(repetitions, numbers.Integral) or repetitions < 1:
         raise ValueError("repetitions must be a positive integer")
-    days = _horizon(tables, metadata)
+    days, eligibility_days = _horizon(tables, metadata)
+    coupon_days = experiment_window_days(metadata, "coupon_validity_days")
     fingerprint = {key: metadata.get(key) for key in (
         "dataset_id", "seed", "definition_id", "model_sha256", "return_model_sha256", "simulator_code_sha256",
         "raw_database_sha256", "source_raw_database_sha256", "simulator_version", "policy_id",
@@ -82,6 +85,8 @@ def export_tables(tables, metadata, output, evaluation_output, repetitions=32):
     fingerprint.update(outcome_window_days=days, repetitions=int(repetitions),
                        paired_method_version=PAIRED_METHOD_VERSION, export_schema_version=2,
                        event_scope_version="shopping_coupon_review_v1")
+    if (eligibility_days, coupon_days) != (30, 30):
+        fingerprint.update(eligibility_window_days=eligibility_days, coupon_validity_days=coupon_days)
     destinations = {
         "weekly_panel": output / "weekly_panel.parquet", "experiment_log": output / "experiment_log.parquet",
         "no_purchase_labels": output / "no_purchase_labels.parquet",
@@ -131,10 +136,10 @@ def export_tables(tables, metadata, output, evaluation_output, repetitions=32):
         report = {
             "dataset_id": metadata["dataset_id"], "parent_dataset_id": metadata.get("parent_dataset_id"), "seed": metadata["seed"],
             "fingerprint": fingerprint, "files": paths, "file_sha256": checksums, "rows": rows, "reused": False,
-            "outcome_window_days": days, "eligibility_window_days": 30, "coupon_validity_days": 30,
+            "outcome_window_days": days, "eligibility_window_days": eligibility_days, "coupon_validity_days": coupon_days,
             "repetitions": int(repetitions), "analysis_metadata": metadata,
             "paired_scope": "evaluation-only conditional return equation; not factual RNG or full-shopping replay",
-            "no_purchase_definition_id": f"future_no_order_{days}d_active30d",
+            "no_purchase_definition_id": f"future_no_order_{days}d_active{eligibility_days}d",
             "factual_churn_definition_id": metadata["definition_id"],
         }
         (staging / manifest_path.name).write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False))

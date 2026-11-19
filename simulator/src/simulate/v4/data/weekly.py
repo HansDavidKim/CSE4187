@@ -6,6 +6,8 @@ import numbers
 import numpy as np
 import pandas as pd
 
+from simulate.v4.simulator.outcomes import experiment_window_days
+
 
 SEOUL = "Asia/Seoul"
 WEEK = pd.Timedelta(days=7)
@@ -75,6 +77,8 @@ def _assignment_rows(tables):
 def build_experiment_log(tables, metadata) -> pd.DataFrame:
     """One factual assignment row per customer, regardless of execution or redemption."""
     _, observation_end = _bounds(metadata)
+    eligibility_days = experiment_window_days(metadata, "eligibility_window_days")
+    coupon_days = experiment_window_days(metadata, "coupon_validity_days")
     frame = _assignment_rows(tables)
     labels = tables["labels"]
     if labels.duplicated(["customer_id", "as_of_at"]).any():
@@ -127,8 +131,8 @@ def build_experiment_log(tables, metadata) -> pd.DataFrame:
         raise ValueError("Control must not receive a new coupon")
     if not new.sent_at.eq(new.assigned_at).all():
         raise ValueError("this policy sends only at the w0 assignment time")
-    if not new.expires_at.eq(new.sent_at + pd.Timedelta(days=30)).all():
-        raise ValueError("the declared coupon validity is exactly thirty days")
+    if not new.expires_at.eq(new.sent_at + pd.Timedelta(days=coupon_days)).all():
+        raise ValueError(f"the declared coupon validity is exactly {coupon_days} days")
     execution = new.set_index("customer_id")
     frame["coupon_id"] = frame.customer_id.map(execution.coupon_id)
     frame["actual_sent"] = frame.coupon_id.notna()
@@ -172,7 +176,8 @@ def build_experiment_log(tables, metadata) -> pd.DataFrame:
     frame["factual_no_order"] = pd.Series(pd.NA, index=frame.index, dtype="boolean")
     frame["factual_outcome_net_revenue_minor"] = pd.Series(pd.NA, index=frame.index, dtype="Int64")
     for (t0, until), indices in frame.groupby(["as_of_at", "outcome_end_at"]).groups.items():
-        past_sessions = tables["sessions"].loc[tables["sessions"].started_at.ge(t0 - pd.Timedelta(days=30)) & tables["sessions"].started_at.lt(t0)]
+        started = tables["sessions"].started_at
+        past_sessions = tables["sessions"].loc[started.ge(t0 - pd.Timedelta(days=eligibility_days)) & started.lt(t0)]
         frame.loc[indices, "eligible_at_assignment"] = frame.loc[indices, "customer_id"].isin(past_sessions.customer_id)
         if observation_end >= until:
             future_sessions = tables["sessions"].loc[tables["sessions"].started_at.ge(t0) & tables["sessions"].started_at.lt(until)]
@@ -181,7 +186,7 @@ def build_experiment_log(tables, metadata) -> pd.DataFrame:
             frame.loc[indices, "factual_no_order"] = ~frame.loc[indices, "customer_id"].isin(future_orders.customer_id)
             paid = future_orders.groupby("customer_id").paid_minor.sum()
             frame.loc[indices, "factual_outcome_net_revenue_minor"] = frame.loc[indices, "customer_id"].map(paid).fillna(0)
-    frame["eligibility_definition"] = "session start in [as_of_at-30d,as_of_at)"
+    frame["eligibility_definition"] = f"session start in [as_of_at-{eligibility_days}d,as_of_at)"
     frame["outcome_definition_no_session"] = "no session start in [as_of_at,outcome_end_at)"
     frame["outcome_definition_no_order"] = "no unique order in [as_of_at,outcome_end_at)"
     frame["label_known_at"] = frame.outcome_end_at.where(frame.outcome_observed)

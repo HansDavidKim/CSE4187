@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 
-BEHAVIOR_FEATURE_VERSION = "behavior_review_cart_v2"
+BEHAVIOR_FEATURE_VERSION = "behavior_review_cart_v3"
 AUXILIARY_FEATURES = (
     "review_count_30d", "mean_review_rating_30d",
 )
@@ -137,8 +137,8 @@ def build_behavior_features(tables, snapshots):
         if np.isfinite(stars).any():
             result["mean_review_rating_30d"] = float(np.nanmean(stars))
         born = t0 > signed[uid]
-        original_coverage = born and (start is None or start <= max(t0 - pd.Timedelta(days=30), signed[uid]))
-        if not original_coverage:
+        covered30 = born and (start is None or start <= max(t0 - pd.Timedelta(days=30), signed[uid]))
+        if not covered30:
             result.update(dict.fromkeys(AUXILIARY_FEATURES, np.nan))
         completed = (c["session_starts"] < clock) & (c["session_ends"] < clock) & (c["session_ends"] != pd.NaT.value)
         complete30 = completed & (c["session_starts"] >= low)
@@ -146,7 +146,7 @@ def build_behavior_features(tables, snapshots):
         counts = Counter(zip(c["types"][:past_end], c["session"][:past_end]))
         bought_sessions = set(c["order_sessions"][c["order_times"] < clock])
         nonpurchase = [sid for sid in session_ids if sid not in bought_sessions]
-        if nonpurchase and born:
+        if nonpurchase and covered30:
             result["cart_adds_per_nonpurchase_session_30d"] = sum(counts["cart", sid] for sid in nonpurchase) / len(nonpurchase)
             result["cart_removes_per_nonpurchase_session_30d"] = sum(counts["remove_from_cart", sid] for sid in nonpurchase) / len(nonpurchase)
         if product_review_supported and born:
@@ -157,9 +157,10 @@ def build_behavior_features(tables, snapshots):
                 last = by_order["last"].max()
                 result["review_last_order_mean_rating"] = by_order.loc[by_order["last"].eq(last), "mean"].mean()
                 result["review_recency_days"] = (t0 - last).total_seconds() / 86400
-                recent = past_reviews.loc[past_reviews.event_at.ge(t0 - pd.Timedelta(days=30))]
-                if len(recent):
-                    result["review_non5_share_30d"] = recent.assign(non5=recent.rating.lt(5)).groupby("related_purchase_event_id", sort=False).non5.mean().mean()
+                if covered30:
+                    recent = past_reviews.loc[past_reviews.event_at.ge(t0 - pd.Timedelta(days=30))]
+                    if len(recent):
+                        result["review_non5_share_30d"] = recent.assign(non5=recent.rating.lt(5)).groupby("related_purchase_event_id", sort=False).non5.mean().mean()
         rows.append({"customer_id": uid, "as_of_at": t0, **result,
             "behavior_product_review_observed": bool(product_review_supported and born)})
     diagnostics = ["behavior_product_review_observed"]

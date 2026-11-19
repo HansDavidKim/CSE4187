@@ -17,6 +17,8 @@ from scipy.stats import ks_2samp, wasserstein_distance
 
 from simulate.v4.data.loader import check_generation_sidecars
 from simulate.v4.irl.fit_shopping import load_source, prepare_source
+from simulate.v4.simulator.coupon_response import sample_redemption_delay, scale_redemption_probability
+from simulate.v4.simulator.outcomes import GENERATION_WINDOW_DAYS, experiment_window_days
 from simulate.v4.simulator.raw_store import cart_at, load_raw_dataset
 
 
@@ -42,15 +44,18 @@ def _observation_bound(metadata, name):
 
 
 def _outcome_contract(metadata):
-    definition = metadata.get("definition_id", "future_no_session_30d_active30d")
-    days = {"future_no_session_30d_active30d": 30, "future_no_session_28d_active30d": 28}.get(definition)
+    eligible_days = experiment_window_days(metadata, "eligibility_window_days")
+    generation_definition = f"future_no_session_30d_active{eligible_days}d"
+    definition = metadata.get("definition_id", generation_definition)
+    days = {generation_definition: GENERATION_WINDOW_DAYS, f"future_no_session_28d_active{eligible_days}d": 28}.get(definition)
     if days is None:
         raise ValueError("unsupported outcome definition")
-    for field, expected in (("outcome_window_days", days), ("generation_window_days", 30), ("eligibility_window_days", 30)):
+    for field, expected in (("outcome_window_days", days), ("generation_window_days", GENERATION_WINDOW_DAYS),
+                            ("eligibility_window_days", eligible_days)):
         value = metadata.get(field, expected if days == 30 else None)
         if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value != expected:
             raise ValueError(f"{field} must match {expected}")
-    if days == 28 and (metadata.get("generation_definition_id") != "future_no_session_30d_active30d" or
+    if days == 28 and (metadata.get("generation_definition_id") != generation_definition or
                        not isinstance(metadata.get("parent_dataset_id"), str) or not metadata["parent_dataset_id"].strip()):
         raise ValueError("28-day outcomes require the original 30-day definition and parent dataset")
     return definition, days
@@ -288,6 +293,8 @@ def audit_auxiliary_events(tables, metadata):
 def audit_sidecars(tables, metadata, labels, treatments, lifecycle=None, diagnostics=None):
     """Recalculate outcomes from raw sessions/orders, never from latent diagnostics."""
     definition, outcome_days = _outcome_contract(metadata)
+    eligible_days = experiment_window_days(metadata, "eligibility_window_days")
+    coupon_days = experiment_window_days(metadata, "coupon_validity_days")
     required_labels = {"customer_id", "churn", "retained", "future_retained", "future_revenue_30d",
                        "future_revenue_12m", "as_of_at", "outcome_end_at", "is_censored", "definition_id"}
     required_assignments = {"customer_id", "treatment", "as_of_at", "assigned_at", "assignment_probability",
@@ -322,9 +329,11 @@ def audit_sidecars(tables, metadata, labels, treatments, lifecycle=None, diagnos
         mismatches["not_monday_midnight_seoul"] += int(local.weekday() != 0 or local != local.normalize()) * len(group)
         mismatches["definition_id"] += int(group.definition_id.ne(definition).sum())
         mismatches["assignment_probability"] += int(pd.to_numeric(group.assignment_probability, errors="coerce").ne(0.5).sum())
-        history = sessions.loc[sessions.started_at.ge(t0 - pd.Timedelta(days=30)) & sessions.started_at.lt(t0)]
+        if "eligibility_window_days" in group:
+            mismatches["eligibility_window_days"] += int(group.eligibility_window_days.ne(eligible_days).fillna(True).sum())
+        history = sessions.loc[sessions.started_at.ge(t0 - pd.Timedelta(days=eligible_days)) & sessions.started_at.lt(t0)]
         eligible = group.customer_id.isin(history.customer_id)
-        mismatches["not_eligible_active30d"] += int((~eligible).sum())
+        mismatches[f"not_eligible_active{eligible_days}d"] += int((~eligible).sum())
         mismatches["signup_at_or_after_snapshot"] += int(group.customer_id.map(signups).ge(t0).sum())
         future = sessions.loc[sessions.started_at.ge(t0) & sessions.started_at.lt(until)]
         retained = group.customer_id.isin(future.customer_id).astype(int)
@@ -350,13 +359,14 @@ def audit_sidecars(tables, metadata, labels, treatments, lifecycle=None, diagnos
             mismatches["label_observation_end"] += int(pd.to_datetime(group.observation_end_at, utc=True).ne(observation_end).sum())
         if "observation_status" in group:
             mismatches["observation_status"] += int(group.observation_status.ne("complete").sum())
+        highest_unit = metadata.get("raw_schema_version", 1) >= 3
+        treatment_policy = f"one_coupon_10pct_{'highest_unit_' if highest_unit else ''}{coupon_days}d"
         if "policy_id" in group:
-            treatment_policy = "one_coupon_10pct_highest_unit_30d" if metadata.get("raw_schema_version", 1) >= 3 else "one_coupon_10pct_30d"
             expected_policy = group.treatment.map({0: "no_new_coupon", 1: treatment_policy})
             mismatches["policy_id"] += int(group.policy_id.ne(expected_policy).sum())
         mismatches["assignment_time"] += int(group.assigned_at.ne(t0).sum())
-        policy_until = t0+pd.Timedelta(days=30)
-        sent = tables["coupons"].loc[tables["coupons"].sent_at.ge(t0) & tables["coupons"].sent_at.lt(policy_until)]
+        policy_until = t0 + pd.Timedelta(days=coupon_days)
+        sent = tables["coupons"].loc[tables["coupons"].sent_at.ge(t0)]
         sent_count = group.customer_id.map(sent.groupby("customer_id").size()).fillna(0)
         mismatches["coupon_count_by_assignment"] += int(sent_count.ne(group.treatment).sum())
         mismatches["actual_sent"] += int((~group.actual_sent.isin([True, False]) |
@@ -370,8 +380,8 @@ def audit_sidecars(tables, metadata, labels, treatments, lifecycle=None, diagnos
             mismatches["treated_coupon_reference"] += int(coupon is None or coupon.customer_id != row.customer_id)
         mismatches["experiment_coupon_time"] += int((sent.sent_at.ne(t0) | sent.expires_at.ne(policy_until)).sum())
         mismatches["experiment_coupon_discount"] += int(pd.to_numeric(sent.discount_rate, errors="coerce").ne(0.1).sum())
-        if metadata.get("raw_schema_version", 1) >= 3:
-            mismatches["experiment_coupon_policy_id"] += int(sent.policy_id.ne("one_coupon_10pct_highest_unit_30d").sum())
+        if highest_unit:
+            mismatches["experiment_coupon_policy_id"] += int(sent.policy_id.ne(treatment_policy).sum())
         if "future_revenue_12m" in group:
             clv_end = t0 + pd.DateOffset(months=12)
             if "clv_outcome_end_at" in group:
@@ -387,7 +397,8 @@ def audit_sidecars(tables, metadata, labels, treatments, lifecycle=None, diagnos
         mismatches["unbalanced_randomized_arms"] += abs(arm_counts.get("0", 0) - arm_counts.get("1", 0))
         window_reports.append({"as_of_at": t0.isoformat(), "outcome_end_at": until.isoformat(),
                                "definition_id": definition, "outcome_window_days": outcome_days,
-                               "generation_window_days": 30, "eligibility_window_days": 30,
+                               "generation_window_days": GENERATION_WINDOW_DAYS, "eligibility_window_days": eligible_days,
+                               "coupon_validity_days": coupon_days,
                                "customers": len(group), "eligible": int(eligible.sum()), "ITT_arm_counts": arm_counts,
                                "recomputed_churn_rate": float((1 - retained).mean()),
                                "recomputed_churn_by_arm": {str(int(arm)): float((1 - retained.loc[part.index]).mean())
@@ -484,8 +495,8 @@ def audit_coupon_responses(tables, metadata, coupon_response_diagnostics, treatm
                               suffixes=("", "_assignment"), indicator=True)
     if not joined._merge.eq("both").all():
         raise ValueError("coupon response diagnostics must cover all assignment snapshots")
+    declaration = metadata.get("coupon_purchase_response") or {}
     if response_model is None:
-        declaration = metadata.get("coupon_purchase_response") or {}
         path = Path(declaration["model_path"])
         model_bytes = path.read_bytes()
         if hashlib.sha256(model_bytes).hexdigest() != declaration.get("model_sha256"):
@@ -494,6 +505,11 @@ def audit_coupon_responses(tables, metadata, coupon_response_diagnostics, treatm
     if (response_model.get("type") != "tianchi_o2o_descriptive_response" or response_model.get("inactivity_days") != 28
             or response_model.get("window_days") != 30):
         raise ValueError("unsupported coupon response scenario model")
+    calibration = metadata.get("coupon_effect_calibration")
+    if calibration is not None and not isinstance(calibration, dict):
+        raise ValueError("coupon effect calibration must be an object")
+    odds_multiplier = calibration.get("redemption_odds_multiplier", 1.) if calibration is not None else 1.
+    requires_policy_purchase = calibration is not None or declaration.get("requires_policy_purchase") is True
     groups = response_model["groups"]
     orders = _order_events(tables)
     by_event = orders.set_index("purchase_event_id")
@@ -511,12 +527,12 @@ def audit_coupon_responses(tables, metadata, coupon_response_diagnostics, treatm
                       if t0 - last <= pd.Timedelta(days=28) else "lapsed_purchase")
             source_cohort = cohort if groups[cohort]["receipts"] else "pooled"
             source = groups[source_cohort]
-            probability = source["response_probability"]
+            probability = scale_redemption_probability(source["response_probability"], odds_multiplier)
             key = json.dumps(["tianchi-coupon-response-v1", int(metadata["seed"]), row.customer_id, t0.isoformat()]).encode()
             noise = np.random.default_rng(int.from_bytes(hashlib.sha256(key).digest()[:8], "big"))
             uniform = float(noise.random())
             selected = uniform < probability
-            delay = int(noise.choice(source["redemption_delay_days"])) if selected else None
+            delay = sample_redemption_delay(source, noise) if selected else None
             cohorts[cohort] += 1
             mismatches["history_cohort"] += row.history_cohort != cohort
             mismatches["source_cohort"] += row.source_cohort != source_cohort
@@ -547,6 +563,8 @@ def audit_coupon_responses(tables, metadata, coupon_response_diagnostics, treatm
                 continue
             mismatches["unselected_or_control_used"] += not selected or not treated
             mismatches["promotion_flag"] += row.promoted_purchase != (row.baseline_action != "purchase")
+            if requires_policy_purchase:
+                mismatches["forced_purchase"] += row.promoted_purchase
             mismatches["baseline_action"] += pd.notna(row.baseline_action) and row.baseline_action not in {"view", "cart", "remove", "purchase"}
             if pd.isna(row.purchase_event_id) or row.purchase_event_id not in by_event.index:
                 mismatches["used_purchase_event_fk"] += 1
@@ -773,7 +791,7 @@ def validate_directory(data_dir: Path, model_path: Path, source_cache: Path | No
             "model_sha256": model_sha256,
             "dataset_model_sha256": metadata.get("model_sha256"),
             "outcome_view_provenance": {key: metadata.get(key) for key in (
-                "definition_id", "outcome_window_days", "generation_window_days", "eligibility_window_days",
+                "definition_id", "outcome_window_days", "generation_window_days", "eligibility_window_days", "coupon_validity_days",
                 "generation_definition_id", "generation_policy_id", "parent_dataset_id", "raw_database_sha256",
                 "source_raw_database_sha256", "analysis_view", "analytic_outcome_view", "generation_observed_churn_rate")},
             "return_model_provenance": return_provenance,

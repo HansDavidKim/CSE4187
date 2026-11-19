@@ -86,6 +86,17 @@ def test_report_comparison_marks_protocol_mismatch_and_direction():
     assert not quality.compare_reports(before,after)["distribution_comparison_eligible"]
 
 
+def test_comparison_skips_history_scopes_with_different_eligibility_windows():
+    baseline = {"protocol": {}, "profile_artifact_sha256": "model",
+                "runs": [{"scopes": {"pre_asof_30d": {}}}]}
+    candidate = {"protocol": {"eligibility_window_days": 28}, "profile_artifact_sha256": "model",
+                 "runs": [{"scopes": {"pre_asof_28d": {}}}]}
+    result = quality.compare_reports(baseline, candidate)
+    assert not result["protocol_matches"]["eligibility_window_days"]
+    assert not result["distribution_comparison_eligible"]
+    assert result["changes"] == []
+
+
 @pytest.mark.parametrize("field", ["source_cache_sha256", "configuration_except_profile_sha256"])
 def test_comparison_rejects_different_source_content_or_other_settings(field):
     protocol = dict(source_cache_fingerprint="same-stats", customers=200, seeds=[71], months=5,
