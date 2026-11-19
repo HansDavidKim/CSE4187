@@ -207,8 +207,8 @@ def validate_prediction_frame(frame: pd.DataFrame, metadata: PredictionMetadata,
     semantics = ("amount", "nonnegative_amount") if model == "clv" else (VALUE_SEMANTICS[model],)
     if metadata.value_semantics not in semantics:
         raise InputValidationError(f"{model}: expected value_semantics in {semantics}")
-    if model == "clv" and (metadata.horizon_value != 12 or metadata.horizon_unit != "calendar_months"):
-        raise InputValidationError("clv: predicted_clv_12m requires twelve calendar months")
+    if model == "clv" and (metadata.horizon_value != 52 or metadata.horizon_unit != "weeks"):
+        raise InputValidationError("clv: predicted_clv_12m requires exactly 52 weeks")
     value_column = PREDICTION_COLUMNS[model]
     columns = (*CONTEXT_COLUMNS, "input_cutoff_at", "prediction_end_at", value_column)
     result = _context(_frame(frame, columns, columns, model), model)

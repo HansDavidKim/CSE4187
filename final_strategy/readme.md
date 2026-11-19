@@ -84,7 +84,11 @@ input_cutoff_at, prediction_end_at, <해당 모델 예측 컬럼>
 | Uplift | `uplift_score` | `probability_difference`, 유한한 -1~1, 음수 허용 |
 | CLV | `predicted_clv_12m` | `amount` 또는 `nonnegative_amount`; 유한한 금액, 후자는 음수 거절 |
 
-CLV 기간은 반드시 `horizon_value=12`, `horizon_unit="calendar_months"`다.
+CLV 기간은 반드시 `horizon_value=52`, `horizon_unit="weeks"`이며 정확히 364일이다.
+`predicted_clv_12m`은 호환성을 위해 유지하는 기존 컬럼명이며 달력 12개월을 뜻하지 않는다.
+종료 시각은 `as_of_at + pd.Timedelta(weeks=52)`와 일치해야 한다.
+`12 calendar_months`, `364 days`, 51주·53주 선언은 거절하며 기간이나 예측값을 자동 환산하지 않는다.
+빈 입력을 포함한 Segmentation에서도 같은 CLV 기간 계약을 검증한다.
 Segmentation에서는 미래 결제금액 CLV를 사용하므로 `amount` 선언이어도 음수를 거절한다.
 입력 단계와 분류 단계의 검증 범위를 구분한다.
 
@@ -228,13 +232,13 @@ def demo_segment(features):
         "uplift": ("uplift_score", 0.1, PredictionMetadata(
             "dummy-uplift", "dummy_purchase_difference_4w", 4, "weeks", "probability_difference")),
         "clv": ("predicted_clv_12m", 100.0, PredictionMetadata(
-            "dummy-clv", "dummy_paid_amount_12m", 12, "calendar_months", "nonnegative_amount")),
+            "dummy-clv", "dummy_paid_amount_52w", 52, "weeks", "nonnegative_amount")),
     }
     predictions = {}
     for model, (column, value, metadata) in declarations.items():
         frame = features[list(CONTEXT_COLUMNS)].copy()
         frame["input_cutoff_at"] = frame.as_of_at  # 더미 계약의 cutoff 선언
-        offset = (pd.DateOffset(months=12) if model == "clv"
+        offset = (pd.Timedelta(weeks=52) if model == "clv"
                   else pd.Timedelta(days=28))
         frame["prediction_end_at"] = frame.as_of_at.map(lambda point: point + offset)
         frame[column] = value
@@ -256,12 +260,12 @@ def demo_segment(features):
 
 ## 7. 테스트
 
-- [test_inputs.py](tests/test_inputs.py): 96개 사례. 키·출처·시간대·기간·수치·NULL·미래 컬럼·입력 비변경성,
+- [test_inputs.py](tests/test_inputs.py): 102개 사례. 키·출처·시간대·기간·수치·NULL·미래 컬럼·입력 비변경성,
   실제 publisher의 Parquet·manifest·checksum 소비를 검증한다.
-- [test_segmentation.py](tests/test_segmentation.py): 69개 사례. 12개 조합·경계·동점·상위 비율·점수·제외 사유,
+- [test_segmentation.py](tests/test_segmentation.py): 73개 사례. 12개 조합·경계·동점·상위 비율·점수·제외 사유,
   다중 시각 분리·통계·CSV/JSON 재로딩·시각화·비변경성을 검증한다.
 
-두 파일 합계는 165개다. 실제 모델 번들·외부 예측 파일은 사용하지 않는다.
+두 파일 합계는 175개다. CLV 52주·364일 종료 시각, 윤년·월말, 이전 기간 선언 거절과 빈 Segmentation을 검사한다. 실제 모델 번들·외부 예측 파일은 사용하지 않는다.
 publisher 관련 7개는 raw 로딩과 Feature 계산을 fixture로 대체하고 실제 v5 publisher를 실행한다.
 SQLite/Parquet 저장과 manifest·로더 호환성 검사이며 실제 대규모 시뮬레이션 데이터 검증은 아니다.
 
@@ -292,16 +296,19 @@ $baseTemp = Join-Path (Resolve-Path '.venv').Path (
 
 publisher 제외 조건을 넣지 않는다. 테스트용 임시 산출물은 Git 제외 `.venv/verification/` 아래에 둔다.
 
-2026-11-19, Python 3.12.10의 기존 Windows 가상환경에서 위 두 파일을 재실행한 결과는
+CLV 52주 변경 전인 2026-11-19, Python 3.12.10의 기존 Windows 가상환경에서 두 파일을 실행한 기록은
 **165 passed, 0 failed, 0 skipped (21.17초)**였다. publisher 관련 7개도 포함한다.
 NumPy timedelta 관련 경고 2,398개를 숨기지 않았으며, 향후 라이브러리 호환성 검토가 필요하다.
-이는 위 5개 공개 파일에 대한 검증이며 실제 모델 추론 성공을 의미하지 않는다.
+CLV 52주 변경 후 Phase A의 기존 실행 기록은 **175 passed, 0 failed, 0 skipped (36.17초)**다.
+publisher 7개를 포함했고 경고 3,438개를 숨기지 않았다. 이번 스테이징 준비에서 재실행한 결과는 아니다.
+이 검증은 실제 모델 추론 성공을 의미하지 않는다.
 
 ## 8. 현재 제약
 
 - 실제 Churn·Uplift·CLV 출력 연결은 미완료이며 내부 batch 계약과 생산자 계약의 대조가 필요하다.
-- 현재 입력·Segmentation은 CLV 달력 12개월을 요구한다. 실제 CLV 모델의 52주 계약과 다르며,
-  이름을 바꾸거나 값을 비례 환산해 대체하지 않는다. 기간 계약 합의가 먼저 필요하다.
+- 현재 입력·Segmentation은 CLV 52주(364일)를 요구하며 달력 12개월과 동일시하지 않는다.
+  기존 컬럼명 `predicted_clv_12m`은 유지한다. 기간 계약 변경과 실제 CLV 출력 Adapter 연동은 별개이며,
+  실제 모델의 출처·snapshot·금액 단위·예측 정의 연결은 추가 검증이 필요하다.
 - 개발용 Segmentation 임계값과 분석 eligibility는 확정 사업 정책이나 실제 발송 승인 기준이 아니다.
 - Priority Score는 결과 기간이 다른 예측의 곱인 대리지표다. 실제 증분 매출·이익·ROI 산출은 이 공개 범위 밖이다.
 - 시뮬레이터 v5와의 독립 fixture 검증은 실제 운영 데이터·모델 추론·전체 생산자 출처 검증과 구분한다.

@@ -43,13 +43,13 @@ def make_inputs(records):
     declarations = {
         "churn": PredictionMetadata("dummy-churn", "dummy_no_visit_28d", 28, "days", "probability"),
         "uplift": PredictionMetadata("dummy-uplift", "dummy_purchase_retention_4w", 4, "weeks", "probability_difference"),
-        "clv": PredictionMetadata("dummy-clv", "dummy_future_paid_revenue_12m", 12, "calendar_months", "amount"),
+        "clv": PredictionMetadata("dummy-clv", "dummy_future_paid_revenue_52w", 52, "weeks", "amount"),
     }
     batches = {}
     for index, (model, column) in enumerate(PREDICTION_COLUMNS.items()):
         frame = features[list(CONTEXT_COLUMNS)].copy()
         frame["input_cutoff_at"] = frame.as_of_at
-        offset = pd.DateOffset(months=12) if model == "clv" else pd.Timedelta(days=28)
+        offset = pd.Timedelta(weeks=52) if model == "clv" else pd.Timedelta(days=28)
         frame["prediction_end_at"] = frame.as_of_at.map(lambda point: point + offset)
         frame[column] = [row[index] for row in values]
         batches[model] = PredictionBatch(frame, declarations[model])
@@ -214,6 +214,17 @@ def test_empty_integrated_slice_returns_empty_results(inputs):
     assert result.metadata["input_count"] == 0 and result.metadata["cohorts"] == []
 
 
+@pytest.mark.parametrize("value,unit", [(12, "calendar_months"), (51, "weeks"),
+                                       (53, "weeks"), (364, "days")])
+def test_empty_segmentation_requires_52_week_clv(inputs, value, unit):
+    source = IntegratedInputs(inputs.data.iloc[:0].copy(), deepcopy(inputs.prediction_metadata),
+                              {name: frame.iloc[:0].copy() for name, frame in inputs.prediction_context.items()})
+    source.prediction_metadata["clv"] = replace(source.prediction_metadata["clv"],
+                                                horizon_value=value, horizon_unit=unit)
+    with pytest.raises(InputValidationError, match="exactly 52 weeks"):
+        segment_customers(source)
+
+
 @pytest.mark.parametrize("case", ["missing", "extra", "duplicate", "non_bool", "missing_reason", "reason_for_eligible"])
 def test_invalid_eligibility_is_not_silently_interpreted(inputs, case):
     decisions = eligibility_for(inputs, {"003": "excluded"})
@@ -313,7 +324,8 @@ def test_csv_roundtrip_summary_metadata_and_no_overwrite(inputs, tmp_path):
     assert metadata["models"] == result.metadata["models"]
     assert metadata["models"]["churn"]["horizon_unit"] == "days"
     assert metadata["models"]["uplift"]["horizon_unit"] == "weeks"
-    assert metadata["models"]["clv"]["horizon_unit"] == "calendar_months"
+    assert metadata["models"]["clv"]["horizon_unit"] == "weeks"
+    assert metadata["models"]["clv"]["horizon_value"] == 52
     with pytest.raises(FileExistsError):
         export_segments(result, paths["customers"])
 
@@ -329,6 +341,7 @@ def test_plot_generation_is_cohort_specific_and_preserves_empty_means(twelve_inp
     result = segment_customers(twelve_inputs)
     figure = plot_segments(result, "dummy-segmentation", T0)
     assert len(figure.axes) == 4
+    assert figure.axes[2].get_title() == "Mean predicted 52-week CLV"
     path = tmp_path / "segments.png"
     figure.savefig(path, dpi=80)
     assert path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")

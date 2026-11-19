@@ -42,13 +42,13 @@ def batches_for(features):
     declarations = {
         "churn": PredictionMetadata("dummy-churn", "dummy_no_session_28d", 28, "days", "probability"),
         "uplift": PredictionMetadata("dummy-uplift", "dummy_purchase_retention_4w_coupon", 4, "weeks", "probability_difference"),
-        "clv": PredictionMetadata("dummy-clv", "dummy_paid_revenue_no_new_coupon", 12, "calendar_months", "nonnegative_amount"),
+        "clv": PredictionMetadata("dummy-clv", "dummy_paid_revenue_no_new_coupon", 52, "weeks", "nonnegative_amount"),
     }
     batches = {}
     for model, metadata in declarations.items():
         frame = features[list(CONTEXT_COLUMNS)].copy()
         frame["input_cutoff_at"] = frame.as_of_at
-        offset = (pd.DateOffset(months=12) if model == "clv" else
+        offset = (pd.Timedelta(weeks=52) if model == "clv" else
                   pd.Timedelta(days=28) if model == "churn" else pd.Timedelta(weeks=4))
         frame["prediction_end_at"] = frame.as_of_at.map(lambda value: value + offset)
         frame[PREDICTION_COLUMNS[model]] = {"churn": .25, "uplift": -.2, "clv": 123.45}[model]
@@ -237,10 +237,10 @@ def test_model_definitions_and_horizon_units_remain_distinct(features, predictio
     result = integrate_inputs(features, predictions)
     assert result.prediction_metadata["churn"].horizon_unit == "days"
     assert result.prediction_metadata["uplift"].horizon_unit == "weeks"
-    assert result.prediction_metadata["clv"].horizon_unit == "calendar_months"
+    assert result.prediction_metadata["clv"].horizon_unit == "weeks"
     assert len({item.target_definition_id for item in result.prediction_metadata.values()}) == 3
     assert "prediction_end_at" not in result.data
-    assert result.prediction_context["clv"].prediction_end_at.eq(T0 + pd.DateOffset(months=12)).all()
+    assert result.prediction_context["clv"].prediction_end_at.eq(T0 + pd.Timedelta(weeks=52)).all()
 
 
 def test_30_days_is_not_silently_accepted_as_28_days(features, predictions):
@@ -250,10 +250,10 @@ def test_30_days_is_not_silently_accepted_as_28_days(features, predictions):
 
 
 @pytest.mark.parametrize("start,week,end,wrong_days", [
-    ("2024-02-29T00:00:00Z", "2024-02-26", "2025-02-28T00:00:00Z", 360),
-    ("2023-03-31T00:00:00Z", "2023-03-27", "2024-03-31T00:00:00Z", 365),
+    ("2024-02-29T00:00:00Z", "2024-02-26", "2025-02-27T00:00:00Z", 365),
+    ("2023-03-31T00:00:00Z", "2023-03-27", "2024-03-29T00:00:00Z", 366),
 ])
-def test_calendar_month_horizon_handles_leap_year_and_month_end(features, start, week, end, wrong_days):
+def test_clv_52_weeks_handles_leap_year_and_month_end(features, start, week, end, wrong_days):
     features["as_of_at"] = pd.Timestamp(start)
     features["reference_week"] = week
     batch = batches_for(features)["clv"]
@@ -299,8 +299,32 @@ def test_unrepresentable_horizon_has_a_field_specific_error(predictions):
 
 def test_clv_12m_does_not_accept_day_horizon(predictions):
     batch = predictions["clv"]
-    with pytest.raises(InputValidationError, match="twelve calendar months"):
+    with pytest.raises(InputValidationError, match="exactly 52 weeks"):
         validate_prediction_frame(batch.frame, replace(batch.metadata, horizon_unit="days", horizon_value=365), "clv")
+
+
+@pytest.mark.parametrize("value,unit", [(12, "calendar_months"), (51, "weeks"),
+                                       (53, "weeks"), (364, "days")])
+def test_clv_requires_exact_52_week_declaration(predictions, value, unit):
+    batch = predictions["clv"]
+    with pytest.raises(InputValidationError, match="exactly 52 weeks"):
+        validate_prediction_frame(batch.frame, replace(batch.metadata, horizon_value=value, horizon_unit=unit), "clv")
+
+
+def test_clv_52_week_metadata_and_exact_elapsed_time(features, predictions):
+    result = integrate_inputs(features, predictions)
+    assert result.prediction_metadata["clv"].horizon_value == 52
+    assert result.prediction_metadata["clv"].horizon_unit == "weeks"
+    context = result.prediction_context["clv"]
+    assert (context.prediction_end_at - context.as_of_at).eq(pd.Timedelta(days=364)).all()
+
+
+def test_other_models_keep_calendar_month_support(predictions):
+    batch = predictions["churn"]
+    batch.frame["prediction_end_at"] = batch.frame.as_of_at.map(lambda point: point + pd.DateOffset(months=1))
+    metadata = replace(batch.metadata, horizon_value=1, horizon_unit="calendar_months")
+    validated = validate_prediction_frame(batch.frame, metadata, "churn")
+    assert validated.prediction_end_at.eq(T0 + pd.DateOffset(months=1)).all()
 
 
 def test_all_three_batches_and_current_feature_version_required(features, predictions):

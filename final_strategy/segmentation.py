@@ -107,8 +107,8 @@ def _model_metadata(metadata):
                      "clv": ("amount", "nonnegative_amount")}[model]
         if item.value_semantics not in semantics:
             raise InputValidationError(f"segmentation.{model}: unsupported value semantics")
-        if model == "clv" and (item.horizon_value != 12 or item.horizon_unit != "calendar_months"):
-            raise InputValidationError("segmentation.clv: requires twelve calendar months")
+        if model == "clv" and (item.horizon_value != 52 or item.horizon_unit != "weeks"):
+            raise InputValidationError("segmentation.clv: requires exactly 52 weeks")
 
 
 def _same_keys(left, right, name):
@@ -299,7 +299,7 @@ def plot_segments(result: SegmentationResult, dataset_id: str, as_of_at):
     unit = f"{rows.currency.iloc[0]}; amount unit {rows.amount_unit.iloc[0]}"
     metrics = (("customer_count", "Customers", "Count"),
                ("customer_ratio", "Population share", "Fraction"),
-               ("mean_predicted_clv_12m", "Mean predicted 12-month CLV", unit),
+               ("mean_predicted_clv_12m", "Mean predicted 52-week CLV", unit),
                ("mean_priority_score", "Mean priority proxy", unit + " (proxy)"))
     for axis, (column, title, ylabel) in zip(axes.flat, metrics):
         values = rows[column].to_numpy(dtype=float)
