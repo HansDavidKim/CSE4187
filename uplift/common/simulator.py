@@ -1,0 +1,39 @@
+"""Assemble an uplift cohort from factual simulator assignments and precomputed KIT39."""
+
+import pandas as pd
+
+from common.simulator_features import SNAPSHOT_KEYS, open_feature_store, read_kit_features
+from . import schema as S
+
+
+def load_feature_dataset(path):
+    """One row per eligible customer. An incomplete 28-day outcome stays missing."""
+    with open_feature_store(path) as connection:
+        features = read_kit_features(connection, S.KIT39)
+        experiment = pd.read_sql_query("""
+            SELECT dataset_id, customer_id, as_of_at, snapshot_id, assigned_at,
+                   treatment, assignment_probability, eligibility_definition, eligible_at_assignment,
+                   outcome_horizon_days, outcome_observed, factual_no_order
+            FROM experiment_log
+        """, connection)
+    if (experiment.empty or experiment[SNAPSHOT_KEYS].isna().any().any()
+            or experiment.customer_id.duplicated().any() or experiment.dataset_id.nunique() != 1):
+        raise ValueError("Expected one experiment with one assignment per customer")
+    if (not experiment.assigned_at.eq(experiment.as_of_at).all()
+            or not experiment.eligibility_definition.eq("session start in [as_of_at-28d,as_of_at)").all()
+            or not experiment.outcome_horizon_days.eq(S.OUTCOME_DAYS).all()
+            or not experiment.assignment_probability.eq(0.5).all()):
+        raise ValueError("Expected a 1:1 assignment with 28-day eligibility and outcomes")
+    flags = ["eligible_at_assignment", "outcome_observed", S.TREATMENT]
+    if not experiment[flags].isin([0, 1]).all().all():
+        raise ValueError("Missing or invalid assignment or observation flags")
+    eligible = experiment.loc[experiment.eligible_at_assignment.eq(1)]
+    data = eligible.merge(features, on=SNAPSHOT_KEYS, how="left", validate="one_to_one", indicator=True)
+    if not data["_merge"].eq("both").all():
+        raise ValueError("Missing KIT39 features for an assignment snapshot")
+    observed = data.outcome_observed.eq(1)
+    if not data.loc[observed, "factual_no_order"].isin([0, 1]).all():
+        raise ValueError("Observed outcomes require a binary factual_no_order")
+    data[S.LABEL] = 1 - data.factual_no_order.where(observed)
+    data[S.T0] = pd.to_datetime(data.as_of_at, utc=True)
+    return data[["dataset_id", S.CUSTOMER_ID, S.T0, S.TREATMENT, *S.KIT39, S.LABEL]]

@@ -7,8 +7,10 @@
 3단계: tau(x) = e * tau0(x) + (1 - e) * tau1(x),  e = 배정 확률.
 """
 
-from ..common.base import (BaseUpliftLearner, as_array, fit_outcome_models, make_classifier,
-                           make_regressor)
+from ..common.base import (
+    BaseUpliftLearner, as_array, fit_base_model, fit_outcome_models, make_classifier, make_regressor,
+    purchase_probability,
+)
 
 
 class XLearner(BaseUpliftLearner):
@@ -24,10 +26,10 @@ class XLearner(BaseUpliftLearner):
         self.mu0_, self.mu1_ = fit_outcome_models(X, t, y, self.make_model)
 
         X0, X1 = X[t == 0], X[t == 1]
-        d1 = y[t == 1] - self.mu0_.predict_proba(X1)[:, 1]
-        d0 = self.mu1_.predict_proba(X0)[:, 1] - y[t == 0]
-        self.tau1_ = self.make_effect_model().fit(X1, d1)
-        self.tau0_ = self.make_effect_model().fit(X0, d0)
+        d1 = y[t == 1] - purchase_probability(self.mu0_, X1)
+        d0 = purchase_probability(self.mu1_, X0) - y[t == 0]
+        self.tau1_ = fit_base_model(self.make_effect_model(), X1, d1)
+        self.tau0_ = fit_base_model(self.make_effect_model(), X0, d0)
         return self
 
     def predict(self, X):
@@ -35,5 +37,5 @@ class XLearner(BaseUpliftLearner):
         e = self.propensity_
         tau = e * self.tau0_.predict(A) + (1 - e) * self.tau1_.predict(A)
         # tau는 직접 추정한 값이므로, p0는 mu0로 두고 p1 = p0 + tau로 맞춘다.
-        p0 = self.mu0_.predict_proba(A)[:, 1]
+        p0 = purchase_probability(self.mu0_, A)
         return self._frame(p0, p0 + tau, X)

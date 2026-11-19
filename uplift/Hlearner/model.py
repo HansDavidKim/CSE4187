@@ -19,7 +19,10 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.tree import DecisionTreeRegressor
 
-from ..common.base import BaseUpliftLearner, as_array, fit_outcome_models, make_classifier
+from ..common.base import (
+    BaseUpliftLearner, as_array, fit_outcome_models, make_classifier,
+    purchase_probability,
+)
 
 
 def pseudo_outcome(t, y, mu0, mu1, kind="x", propensity=0.5):
@@ -87,7 +90,7 @@ class HLearner(BaseUpliftLearner):
 
     def _stage1(self, X, t, y, propensity):
         mu0, mu1 = fit_outcome_models(X, t, y, self.make_model)
-        y_phi = pseudo_outcome(t, y, mu0.predict_proba(X)[:, 1], mu1.predict_proba(X)[:, 1],
+        y_phi = pseudo_outcome(t, y, purchase_probability(mu0, X), purchase_probability(mu1, X),
                                self.pseudo, propensity)
         return mu0, mu1, y_phi
 
@@ -99,8 +102,8 @@ class HLearner(BaseUpliftLearner):
         # 검증 기준은 검증 데이터에서 따로 학습한 결과 모델로 만든다.
         # 1단계 모델로 만들면 같은 가상 효과를 맞히는 lam = 1이 항상 유리해진다.
         nu0, nu1 = fit_outcome_models(X[va], t[va], y[va], self.make_model)
-        target = pseudo_outcome(t[va], y[va], nu0.predict_proba(X[va])[:, 1],
-                                nu1.predict_proba(X[va])[:, 1], "x")
+        target = pseudo_outcome(t[va], y[va], purchase_probability(nu0, X[va]),
+                                purchase_probability(nu1, X[va]), "x")
         base = y[tr][t[tr] == 1].mean() - y[tr][t[tr] == 0].mean()  # f1 - f0의 초기값
 
         best = (np.inf, None, None)
@@ -137,5 +140,5 @@ class HLearner(BaseUpliftLearner):
         f0, f1 = self.booster_.predict(A)
         # f0, f1은 차이가 정확하도록 학습된 중간 함수라 각각은 유지 확률의 좋은 추정이
         # 아닐 수 있다(논문 3절). 그래서 p0는 1단계 mu0로 두고 p1 = p0 + (f1 - f0)로 맞춘다.
-        p0 = self.mu0_.predict_proba(A)[:, 1]
+        p0 = purchase_probability(self.mu0_, A)
         return self._frame(p0, p0 + (f1 - f0), X)

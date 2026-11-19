@@ -1,6 +1,9 @@
 """T-learner: 대조군과 처치군의 결과 모델을 따로 학습하고 그 차이를 uplift로 쓴다."""
 
-from ..common.base import BaseUpliftLearner, as_array, fit_outcome_models, make_classifier
+from ..common.base import (
+    BaseUpliftLearner, as_array, fit_outcome_models, make_classifier,
+    purchase_probability,
+)
 
 
 class TLearner(BaseUpliftLearner):
@@ -16,6 +19,6 @@ class TLearner(BaseUpliftLearner):
 
     def predict(self, X):
         A = as_array(X)
-        p0 = self.mu0_.predict_proba(A)[:, 1]
-        p1 = self.mu1_.predict_proba(A)[:, 1]
+        p0 = purchase_probability(self.mu0_, A)
+        p1 = purchase_probability(self.mu1_, A)
         return self._frame(p0, p1, X)

@@ -17,14 +17,19 @@ def qini_curve(score, t, y) -> pd.DataFrame:
     y_t, y_c = np.cumsum(y * t), np.cumsum(y * (1 - t))
     ratio = np.divide(n_t, n_c, out=np.zeros_like(n_t), where=n_c > 0)
     qini = np.concatenate([[0.0], (y_t - y_c * ratio) / t.sum()])
-    x = np.arange(len(y) + 1) / len(y)
+    # 같은 점수의 고객을 한 블록으로 평가해 입력 행 순서가 순위를 만들지 않게 한다.
+    boundaries = np.r_[0, np.flatnonzero(np.diff(score[order])) + 1, len(y)]
+    positions = np.arange(len(y) + 1)
+    qini = np.interp(positions, boundaries, qini[boundaries])
+    x = positions / len(y)
     return pd.DataFrame({"x": x, "qini": qini, "random": x * qini[-1]})
 
 
 def qini_coefficient(score, t, y) -> float:
     """Qini curve와 무작위 기준선 사이의 넓이. 클수록 좋고 0이면 무작위와 같다."""
     c = qini_curve(score, t, y)
-    return float(np.trapezoid(c["qini"] - c["random"], c["x"]))
+    gain = (c["qini"] - c["random"]).to_numpy()
+    return float(np.sum(np.diff(c["x"]) * (gain[:-1] + gain[1:]) / 2))
 
 
 def uplift_by_quantile(score, t, y, q: int = 10) -> pd.DataFrame:

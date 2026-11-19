@@ -6,9 +6,11 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import make_pipeline
 
-# 결측(NaN)을 그대로 처리하는 트리 모델을 쓴다. 대체값·스케일러가 필요 없다.
 _GBM = dict(max_iter=200, learning_rate=0.05, max_leaf_nodes=15, min_samples_leaf=50,
             l2_regularization=1.0, early_stopping=True, random_state=0)
 
@@ -27,9 +29,38 @@ def as_array(X) -> np.ndarray:
     return np.asarray(X, dtype=float)
 
 
+def fit_base_model(model, X, target):
+    """결측 지표와 대체값은 해당 군의 학습 행으로만 결정한다."""
+    if isinstance(model, (HistGradientBoostingClassifier, HistGradientBoostingRegressor)):
+        # 소표본에서는 내부 검증 분할 뒤 특정 KIT 열의 관측값이 하나도 없을 수 있다.
+        model = make_pipeline(SimpleImputer(strategy="median", keep_empty_features=True,
+                                            add_indicator=True), model)
+    return model.fit(X, target)
+
+
 def fit_outcome_models(X, t, y, make_model=make_classifier):
     """대조군·처치군의 결과 모델 mu0, mu1을 각각 학습한다."""
-    return make_model().fit(X[t == 0], y[t == 0]), make_model().fit(X[t == 1], y[t == 1])
+    models = []
+    for arm in (0, 1):
+        selected = t == arm
+        outcomes, counts = np.unique(y[selected], return_counts=True)
+        if len(outcomes) == 0:
+            raise ValueError("학습에 대조군과 처치군 고객이 모두 필요하다")
+        model = make_model()
+        if len(outcomes) == 1:
+            model = DummyClassifier(strategy="prior")
+        elif isinstance(model, HistGradientBoostingClassifier) and (counts.min() < 2 or counts.sum() < 11):
+            # sklearn의 내부 층화 검증 분할을 만들 수 없는 소표본.
+            model.set_params(early_stopping=False)
+        models.append(fit_base_model(model, X[selected], y[selected]))
+    return tuple(models)
+
+
+def purchase_probability(model, X):
+    """처치군에 구매자 또는 미구매자만 있는 소표본도 처리한다."""
+    if isinstance(model, DummyClassifier) and len(model.classes_) == 1:
+        return np.full(len(X), float(model.classes_[0]))
+    return model.predict_proba(X)[:, 1]
 
 
 class BaseUpliftLearner(ABC):

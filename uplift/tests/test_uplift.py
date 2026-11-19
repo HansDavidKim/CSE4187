@@ -217,3 +217,30 @@ def test_qini_perfect_beats_random():
     assert abs(qini_coefficient(rng.random(n), t, y)) < 0.02
     curve = qini_curve(tau, t, y)
     assert curve["qini"].iloc[-1] == pytest.approx(y[t == 1].mean() - y[t == 0].mean() * 1.0, abs=1e-9)
+
+
+def test_simulator_sqlite_cohort(tmp_path):
+    from uplift.common.simulator import load_feature_dataset
+
+    keys = pd.DataFrame({"customer_id": list("ABCD"), "snapshot_id": list("abcd"),
+                         "dataset_id": "run", "as_of_at": T0.isoformat()})
+    features = keys.assign(**{name: [1, 2, None, 4] for name in S.KIT39})
+    experiment = keys.assign(
+        assigned_at=T0.isoformat(), assignment_probability=0.5, treatment=[0, 1, 0, 1],
+        eligibility_definition="session start in [as_of_at-28d,as_of_at)",
+        eligible_at_assignment=[1, 1, 1, 0], outcome_horizon_days=28,
+        outcome_observed=[1, 1, 0, 1], factual_no_order=[0, 1, None, 1],
+    )
+    registry = pd.DataFrame({"ordinal": range(1, 40), "feature_name": S.KIT39,
+                             "feature_set_version": "kit39-review-cart-v3"})
+    with sqlite3.connect(tmp_path / "features.sqlite") as conn:
+        features.iloc[::-1].to_sql("features", conn, index=False)
+        registry.to_sql("feature_registry", conn, index=False)
+        experiment.to_sql("experiment_log", conn, index=False)
+    conn.close()
+
+    data = load_feature_dataset(tmp_path).set_index("customer_id").sort_index()
+    assert data.index.tolist() == list("ABC")
+    assert data.y.iloc[:2].tolist() == [1, 0] and pd.isna(data.y.iloc[2])
+    assert data[S.TREATMENT].tolist() == [0, 1, 0]
+    assert data.loc["B", S.FEATURES].eq(2).all() and data.loc["C", S.FEATURES].isna().all()

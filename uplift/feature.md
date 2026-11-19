@@ -4,9 +4,9 @@
 
 ## 1. 학습 데이터 기준
 
-- **입력:** 시뮬레이터의 원시 로그(업무 테이블 7개, `docs/simulator_ERD.md`)와 고객별 배정
-    - v3 때의 주간 합계 대신 원시 로그에서 직접 계산한다. 주간 합계로는 KIT39의 세션·상품·리뷰 단위 Feature를 만들 수 없다
-    - 읽기와 변환은 `uplift/common/raw.py`, `uplift/common/features.py` 한 곳에 두고 T/X/H-learner가 함께 쓴다
+- 시뮬레이터의 `features.sqlite`에서 배정 직전 KIT39와 같은 스냅샷의 실험 기록을 읽는다.
+    - 저장소 공용 `common/simulator_features.py`가 `feature_registry`의 등록 순서와 버전을 확인하고 SQLite에서 피처를 조회한다.
+    - `uplift/common/simulator.py`가 적격 고객의 피처와 실험 배정·정답을 연결한다. 세 모델이 같은 입력을 사용한다.
 - **기준 시각 `t0`:** 배정·발송 시각. 현지(Asia/Seoul) 월요일 00시, 저장은 UTC
 - **실험 조건 (시뮬레이터 v5):**
     - 대상: `[t0 − 28일, t0)`에 세션을 시작한 적격 고객. 배정 이후 활동이 없는 고객도 포함
@@ -80,11 +80,11 @@
 | F26 | `coupon_redemption_recency_days` | 마지막 쿠폰 사용 구매부터 경과 일수 |
 | F27 | `coupon_discount_amount_30d` | W30 쿠폰 사용 주문의 할인액 합 |
 
-- 기본 정책은 실험 전 쿠폰을 만들지 않아 전 고객이 0 / NULL / 0이다. 과거 쿠폰 이력이 있는 시나리오에서만 입력에 넣는다(`schema.FEATURES`)
+- 기본 정책은 실험 전 쿠폰을 만들지 않아 전 고객이 0 / NULL / 0이다. 학습용 스냅샷에 보관하고 세 모델은 나머지 36개(`schema.FEATURES`)를 사용한다
 
 ### 2.3 관측 범위에 따른 NULL
 
-관측 시작(`observation_start_at`)이 가입보다 늦은 자료에서만 해당한다.
+창별 관측 범위에 따라 시뮬레이터가 기록한 NULL을 그대로 읽는다.
 
 | 대상 | 관측돼야 하는 구간 |
 | --- | --- |
@@ -106,13 +106,10 @@
 - **uplift:** `쿠폰 발송 시 유지 확률 − 미발송 시 유지 확률`
 - **T:** 배정군 그대로(ITT). 쿠폰 사용 여부로 다시 나누지 않는다
 
-| 파일 (실행 디렉터리) | 읽는 내용 |
+| SQLite 테이블 | 읽는 내용 |
 | --- | --- |
-| `raw.sqlite` | 업무 테이블 7개 전체 기간 |
-| `raw.manifest.json` | `observation_start_at`, `observation_end_at`, `dataset_id`, seed, SQLite 체크섬 |
-| `treatments.parquet` | `customer_id`, `as_of_at`(= `t0`), `treatment`, `assignment_probability` |
-| `evaluation_only/` (평가 때만) | 쌍대 rollout, 잠재 진단 |
+| `feature_registry` | KIT39 v3 컬럼과 순서 |
+| `features` | 배정 직전의 39개 값, 고객·UTC 기준시각·스냅샷·데이터셋 ID |
+| `experiment_log` | 동일 스냅샷의 적격성, 배정군·배정 확률, 28일 성과 관측 여부와 실제 미주문 여부 |
 
-## 4. 확인이 필요한 사항
-
-시뮬레이터 담당자에게 물을 내용은 `plan.md` 2절에 정리했다.
+원시 로그 입력을 사용하는 기존 실행에서는 `raw.sqlite`, `raw.manifest.json`, `treatments.parquet`를 읽어 같은 데이터셋을 구성한다. 열별 NULL과 관측된 횟수 0은 데이터셋에 각각 보존한다. 기본 히스토그램 부스팅 모델은 각 군의 학습 자료에서 중앙값과 결측 지표를 구성하고, 관측값이 전혀 없는 열도 처리한다.
