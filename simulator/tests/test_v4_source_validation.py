@@ -84,6 +84,59 @@ def test_exact_sidecars_use_raw_future_half_open_windows_and_money(records):
     assert "start_at" not in metadata
 
 
+@pytest.mark.parametrize("eligibility_days", [28, 30])
+@pytest.mark.parametrize("seconds_short", [0, 1])
+def test_minimum_customer_history_checks_first_shopping_event_for_both_arms(records, seconds_short, eligibility_days):
+    tables, metadata, labels, treatments = records
+    metadata.update(min_customer_history_days=30, eligibility_window_days=eligibility_days)
+    labels["definition_id"] = f"future_no_session_30d_active{eligibility_days}d"
+    cutoff = pd.Timestamp(metadata["as_of_at"]) - pd.Timedelta(days=30)
+    tables["events"]["event_id"] += 2
+    tables["orders"]["purchase_event_id"] += 2
+    for event_id, customer_id in enumerate(("u1", "u2"), start=1):
+        when = cutoff + pd.Timedelta(seconds=seconds_short if customer_id == "u2" else 0)
+        session_id = f"first-{customer_id}"
+        tables["sessions"] = pd.concat([tables["sessions"], pd.DataFrame([
+            dict(session_id=session_id, customer_id=customer_id, started_at=when, ended_at=when)
+        ])], ignore_index=True)
+        first = dict.fromkeys(RAW_COLUMNS["events"])
+        first.update(event_id=event_id, customer_id=customer_id, session_id=session_id,
+                     event_at=when, event_type="view", product_id="A", unit_price_minor=5)
+        tables["events"] = pd.DataFrame([*tables["events"].to_dict("records"), first], columns=RAW_COLUMNS["events"])
+    validate_raw_dataset(tables, metadata)
+    report = audit.audit_sidecars(tables, metadata, labels, treatments)
+    assert report["passed"] == (seconds_short == 0)
+    assert report["mismatch_counts"]["minimum_customer_history"] == int(seconds_short > 0)
+    assert report["windows"][0]["eligible"] == 2 - int(seconds_short > 0)
+    assert report["windows"][0]["min_customer_history_days"] == 30
+    assert report["windows"][0]["eligibility_window_days"] == eligibility_days
+
+
+def test_minimum_customer_history_requires_past_records_even_with_old_signup_and_sessions(records):
+    tables, metadata, labels, treatments = records
+    metadata["min_customer_history_days"] = 1
+    # u2 has an old signup and a past session, but its only shopping event is after assignment.
+    future = dict.fromkeys(RAW_COLUMNS["events"])
+    future.update(event_id=5, customer_id="u2", session_id="boundary", event_type="view",
+                  event_at=pd.Timestamp(metadata["as_of_at"]) + pd.Timedelta(days=30),
+                  product_id="A", unit_price_minor=5)
+    tables["events"] = pd.DataFrame([*tables["events"].to_dict("records"), future], columns=RAW_COLUMNS["events"])
+    validate_raw_dataset(tables, metadata)
+    report = audit.audit_sidecars(tables, metadata, labels, treatments)
+    assert report["mismatch_counts"]["minimum_customer_history"] == 2
+    assert report["windows"][0]["eligible"] == 0
+    metadata["min_customer_history_days"] = 0
+    assert audit.audit_sidecars(tables, metadata, labels, treatments)["passed"]
+
+
+@pytest.mark.parametrize("days", [-1, 1.5, True, False, None, "30", float("nan"), float("inf"), 61, 10**100])
+def test_minimum_customer_history_rejects_invalid_or_impossible_metadata(records, days):
+    tables, metadata, labels, treatments = records
+    metadata["min_customer_history_days"] = days
+    with pytest.raises(ValueError, match="min_customer_history_days"):
+        audit.audit_sidecars(tables, metadata, labels, treatments)
+
+
 @pytest.mark.parametrize("mutation,field", [("label","churn_label"),("revenue","future_revenue_30d"),
     ("probability","assignment_probability"),("assignment_time","assignment_time"),("sent","actual_sent"),
     ("coupon_reference","treated_coupon_reference"),("definition","definition_id"),("censor","is_censored")])

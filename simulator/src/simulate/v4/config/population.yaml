@@ -6,6 +6,7 @@ churn:
   definition: no_visit
   inactive_days: 28
 source_simulation:
+  min_customer_history_days: 0
   outcome_days: 28
   eligibility_window_days: 28
   coupon_validity_days: 28

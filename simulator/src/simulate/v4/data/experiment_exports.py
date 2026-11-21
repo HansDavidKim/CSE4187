@@ -75,10 +75,15 @@ def export_tables(tables, metadata, output, evaluation_output, repetitions=32):
         raise ValueError("repetitions must be a positive integer")
     days, eligibility_days = _horizon(tables, metadata)
     coupon_days = experiment_window_days(metadata, "coupon_validity_days")
+    history_days = metadata.get("min_customer_history_days", 0)
+    if isinstance(history_days, bool) or not isinstance(history_days, numbers.Integral) or history_days < 0:
+        raise ValueError("metadata.min_customer_history_days must be a nonnegative integer")
     fingerprint = {key: metadata.get(key) for key in (
         "dataset_id", "seed", "definition_id", "model_sha256", "return_model_sha256", "simulator_code_sha256",
         "raw_database_sha256", "source_raw_database_sha256", "simulator_version", "policy_id",
         "observation_start_at", "observation_end_at", "as_of_at", "currency", "amount_unit")}
+    if history_days:
+        fingerprint["min_customer_history_days"] = int(history_days)
     fingerprint["sidecar_sha256"] = {
         name: hashlib.sha256(pd.util.hash_pandas_object(tables[name], index=True).to_numpy().tobytes()).hexdigest()
         for name in ("labels", "treatments", "diagnostics")}
