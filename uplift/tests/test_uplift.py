@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from uplift.common import schema as S
-from uplift.common.evaluate import qini_coefficient, qini_curve
+from uplift.common.evaluate import purchase_roc_auc, qini_area, qini_coefficient, qini_curve, qini_decile_curve
 from uplift.common.features import _replay_cart, build_dataset, build_features, build_labels
 from uplift.common.raw import RawData, load_raw, normalize_tables
 from uplift.common.synthetic import make_synthetic
@@ -17,6 +17,13 @@ from uplift.Xlearner import XLearner
 
 T0 = pd.Timestamp("2026-06-01 00:00", tz="Asia/Seoul").tz_convert("UTC")  # 월요일 00시
 ago = lambda days, minutes=0: T0 - pd.Timedelta(days=days) + pd.Timedelta(minutes=minutes)
+
+
+def test_purchase_roc_auc_uses_the_assigned_arm():
+    pred = pd.DataFrame({"p0": [0.1, 0.9, 0.8, 0.2], "p1": [0.9, 0.1, 0.2, 0.8]})
+    treatment = [0, 1, 0, 1]
+    assert purchase_roc_auc(pred, treatment, [0, 0, 1, 1]) == 1.0
+    assert np.isnan(purchase_roc_auc(pred, treatment, [0, 0, 0, 0]))
 
 
 @pytest.fixture(scope="module")
@@ -217,6 +224,20 @@ def test_qini_perfect_beats_random():
     assert abs(qini_coefficient(rng.random(n), t, y)) < 0.02
     curve = qini_curve(tau, t, y)
     assert curve["qini"].iloc[-1] == pytest.approx(y[t == 1].mean() - y[t == 0].mean() * 1.0, abs=1e-9)
+
+
+def test_decile_qini_compares_equal_fractions_of_each_arm():
+    score = np.arange(30, 0, -1)
+    t = np.r_[np.ones(10), np.zeros(20)]
+    y = np.zeros(30)
+    y[[0, -1]] = 1
+    curve = qini_decile_curve(score, t, y)
+    assert curve["qini"].iloc[1] == pytest.approx(0.10)
+    assert curve["qini"].iloc[-1] == pytest.approx(0.05)
+    assert qini_area(curve) == pytest.approx(0.0675)
+
+    tied = qini_decile_curve(np.ones(30), t, y)
+    np.testing.assert_allclose(tied["qini"], tied["random"], atol=1e-15)
 
 
 def test_simulator_sqlite_cohort(tmp_path):

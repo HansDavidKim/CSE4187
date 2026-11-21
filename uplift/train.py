@@ -8,7 +8,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 from .common import schema as S
-from .common.evaluate import against_truth, ate, qini_coefficient, qini_curve
+from .common.evaluate import against_truth, ate, purchase_roc_auc, qini_area, qini_curve, qini_decile_curve
 from .common.features import build_dataset
 from .common.raw import load_raw
 from .common.simulator import load_feature_dataset
@@ -65,17 +65,22 @@ def train_and_export(data, out, seed, truth=None):
     keys["split"] = "unobserved"
     keys.loc[train.index, "split"] = "train"
     keys.loc[test.index, "split"] = "test"
-    rows, curves, predictions = [], [], []
+    rows, curves, decile_curves, predictions = [], [], [], []
     for key, cls in LEARNERS.items():
         model = cls().fit(train[S.FEATURES], train[S.TREATMENT], train[S.LABEL])
         model.save(out / f"{key}.pkl")
         pred = model.predict(data[S.FEATURES])
         predictions.append(keys.join(pred).assign(model=model.name, model_version=MODEL_VERSION,
                                                   segment=response_segment(pred)))
-        score = pred.loc[test.index, "uplift_score"]
-        curves.append(qini_curve(score, test[S.TREATMENT], test[S.LABEL]).assign(model=model.name))
+        test_pred = pred.loc[test.index]
+        score = test_pred["uplift_score"]
+        curve = qini_curve(score, test[S.TREATMENT], test[S.LABEL])
+        decile_curve = qini_decile_curve(score, test[S.TREATMENT], test[S.LABEL])
+        curves.append(curve.assign(model=model.name))
+        decile_curves.append(decile_curve.assign(model=model.name))
         row = {"model": model.name, "n_test": len(test), "ate": test_ate,
-               "qini": qini_coefficient(score, test[S.TREATMENT], test[S.LABEL]),
+               "qini": qini_area(curve), "qini_decile": qini_area(decile_curve),
+               "roc_auc": purchase_roc_auc(test_pred, test[S.TREATMENT], test[S.LABEL]),
                "mean_uplift": score.mean()}
         if truth is not None:
             row.update(against_truth(score, truth.loc[test[S.CUSTOMER_ID]]))
@@ -85,6 +90,7 @@ def train_and_export(data, out, seed, truth=None):
 
     pd.concat(predictions).to_csv(out / "uplift_predictions.csv", index=False)
     pd.concat(curves).to_csv(out / "qini_curve.csv", index=False)
+    pd.concat(decile_curves).to_csv(out / "qini_decile_curve.csv", index=False)
     result = pd.DataFrame(rows)
     result.to_csv(out / "evaluation.csv", index=False)
     return result

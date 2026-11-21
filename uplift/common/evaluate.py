@@ -2,6 +2,15 @@
 
 import numpy as np
 import pandas as pd
+from sklearn.metrics import roc_auc_score
+
+
+def purchase_roc_auc(pred, t, y) -> float:
+    """실제 배정군의 구매 확률을 28일 관측 구매 여부와 비교한다."""
+    if np.unique(y).size < 2:
+        return np.nan
+    score = np.where(np.asarray(t) == 1, pred["p1"], pred["p0"])
+    return float(roc_auc_score(y, score))
 
 
 def qini_curve(score, t, y) -> pd.DataFrame:
@@ -27,9 +36,32 @@ def qini_curve(score, t, y) -> pd.DataFrame:
 
 def qini_coefficient(score, t, y) -> float:
     """Qini curve와 무작위 기준선 사이의 넓이. 클수록 좋고 0이면 무작위와 같다."""
-    c = qini_curve(score, t, y)
-    gain = (c["qini"] - c["random"]).to_numpy()
-    return float(np.sum(np.diff(c["x"]) * (gain[:-1] + gain[1:]) / 2))
+    return qini_area(qini_curve(score, t, y))
+
+
+def qini_decile_curve(score, t, y) -> pd.DataFrame:
+    """Gubela 외 §5–6의 방식으로 두 군의 같은 상위 비율에서 누적 구매율을 비교한다."""
+    score, t, y = (np.asarray(a, dtype=float) for a in (score, t, y))
+    x = np.linspace(0, 1, 11)
+    cumulative_rates = []
+    for arm in (1, 0):
+        arm_scores = score[t == arm]
+        n_arm = arm_scores.size
+        if n_arm == 0:
+            raise ValueError("Decile Qini requires treatment and control observations")
+        order = np.argsort(-arm_scores, kind="stable")
+        purchases = np.r_[0.0, np.cumsum(y[t == arm][order])]
+        # 분위 경계가 동점 구간을 가르면 구간 전체의 평균 구매율을 적용한다.
+        boundaries = np.r_[0, np.flatnonzero(np.diff(arm_scores[order])) + 1, n_arm]
+        cumulative_rates.append(np.interp(x * n_arm, boundaries, purchases[boundaries]) / n_arm)
+    qini = cumulative_rates[0] - cumulative_rates[1]
+    return pd.DataFrame({"x": x, "qini": qini, "random": x * qini[-1]})
+
+
+def qini_area(curve: pd.DataFrame) -> float:
+    """곡선과 무작위 기준선 사이의 부호 있는 면적."""
+    gain = (curve["qini"] - curve["random"]).to_numpy()
+    return float(np.sum(np.diff(curve["x"]) * (gain[:-1] + gain[1:]) / 2))
 
 
 def uplift_by_quantile(score, t, y, q: int = 10) -> pd.DataFrame:
