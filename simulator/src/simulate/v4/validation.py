@@ -295,6 +295,9 @@ def audit_sidecars(tables, metadata, labels, treatments, lifecycle=None, diagnos
     definition, outcome_days = _outcome_contract(metadata)
     eligible_days = experiment_window_days(metadata, "eligibility_window_days")
     coupon_days = experiment_window_days(metadata, "coupon_validity_days")
+    min_history_days = metadata.get("min_customer_history_days", 0)
+    if isinstance(min_history_days, bool) or not isinstance(min_history_days, (int, np.integer)) or min_history_days < 0:
+        raise ValueError("min_customer_history_days must be a nonnegative integer")
     required_labels = {"customer_id", "churn", "retained", "future_retained", "future_revenue_30d",
                        "future_revenue_12m", "as_of_at", "outcome_end_at", "is_censored", "definition_id"}
     required_assignments = {"customer_id", "treatment", "as_of_at", "assigned_at", "assignment_probability",
@@ -334,6 +337,14 @@ def audit_sidecars(tables, metadata, labels, treatments, lifecycle=None, diagnos
         history = sessions.loc[sessions.started_at.ge(t0 - pd.Timedelta(days=eligible_days)) & sessions.started_at.lt(t0)]
         eligible = group.customer_id.isin(history.customer_id)
         mismatches[f"not_eligible_active{eligible_days}d"] += int((~eligible).sum())
+        if min_history_days:
+            if min_history_days > (t0 - observation_start).total_seconds() / 86400:
+                raise ValueError("min_customer_history_days exceeds the available pre-coupon observation period")
+            first_events = events.loc[events.event_at.lt(t0) & events.event_type.isin(
+                ["view", "cart", "remove_from_cart", "purchase"])].groupby("customer_id").event_at.min()
+            enough_history = group.customer_id.map(first_events).le(t0 - pd.Timedelta(days=int(min_history_days)))
+            mismatches["minimum_customer_history"] += int((~enough_history).sum())
+            eligible &= enough_history
         mismatches["signup_at_or_after_snapshot"] += int(group.customer_id.map(signups).ge(t0).sum())
         future = sessions.loc[sessions.started_at.ge(t0) & sessions.started_at.lt(until)]
         retained = group.customer_id.isin(future.customer_id).astype(int)
@@ -399,6 +410,7 @@ def audit_sidecars(tables, metadata, labels, treatments, lifecycle=None, diagnos
                                "definition_id": definition, "outcome_window_days": outcome_days,
                                "generation_window_days": GENERATION_WINDOW_DAYS, "eligibility_window_days": eligible_days,
                                "coupon_validity_days": coupon_days,
+                               "min_customer_history_days": int(min_history_days),
                                "customers": len(group), "eligible": int(eligible.sum()), "ITT_arm_counts": arm_counts,
                                "recomputed_churn_rate": float((1 - retained).mean()),
                                "recomputed_churn_by_arm": {str(int(arm)): float((1 - retained.loc[part.index]).mean())
