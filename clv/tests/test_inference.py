@@ -242,6 +242,8 @@ def test_strategy_records_unverified_provenance_and_week_mismatch(bundle, other_
     assert result.producer_metadata["inference_code"]["clv_version"]
     with pytest.raises(ValueError, match="Seoul Monday of as_of_at"):
         predict_for_strategy(population.assign(reference_week="2024-01-01"), *args)
+    as_stamp = predict_for_strategy(population.assign(reference_week=pd.Timestamp("2024-10-07", tz="Asia/Seoul")), *args)
+    assert as_stamp.frame["reference_week"].eq("2024-10-07").all()  # 시각으로 받아도 날짜 문자열로 통일
 
 
 def test_same_seed_in_another_dataset_is_flagged(bundle, other_dataset):

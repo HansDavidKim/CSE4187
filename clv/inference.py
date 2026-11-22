@@ -156,6 +156,8 @@ def load_population(features, verify_checksum: bool = True) -> pd.DataFrame:
     if not weeks.eq(expected).all():
         bad = frame.loc[~weeks.eq(expected), ["customer_id", "reference_week"]].head(3).to_dict("records")
         raise ValueError(f"reference_week must be the Asia/Seoul Monday of as_of_at; e.g. {bad}")
+    # 날짜 문자열(YYYY-MM-DD)로 통일한다. 서울 월요일 시각으로 받아도 같은 값이 된다.
+    frame["reference_week"] = weeks.astype(object)
     for name in ("dataset_id", "raw_database_sha256", "currency", "amount_unit"):
         if frame[name].nunique() != 1:
             raise ValueError(f"one batch must come from one dataset; found several {name} values")
