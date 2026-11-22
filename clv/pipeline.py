@@ -3,6 +3,7 @@
 ``output_dir``(기본 ``results/clv``) 아래 산출물::
 
     registry.json            기준시점, 계약, 설정, 모델 상태, 최종 모델
+    model_card.json          모델 버전, 코드·라이브러리 버전, 학습 데이터 출처, 파일 체크섬(``bundle``)
     splits.csv               customer_id -> train/validation/test, 이력 완전 여부, 학습 대상 여부
     models/                  baseline.json, bgnbd_gg.json, xgboost/{xgboost_model,xgboost_meta}.json,
                              xgboost_two_part/{classifier,regressor,two_part_meta}.json
@@ -20,16 +21,17 @@ import pandas as pd
 from . import __version__
 from .adapter import adapt_orders, adapt_weekly, load_orders, load_weekly
 from .baseline import BaselineModel
+from .bundle import write_model_card
 from .config import CLVConfig
 from .dataset import SPLITS, build_dataset, complete_grid, find_eligible_cutoffs, labeled_rows, select_cutoff, split_customers
 from .evaluation import (
-    decile_table, evaluate_by_history, evaluate_predictions, ranks, regression_metrics, top_flags, top_n_table,
+    decile_table, evaluate_by_history, evaluate_predictions, regression_metrics, top_n_table,
 )
-from .features import WEEK, build_features, fully_observed, to_cutoff
+from .features import WEEK, fully_observed, to_cutoff
 from .io import read_json, write_json
 from .probabilistic import MAX_NUMERICAL_FAILURE_SHARE, ProbabilisticCLV
 from .schema import (
-    HIGH_VALUE_COLUMN, INPUT_WEEKS, LABEL_COLUMN, LABEL_WEEKS, OUTPUT_COLUMNS, PREDICTION_COLUMN, PREDICTOR_FEATURES,
+    HIGH_VALUE_COLUMN, INPUT_WEEKS, LABEL_COLUMN, LABEL_WEEKS, OUTPUT_COLUMNS, PREDICTOR_FEATURES,
 )
 from .validation import reconcile_orders_with_weekly, validate_orders, validate_weekly
 from .xgboost_model import TwoPartXGBoostCLV, XGBoostCLV, classification_metrics, xgboost_status
@@ -71,7 +73,7 @@ def prepare_inputs(weekly, orders=None, *, currency=None, amount_unit=None, stri
     elif isinstance(weekly, pd.DataFrame):
         panel = adapt_weekly(weekly, **units)
     else:
-        panel = load_weekly(weekly, **units)
+        panel = load_weekly(weekly, verify_checksum=verify_checksum, **units)
     # 행이 없는 고객-주는 0이 아니라 미관측 주로 채운다.
     panel = complete_grid(panel)
     reports = [validate_weekly(panel)]
@@ -82,6 +84,10 @@ def prepare_inputs(weekly, orders=None, *, currency=None, amount_unit=None, stri
                 else adapt_orders(orders, **units)
         else:
             orders = load_orders(orders, verify_checksum=verify_checksum, **units)
+        # 주간 패널(features manifest)과 원장이 서로 다른 raw SQLite에서 나왔으면 섞어 쓰지 않는다.
+        sources = {panel.attrs.get("raw_database_sha256"), orders.attrs.get("raw_database_sha256")} - {None}
+        if len(sources) > 1:
+            raise ValueError("weekly panel and order ledger come from different raw databases")
         reports += [validate_orders(orders), reconcile_orders_with_weekly(panel, orders)]
     if strict:
         for report in reports:
@@ -339,9 +345,10 @@ def train(weekly, orders=None, output_dir: str | Path = "results/clv", config: C
         "reference_week": t0.isoformat(), "horizon_weeks": LABEL_WEEKS, "input_weeks": INPUT_WEEKS,
         "contract": CONTRACT, "config": config.to_dict(), "predictors": list(PREDICTOR_FEATURES),
         "provenance": {name: panel.attrs.get(name) for name in ("dataset_id", "currency", "amount_unit", "path",
-                                                                 "source_format", "coverage_source")},
+                                                                 "source_format", "coverage_source", "weekly_sha256",
+                                                                 "raw_database_sha256", "seed")},
         "ledger": None if orders is None else {name: orders.attrs.get(name) for name in (
-            "path", "raw_database_sha256", "observation_start_at", "observation_end_at")},
+            "path", "raw_database_sha256", "observation_start_at", "observation_end_at", "source_metadata")},
         "dataset": summary, "split_counts": _split_counts(labelled), "split_counts_all_labelled": _split_counts(everyone),
         "training_population": ("customers with a complete 13-week history" if config.require_complete_history
                                 else "all labelled customers"),
@@ -354,6 +361,8 @@ def train(weekly, orders=None, output_dir: str | Path = "results/clv", config: C
         "warnings": [warning for report in reports for warning in report.warnings] + model_warnings,
     }
     write_json(output / "registry.json", registry)
+    # 모델 카드는 registry·분할·모델 파일의 체크섬을 담으므로 모든 파일을 쓴 뒤 만든다.
+    write_model_card(output, registry)
     return registry
 
 
@@ -416,43 +425,15 @@ def evaluate(weekly, orders=None, model_dir: str | Path = "results/clv", cutoff=
 
 
 def predict(weekly, orders=None, model_dir: str | Path = "results/clv", reference_week=None, model: str | None = None,
-            strict: bool = True, **input_options) -> pd.DataFrame:
-    """``reference_week`` 이전 이력이 있는 모든 고객의 52주 CLV를 예측한다.
+            strict: bool = True, customers=None, **input_options) -> pd.DataFrame:
+    """``reference_week`` 이전 이력이 있는 고객의 52주 CLV를 예측한다(``CLVModel.predict``와 같다).
 
-    정답은 필요 없다. 13주 이력이 일부만 있는 고객도 예측하되 ``history_complete=False``로
-    표시한다(``require_complete_history=True``로 학습한 모델이면 완전 이력 고객만 학습에 썼다).
+    정답은 필요 없다. 13주 이력이 일부만 있는 고객도 예측하되 ``history_complete=False``로 표시한다.
     """
-    model_dir = Path(model_dir)
-    registry = read_json(model_dir / "registry.json")
-    config = CLVConfig.from_dict(registry["config"])
-    name = model or registry["final_model"]
-    if name not in registry["trained_models"]:
-        raise ValueError(f"model {name} was not trained: {registry['model_status'].get(name)}")
-    panel, orders, _ = prepare_inputs(weekly, orders, strict=strict, **input_options)
-    _check_units(panel, registry)
-    t0 = to_cutoff(reference_week) if reference_week is not None else default_reference_week(panel)
-    # 예측 변수만 만든다. t0 이후 52주 정답 구간이 데이터에 없어도 된다.
-    features = build_features(panel, t0).reset_index()
-    if features.empty:
-        raise ValueError(f"no customer has observed history before {t0.isoformat()}")
-    loaded = _models_for(model_dir, [name])[name]
-    values = _score(loaded, features, orders, t0)
-    # 상위 20% 표시(ceil)와 순위는 동점일 때 customer_id 오름차순으로 정한다.
-    result = pd.DataFrame({
-        "customer_id": features["customer_id"], "reference_week": t0.isoformat(), PREDICTION_COLUMN: values,
-        HIGH_VALUE_COLUMN: top_flags(values, features["customer_id"], config.top_fraction),
-        "clv_rank": ranks(values, features["customer_id"]), "model_name": name, "horizon_weeks": LABEL_WEEKS,
-        "history_complete": features["feature_window_complete"].to_numpy(),
-        "history_weeks_13w": features["history_weeks_13w"].to_numpy(),
-        "currency": panel.attrs.get("currency"), "amount_unit": panel.attrs.get("amount_unit"),
-        "dataset_id": panel.attrs.get("dataset_id"),
-    })
-    # 두 파트 모델이면 구매 확률과 구매 시 기대 결제액도 보조 열로 붙인다.
-    if hasattr(loaded, "predict_parts"):
-        components = loaded.predict_parts(features)
-        for column in ("purchase_probability_52w", "expected_amount_if_purchase"):
-            result[column] = components[column].to_numpy(dtype=float)
-    return result.sort_values("clv_rank", kind="mergesort").reset_index(drop=True)
+    from .inference import CLVModel  # inference가 pipeline을 import하므로 여기서 불러온다.
+
+    return CLVModel(model_dir, model).predict(weekly, orders, reference_week=reference_week, customers=customers,
+                                              strict=strict, **input_options)
 
 
 def write_predictions(predictions: pd.DataFrame, path: str | Path = "results/clv_predictions.csv") -> Path:

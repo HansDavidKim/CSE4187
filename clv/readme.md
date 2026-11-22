@@ -5,6 +5,10 @@
 최종 결과는 `results/clv_predictions.csv`와 Python API(`clv.api`)로 전략·예산 모듈에 넘긴다.
 PyTorch는 쓰지 않는다.
 
+> **다른 모듈 담당자는 [api.md](api.md)부터 본다.** 학습된 번들(`artifacts/`), 전략 모듈 입력 batch를 만드는
+> `predict_for_strategy`, 버전·입력 데이터 정보, 학습 고객 중복 규칙이 정리돼 있다.
+> 예측 기간은 52주(364일)이고, `predicted_clv_12m`은 호환을 위해 유지하는 열 이름이다(달력 12개월 아님).
+
 ## 구성 (WBS)
 
 | WBS | 내용 | 파일 |
@@ -15,7 +19,7 @@ PyTorch는 쓰지 않는다.
 | 4.4 | 평균 Baseline, BG/NBD + Gamma-Gamma(주문 원장 기반, scipy 최우추정) | `baseline.py`, `probabilistic.py` |
 | 4.5 | XGBoost 회귀, 두 파트 XGBoost(구매 확률 × 구매 시 결제액), Validation 그리드 선택, seed 고정, 저장·재로딩 | `xgboost_model.py` |
 | 4.6 | MAE·RMSE·편향·분포·Top-N·10분위·상위 20% 일치율 | `evaluation.py` |
-| 4.7 | 학습/평가/추론 분리, CSV 출력, 외부 API, CLI | `pipeline.py`, `api.py`, `cli.py` |
+| 4.7 | 학습/평가/추론 분리, CSV 출력, 외부 API, CLI, 모델 카드·체크섬, 전략 모듈 입력 batch | `pipeline.py`, `api.py`, `cli.py`, `bundle.py`, `inference.py` |
 
 설정은 `config.py`(`CLVConfig`), JSON 출력은 `io.py`, 테스트는 `tests/`.
 
@@ -43,6 +47,9 @@ python -m clv evaluate --weekly artifacts/features --ledger artifacts/small/raw.
 python -m clv predict  --weekly artifacts/features --ledger artifacts/small/raw.sqlite --model-dir results/clv \
                        --output results/clv_predictions.csv [--reference-week 2025-01-06] [--model xgboost]
 python -m clv run      --weekly ... --ledger ...                        # train + evaluate + predict
+python -m clv info     --model-dir results/clv                          # 모델 버전·학습 데이터·코드 버전
+python -m clv strategy --features <평가용 features 디렉터리> --ledger <평가용 dataset> --model-dir results/clv \
+                       --output results/clv_strategy_predictions.parquet # 전략 모듈 입력 batch(api.md 참고)
 ```
 
 `train --cutoff`로 학습 기준시점을, `--config`로 JSON/YAML 설정(`clv:` 섹션 허용)을 지정한다.
@@ -139,13 +146,14 @@ Treatment/Control별 지표와 Baseline 대비 MAE·RMSE 비율(`vs_baseline`, 1
 | `reference_week` | 예측 기준시점 t0 (ISO, +09:00) |
 | `predicted_clv_12m` | 향후 52주 예상 실결제금액(원천 최소 단위) |
 | `is_high_value_customer` | 예측 상위 20% 여부. **CLV 내부 이름이며 팀 합의 필요** |
-| `clv_rank`, `model_name`, `horizon_weeks`, `history_complete`, `history_weeks_13w`, `currency`, `amount_unit`, `dataset_id` | 보조 |
+| `clv_rank`, `model_name`, `model_version`, `horizon_weeks`, `prediction_end_at`, `history_complete`, `history_weeks_13w`, `currency`, `amount_unit`, `dataset_id` | 보조 |
 
 상위 20%는 `ceil(0.2·N)`명이고, 동점은 `customer_id` 오름차순으로 정한다. 예측에는 정답이 필요 없다.
 13주 이력이 부족한 고객도 예측하되 `history_complete=False`로 표시한다. 기본 설정은 이런 고객도 학습에 포함한다.
 기본 예측 시점은 패널의 실험 `as_of_at`이 하나일 때 그 값, 아니면 마지막 완전 관측 주의 다음 월요일이다.
 
-학습 산출물(`results/clv/`): `registry.json`(기준시점·계약·설정·모델 상태·최종 모델·지표·경고),
+학습 산출물(`results/clv/`): `model_card.json`(모델 버전·코드·라이브러리 버전·학습 데이터 출처·파일 체크섬),
+`registry.json`(기준시점·계약·설정·모델 상태·최종 모델·지표·경고),
 `splits.csv`(분할, `history_complete`, `training_population`), `models/`(baseline.json, bgnbd_gg.json, xgboost/, xgboost_two_part/),
 `reports/`(validation.json, eligible_cutoffs.csv, evaluation.json, bgnbd_sensitivity.csv, deciles_test.csv,
 top20_test.csv, labelled_predictions.csv).
@@ -161,17 +169,7 @@ python -m pytest clv/tests -q
 외부 자산 불필요)으로 60명·24개월을 생성해 엔진 → `raw.sqlite` → `features` → CLV 전 과정을 실행한다.
 표본이 작아 출력 형식·금액·관측 계약만 검증하며, 모델 성능의 근거가 아니다.
 
-실데이터 실행 예(5,000명·24개월, seed 42):
-
-```bash
-cd simulator
-PYTHONPATH=src python -m cli v4 generate --config src/simulate/v4/config/population.yaml --mode full \
-  --n-customers 5000 --months 24 --seed 42 --output ../results/simulator/population-24m-n5000-seed42/dataset
-PYTHONPATH=src python -m cli v4 features --data ../results/simulator/population-24m-n5000-seed42/dataset \
-  --output ../results/simulator/population-24m-n5000-seed42/features
-cd .. && python -m clv run --weekly results/simulator/population-24m-n5000-seed42/features \
-  --ledger results/simulator/population-24m-n5000-seed42/dataset/raw.sqlite --output results/clv
-```
+실데이터 생성·학습 명령(5,000명·24개월, 학습 seed 42와 평가 seed 43)과 체크섬은 [api.md 7장](api.md#7-입력-데이터와-재현)에 있다.
 
 ## 협의·주의 사항
 
@@ -179,7 +177,8 @@ cd .. && python -m clv run --weekly results/simulator/population-24m-n5000-seed4
 * 실험 시점 이후 52주 정답 구간에는 Treatment 고객의 쿠폰 효과가 들어간다. 학습에는 모두 포함하고, `treatment_in_label_window` 표시와 그룹별 지표를 남긴다. Uplift × CLV 결합 시 이중 계상 여부를 협의해야 한다.
 * 통화가 `SOURCE_UNSPECIFIED`이면 금액은 원천 최소 단위(`amount_unit`)다. KRW 환산은 하지 않는다.
 * `simulator.yaml`(원천 고객별 프로필, `data/models` 필요) 데이터에서는 아직 실행하지 않았다. 동봉 `population.yaml` 데이터와 분포·dataset_id가 다를 수 있다.
-* 실데이터 결과(`population.yaml` 24개월, 5,000명, seed 42, 기준시점 2025-01-06). 13주 이력이 완전한 고객은 1,601명(32%)이고,
+* 실데이터 결과(`population.yaml` 24개월, 5,000명, seed 42, 기준시점 2025-01-06). 시뮬레이터 `main` 84372a7로 다시 생성해도
+  raw SQLite 체크섬이 같아 아래 수치가 그대로이며, 학습에 쓰지 않은 seed 43 데이터셋 결과는 [api.md 8장](api.md#8-현재-번들-성능)에 있다. 13주 이력이 완전한 고객은 1,601명(32%)이고,
   Test 고객 1,000명(완전 329, 미완전 671)은 두 설정에서 같다. MAE / RMSE / 상위 20% 일치율:
 
   | 학습 대상 | Baseline | BG/NBD+GG | XGBoost | 두 파트 XGBoost | 최종 모델 |
