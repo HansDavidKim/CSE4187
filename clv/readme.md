@@ -106,7 +106,7 @@ clv = predict_clv("artifacts/features", ledger="artifacts/small/raw.sqlite", mod
 * 제외: 고객 ID, 절대 주차, 정답, `gap_*`, 잠재 상태, 실험 배정·사후 결과, t0 이후 기록(`schema.check_predictors`가 막는다).
 * KIT39와 별개로 CLV가 직접 계산한다.
 
-## 모델 (WBS 4.4~4.5)
+## 모델 (WBS 4.4\~4.5)
 
 * **Baseline**: `(net_spend_13w / 13) * 52`. 부분 이력 고객(추론만 해당)은 13 대신 관측 주 수로 나눈다.
 * **BG/NBD + Gamma-Gamma**: 거래 단위는 서울 날짜별 주문 묶음(Lifetimes 관례, `transaction_period="order"` 선택 가능), 시간 단위는 주, 52주 비할인 합계다. 보정 기간은 기본적으로 다른 모델과 같은 13주(`calibration="feature_window"`)이고 `full_history`도 선택할 수 있다. Train 고객으로만 적합한다.
@@ -190,4 +190,4 @@ python -m pytest clv/tests -q
   그래서 기본값을 `require_complete_history=False`로 바꿨다. 두 파트 XGBoost는 구매 여부 AUC 0.75(Test)지만 구매 고객
   518명으로 학습한 금액 파트가 트리 9개에서 멈춰 예측 폭이 좁다. 전체 학습에서는 기존 XGBoost와 비슷했다.
 * BG/NBD의 `a`, `b`는 표본에 따라 크게 달라진다(완전 이력 학습의 이전 분할 약 19만·96만, 현재 분할 2.3·10.7, 전체 학습 22.6·102.1).
-  `a/(a+b)`는 0.17~0.18로 안정적이고, 전체 학습에서 벌점 0~0.1의 Validation 예측 순위상관은 0.999 이상, RMSE는 7,588~8,258이었다.
+  `a/(a+b)`는 0.17\~0.18로 안정적이고, 전체 학습에서 벌점 0\~0.1의 Validation 예측 순위상관은 0.999 이상, RMSE는 7,588\~8,258이었다.
