@@ -9,6 +9,7 @@ import importlib
 import json
 import logging
 import math
+import numbers
 import os
 from pathlib import Path
 import shutil
@@ -91,6 +92,9 @@ class EcommerceSimulator:
             raise ValueError("retention_mode must be source or target")
         if settings.get("signup_mode", "legacy_bounded_uniform") not in {"full_history_uniform", "legacy_bounded_uniform"}:
             raise ValueError("signup_mode must be full_history_uniform or legacy_bounded_uniform")
+        history_days = settings.get("min_customer_history_days", 0)
+        if isinstance(history_days, bool) or not isinstance(history_days, numbers.Integral) or history_days < 0:
+            raise ValueError("min_customer_history_days must be a nonnegative integer")
         target = self.config["churn"].get("target_rate")
         if mode == "target" and not (isinstance(target, (int, float)) and not isinstance(target, bool) and .15 <= target <= .25):
             raise ValueError("source simulation target_rate must be between 0.15 and 0.25")
@@ -179,6 +183,10 @@ class EcommerceSimulator:
         if decision < local:
             decision += pd.Timedelta(days=7)
         t0 = decision.tz_convert("UTC")
+        history_days = self.settings.get("min_customer_history_days", 0)
+        if history_days > (t0 - start).total_seconds() / 86400:
+            raise ValueError("min_customer_history_days exceeds the available pre-coupon observation period")
+        history_cutoff = t0 - pd.Timedelta(days=int(history_days))
         eligibility_days = experiment_window_days(self.settings, "eligibility_window_days")
         coupon_validity_days = experiment_window_days(self.settings, "coupon_validity_days")
         eligibility_start = t0 - pd.Timedelta(days=eligibility_days)
@@ -910,17 +918,19 @@ class EcommerceSimulator:
                 probability = float(_sigmoid(source_return_logit(local, index, lower, state) + history_shift))
                 user_segment(uid, profile, signed, lower, upper, probability, state, local)
             eligible = any(eligibility_start <= row["started_at"] < t0 for row in local["sessions"])
+            if history_days:
+                eligible = eligible and state["first_event_at"] is not None and state["first_event_at"] <= history_cutoff
             candidates += 1
             if not eligible:
                 del session_diagnostic_rows[old_diagnostics_size:]
                 if supplied is not None:
-                    raise ValueError("supplied customers must be eligible for the declared active-customer experiment")
+                    raise ValueError("supplied customers must be eligible for the declared active-customer experiment and meet min_customer_history_days")
                 continue
             donors.append((uid, index, profile, signed, state, local))
             if len(donors) % 1000 == 0:
                 LOGGER.info("Eligible history: %s/%s customers (%s candidates)", len(donors), n_customers, candidates)
         if len(donors) != n_customers:
-            raise ValueError("unable to populate the eligible active-customer panel")
+            raise ValueError("unable to populate the eligible active-customer panel; check min_customer_history_days and observation period")
         snapshot_logits = np.array([source_return_logit(local, index, t0, state) for _, index, _, _, state, local in donors])
         outcome_shift = _calibration(snapshot_logits, target) if target is not None else 0.
         if coupon_effects is not None:
@@ -1074,6 +1084,7 @@ class EcommerceSimulator:
             "observation_start_at": start.isoformat(), "observation_end_at": end.isoformat(), "as_of_at": t0.isoformat(),
             "definition_id": generation_definition, "policy_id": experiment_policy,
             "eligibility_window_days": eligibility_days, "coupon_validity_days": coupon_validity_days,
+            "min_customer_history_days": int(history_days),
             "target_churn_rate": target, "expected_control_churn_rate": float(np.mean(1 - _sigmoid(snapshot_logits + outcome_shift))),
             "observed_churn_rate": observed, "history_logit_shift": history_shift, "outcome_logit_shift": outcome_shift,
             "candidate_customers": candidates, "eligible_customers": n_customers,
@@ -1208,6 +1219,8 @@ class EcommerceSimulator:
                  if coupon_effects is not None else "email-to-coupon, 14d-to-30d and individual response decomposition are scenarios"),
                 "send cost is declared policy cost, not a measured source cost"],
             "table_rows": {name: len(frame) for name, frame in tables.items()}}
+        if history_days:
+            metadata["eligibility"] += f"; first observed shopping event at or before t0-{history_days}d"
         if population is not None:
             metadata["profile_generation"] = "synthetic_population"
         if coupon_effects is not None:

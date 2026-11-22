@@ -81,6 +81,74 @@ def test_canonical_units_utc_snapshot_eligibility_and_balanced_assignment(genera
     assert tables["coupons"].sent_at.eq(t0).all()
 
 
+def test_zero_minimum_customer_history_preserves_existing_business_records(source_config):
+    config = copy.deepcopy(source_config)
+    config["source_simulation"].pop("min_customer_history_days", None)
+    previous = EcommerceSimulator(config).generate(n_customers=8, months=3, seed=17)
+    configured = copy.deepcopy(config)
+    configured["source_simulation"]["min_customer_history_days"] = 0
+    current = EcommerceSimulator(configured).generate(n_customers=8, months=3, seed=17)
+    for name in (*RAW_COLUMNS, "treatments"):
+        pd.testing.assert_frame_equal(previous.tables[name], current.tables[name])
+    assert previous.metadata["min_customer_history_days"] == current.metadata["min_customer_history_days"] == 0
+    assert previous.metadata["eligibility"] == current.metadata["eligibility"]
+
+
+@pytest.mark.parametrize("eligibility_days", [28, 30])
+def test_minimum_customer_history_filters_both_arms_before_assignment(source_config, eligibility_days):
+    from simulate.v4.data.weekly import build_experiment_log
+    from simulate.v4.validation import audit_sidecars
+
+    config = copy.deepcopy(source_config)
+    config["source_simulation"].update(signup_mode="full_history_uniform", min_customer_history_days=30,
+                                        eligibility_window_days=eligibility_days)
+    result = EcommerceSimulator(config).generate(n_customers=40, months=6, seed=17)
+    tables, t0 = result.tables, pd.Timestamp(result.metadata["as_of_at"])
+    shopping = tables["events"].loc[tables["events"].event_type.isin(["view", "cart", "remove_from_cart", "purchase"])]
+    first_events = shopping.loc[shopping.event_at.lt(t0)].groupby("customer_id").event_at.min()
+    assert set(first_events.index) == set(tables["customers"].customer_id)
+    assert first_events.le(t0 - pd.Timedelta(days=30)).all()
+    active = tables["sessions"].loc[tables["sessions"].started_at.ge(t0 - pd.Timedelta(days=eligibility_days)) &
+                                    tables["sessions"].started_at.lt(t0)]
+    assert set(active.customer_id) == set(first_events.index)
+    assert tables["treatments"].treatment.value_counts().to_dict() == {0: 20, 1: 20}
+    assert tables["treatments"].assignment_probability.eq(0.5).all()
+    assert tables["coupons"].customer_id.nunique() == 20
+    assert result.metadata["min_customer_history_days"] == 30
+    assert result.metadata["candidate_customers"] > 40
+    log = build_experiment_log(tables, result.metadata)
+    assert log.eligible_at_assignment.all()
+    assert log.eligibility_definition.str.contains("as_of_at-30d", regex=False).all()
+    report = audit_sidecars(tables, result.metadata, tables["labels"], tables["treatments"])
+    assert report["passed"], report["mismatch_counts"]
+
+
+@pytest.mark.parametrize("value", [-1, 1.5, True, False, None, "30", float("nan"), float("inf")])
+def test_minimum_customer_history_rejects_invalid_config(source_config, value):
+    config = copy.deepcopy(source_config)
+    config["source_simulation"]["min_customer_history_days"] = value
+    with pytest.raises(ValueError, match="min_customer_history_days"):
+        EcommerceSimulator(config)
+
+
+@pytest.mark.parametrize("days", [40, 10**100])
+def test_minimum_customer_history_rejects_impossible_observation_span(source_config, days):
+    config = copy.deepcopy(source_config)
+    config["source_simulation"]["min_customer_history_days"] = days
+    with pytest.raises(ValueError, match="min_customer_history_days"):
+        EcommerceSimulator(config).generate(n_customers=2, months=3, seed=17)
+
+
+def test_minimum_customer_history_rejects_supplied_recent_customers(source_config, generated):
+    config = copy.deepcopy(source_config)
+    config["source_simulation"]["min_customer_history_days"] = 1
+    t0 = pd.Timestamp(generated.metadata["as_of_at"])
+    customers = pd.DataFrame({"customer_id": ["recent-1", "recent-2"],
+                              "signed_up_at": t0 - pd.Timedelta(hours=12)})
+    with pytest.raises(ValueError, match="min_customer_history_days"):
+        EcommerceSimulator(config).generate(months=3, seed=17, customers=customers)
+
+
 def test_future_labels_are_recomputed_from_observed_sessions_and_paid_orders(generated):
     tables = generated.tables
     labels = tables["labels"]

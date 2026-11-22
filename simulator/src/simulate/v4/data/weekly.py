@@ -76,7 +76,10 @@ def _assignment_rows(tables):
 
 def build_experiment_log(tables, metadata) -> pd.DataFrame:
     """One factual assignment row per customer, regardless of execution or redemption."""
-    _, observation_end = _bounds(metadata)
+    observation_start, observation_end = _bounds(metadata)
+    min_history_days = metadata.get("min_customer_history_days", 0)
+    if isinstance(min_history_days, bool) or not isinstance(min_history_days, numbers.Integral) or min_history_days < 0:
+        raise ValueError("metadata.min_customer_history_days must be a nonnegative integer")
     eligibility_days = experiment_window_days(metadata, "eligibility_window_days")
     coupon_days = experiment_window_days(metadata, "coupon_validity_days")
     frame = _assignment_rows(tables)
@@ -178,7 +181,15 @@ def build_experiment_log(tables, metadata) -> pd.DataFrame:
     for (t0, until), indices in frame.groupby(["as_of_at", "outcome_end_at"]).groups.items():
         started = tables["sessions"].started_at
         past_sessions = tables["sessions"].loc[started.ge(t0 - pd.Timedelta(days=eligibility_days)) & started.lt(t0)]
-        frame.loc[indices, "eligible_at_assignment"] = frame.loc[indices, "customer_id"].isin(past_sessions.customer_id)
+        eligible = frame.loc[indices, "customer_id"].isin(past_sessions.customer_id)
+        if min_history_days:
+            if min_history_days > (t0 - observation_start).total_seconds() / 86400:
+                raise ValueError("min_customer_history_days exceeds the available pre-coupon observation period")
+            events = tables["events"]
+            history = events.loc[events.event_type.isin(["view", "cart", "remove_from_cart", "purchase"]) & events.event_at.lt(t0)]
+            first_event = history.groupby("customer_id").event_at.min()
+            eligible &= frame.loc[indices, "customer_id"].map(first_event).le(t0 - pd.Timedelta(days=int(min_history_days)))
+        frame.loc[indices, "eligible_at_assignment"] = eligible
         if observation_end >= until:
             future_sessions = tables["sessions"].loc[tables["sessions"].started_at.ge(t0) & tables["sessions"].started_at.lt(until)]
             future_orders = orders.loc[orders.event_at.ge(t0) & orders.event_at.lt(until)]
@@ -187,6 +198,8 @@ def build_experiment_log(tables, metadata) -> pd.DataFrame:
             paid = future_orders.groupby("customer_id").paid_minor.sum()
             frame.loc[indices, "factual_outcome_net_revenue_minor"] = frame.loc[indices, "customer_id"].map(paid).fillna(0)
     frame["eligibility_definition"] = f"session start in [as_of_at-{eligibility_days}d,as_of_at)"
+    if min_history_days:
+        frame["eligibility_definition"] += f" and first observed shopping event <= as_of_at-{min_history_days}d (view/cart/remove_from_cart/purchase before as_of_at)"
     frame["outcome_definition_no_session"] = "no session start in [as_of_at,outcome_end_at)"
     frame["outcome_definition_no_order"] = "no unique order in [as_of_at,outcome_end_at)"
     frame["label_known_at"] = frame.outcome_end_at.where(frame.outcome_observed)
