@@ -154,7 +154,7 @@ MAE, RMSE, 편향, 총액, R², Spearman, 예측·실제 분포 분위수, 10분
 같은 분할 안에서 13주 이력 완전/미완전 고객을 따로 평가한 결과는 `evaluation.json → by_history`와 `registry.json → test_metrics_by_history`에 있다. 실행하지 못했거나 제외된 모델은 평가에서 빠지고 사유만 남는다.
 `control_no_coupon`에서는 Validation·Test가 Control 고객이다.
 
-4주 모델은 4주 안에 실제로 구매한 Control Validation·Test 고객으로 MAE, RMSE, 평가 고객 수, 실제·예측 평균 총구매액을 낸다(`evaluation.json → gross_4w`). `gross_4w.assignment_diagnostic`은 Treatment와 Control의 구매자당 4주 할인 전 총구매액(구매 비율, 평균, 차이의 95% 구간, 비율, 모델 예측 평균)을 비교한다. `Uplift × 4주 금액` 결합 가정을 확인하는 진단이며, Treatment는 여기에만 쓴다. 모델 예측 평균과 MAE는 적합·선택에 쓰지 않은 구매 고객으로만 낸다. 4주 구간 안에 배정되지 않은 Treatment가 있으면(t0 ≠ 실험 시각) 차이는 내지 않는다. 저장된 번들을 `evaluate`하면 지표는 평가 대상(기본 Test) Control 구매 고객으로, 진단은 같은 t0의 전원으로 만든다.
+4주 모델은 4주 안에 실제로 구매한 Control Validation·Test 고객으로 MAE, RMSE, 평가 고객 수, 실제·예측 평균 총구매액을 낸다(`evaluation.json → gross_4w`). `gross_4w.assignment_diagnostic`은 Treatment와 Control의 구매자당 4주 할인 전 총구매액(구매 비율, 평균, 차이의 95% 구간, 비율, 모델 예측 평균)을 비교한다. `Uplift × 4주 금액` 결합 가정을 확인하는 진단이며, Treatment는 여기에만 쓴다. 모델 예측 평균과 MAE는 적합·선택에 쓰지 않은 구매 고객으로만 낸다. t0가 실험 시각(`as_of_at`)과 같지 않거나 4주 구간 안에 배정되지 않은 Treatment가 있으면 차이는 내지 않는다(t0가 실험 시각보다 앞서 배정 시각이 구간 안에 들어가는 경우도 포함). 저장된 번들을 `evaluate`하면 지표는 평가 대상(기본 Test) Control 구매 고객으로, 진단은 같은 t0의 전원으로 만든다.
 
 Uplift 담당은 같은 고객·같은 t0의 `p0`(쿠폰 미발송 시 4주 구매 확률), `p1`(발송 시), `uplift_4w = p1 - p0`를 준다. 최종 전략은 `uplift_4w × predicted_gross_4w_if_purchase - 예상 쿠폰 비용`을 근사적인 발송 가치로 쓴다. 발송군과 미발송군의 구매자당 금액은 다를 수 있어 위 진단으로 확인한다. 52주 CLV(할인 후 실결제액)와 4주 금액(할인 전 총구매액)은 다른 지표다.
 

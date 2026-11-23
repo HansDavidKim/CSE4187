@@ -240,25 +240,37 @@ def _gross_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def _assignment_diagnostic(scored: pd.DataFrame) -> dict:
-    """배정군 진단. 4주 구간에 배정(쿠폰 발송)되지 않은 Treatment가 있으면 차이 비교는 쿠폰 효과를 담지 않으므로
-    ``treatment_minus_control``을 빼고 그 이유를 남긴다."""
+def _assignment_diagnostic(scored: pd.DataFrame, t0, experiment) -> dict:
+    """배정군 진단. ``t0``가 실험 시각(``experiment`` = 단일 ``as_of_at``)과 같고 모든 Treatment가 4주 구간 안에
+    배정됐을 때만 차이 비교(``treatment_minus_control``)를 남긴다. t0가 실험 시각보다 앞서면 배정 시각이 구간 안에
+    있어도 4주 구간이 쿠폰 발송 구간과 어긋나므로, 둘 중 하나라도 어긋나면 비교를 빼고 그 이유를 남긴다."""
     report = gross_by_assignment(scored)
-    if report.get("available") and "treatment_in_gross_window" in scored:
+    if not report.get("available"):
+        return report
+    share = None
+    if "treatment_in_gross_window" in scored:
         treated = scored[ASSIGNMENT_COLUMN].notna() & scored[ASSIGNMENT_COLUMN].ne(CONTROL_CODE).fillna(False)
         share = float(scored.loc[treated, "treatment_in_gross_window"].astype(bool).mean()) if treated.any() else None
-        report["treatment_assigned_in_window_share"] = share
-        if share is not None and share < 1 and report.pop("treatment_minus_control", None) is not None:
-            report["comparison_suppressed"] = (f"only {share:.0%} of treatment customers were assigned inside "
-                                               f"[t0, t0 + {GROSS_WEEKS} weeks); use t0 = the experiment as_of_at")
+    aligned = experiment is not None and t0 == experiment
+    report["treatment_assigned_in_window_share"] = share
+    report["t0_equals_as_of_at"] = aligned
+    reasons = []
+    if not aligned:
+        reasons.append(f"t0 {t0.isoformat()} is not the experiment as_of_at "
+                       f"({experiment.isoformat() if experiment is not None else 'no single as_of_at'})")
+    if share is not None and share < 1:
+        reasons.append(f"only {share:.0%} of treatment customers were assigned inside [t0, t0 + {GROSS_WEEKS} weeks)")
+    if reasons:
+        report.pop("treatment_minus_control", None)
+        report["comparison_suppressed"] = "; ".join(reasons) + "; use t0 = the experiment as_of_at"
     return report
 
 
-def _gross_report(scored: pd.DataFrame, splits) -> dict:
+def _gross_report(scored: pd.DataFrame, splits, t0, experiment) -> dict:
     """4주 모델 평가(학습 대상 구매 고객, 분할별)와 배정군 진단을 만든다."""
     primary = scored["training_population"].astype(bool)
     report = {name: evaluate_gross_4w(scored.loc[primary & scored["split"].eq(name)]) for name in splits}
-    report["assignment_diagnostic"] = _assignment_diagnostic(scored)
+    report["assignment_diagnostic"] = _assignment_diagnostic(scored, t0, experiment)
     return report
 
 
@@ -426,8 +438,9 @@ def train(weekly, orders=None, output_dir: str | Path = "results/clv", config: C
             gross_state = f"failed: {error}"
     if require_gross_4w and gross_model is None:
         raise ValueError(f"require_gross_4w: {GROSS_MODEL} was not trained ({gross_state}); nothing was saved")
-    gross_evaluation = (_gross_report(gross_scored, ("validation", "test")) if gross_model is not None
-                        else {"status": gross_state, "assignment_diagnostic": _assignment_diagnostic(gross_scored)})
+    gross_evaluation = (_gross_report(gross_scored, ("validation", "test"), t0, experiment) if gross_model is not None
+                        else {"status": gross_state,
+                              "assignment_diagnostic": _assignment_diagnostic(gross_scored, t0, experiment)})
     if experiment is None and config.population_policy == "control_no_coupon" and "as_of_at" in panel:
         model_warnings.append("as_of_at is not a single Asia/Seoul Monday 00:00; t0 was not aligned to the experiment "
                               "and the 4-week window may not match the coupon window")
@@ -593,7 +606,8 @@ def evaluate(weekly, orders=None, model_dir: str | Path = "results/clv", cutoff=
         gross["out_of_sample"] = ~gross["customer_id"].isin(fitted)
         gross[GROSS_PREDICTION_COLUMN] = _models_for(model_dir, [GROSS_MODEL])[GROSS_MODEL].predict(
             customers.loc[customers[GROSS_COMPLETE_COLUMN].astype(bool)].reset_index(drop=True))
-        report["gross_4w"] = {"status": "trained", **_gross_report(gross, (population,))}
+        report["gross_4w"] = {"status": "trained",
+                              **_gross_report(gross, (population,), t0, _experiment_cutoff(panel))}
         # population="all"을 학습 데이터셋에 쓰면 적합·선택에 쓴 구매 고객도 지표에 들어간다(인원을 남긴다).
         buyers = gross["split"].eq(population) & gross["training_population"] & gross[GROSS_LABEL_COLUMN].notna()
         report["gross_4w"]["in_sample_buyers"] = int((buyers & ~gross["out_of_sample"]).sum())

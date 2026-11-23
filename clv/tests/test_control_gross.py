@@ -182,6 +182,7 @@ def test_four_week_evaluation_and_assignment_diagnostic(bundle, experiment):
     difference = diagnostic["treatment_minus_control"]
     assert difference["ci95"][0] < difference["difference"] < difference["ci95"][1]
     assert diagnostic["treatment_assigned_in_window_share"] == 1.0  # t0 = 실험 시점
+    assert diagnostic["t0_equals_as_of_at"] and "comparison_suppressed" not in diagnostic
     # 예측 요약은 적합·선택에 쓰지 않은 구매 고객만: Control은 Test 구매 고객, Treatment는 전원이다.
     assert diagnostic["groups"]["control"]["predicted_buyers"] == len(test)
     assert diagnostic["groups"]["treatment"]["predicted_buyers"] == diagnostic["groups"]["treatment"]["buyers"]
@@ -358,3 +359,23 @@ def test_four_week_model_needs_control_only_policy_and_surfaces_errors(experimen
     monkeypatch.setattr(GrossXGBoost4w, "fit", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("boom")))
     with pytest.raises(ValueError, match="boom"):
         train(experiment, None, tmp_path / "broken", CLVConfig.from_dict(FAST), cutoff=T0)
+
+
+def test_cutoff_before_the_experiment_suppresses_the_group_comparison(bundle, experiment, tmp_path):
+    """회귀: t0가 실험 시각보다 2주 앞서면 배정 시각은 4주 구간 안(비율 1.0)이지만 t0 != as_of_at이므로
+    학습 보고서와 저장 번들 재평가 모두 배정군 차이를 내지 않는다."""
+    early = "2024-07-15"
+    registry = train(experiment, None, tmp_path / "clv", CLVConfig.from_dict(FAST), cutoff=early)
+    diagnostic = json.loads((tmp_path / "clv" / "reports" / "evaluation.json").read_text())["gross_4w"][
+        "assignment_diagnostic"]
+    assert registry["gross_4w"]["status"] == "trained"
+    assert diagnostic["treatment_assigned_in_window_share"] == 1.0
+    assert diagnostic["t0_equals_as_of_at"] is False
+    assert "treatment_minus_control" not in diagnostic
+    assert "is not the experiment as_of_at" in diagnostic["comparison_suppressed"]
+    output, _ = bundle
+    report = evaluate(experiment, None, output, cutoff=early)["gross_4w"]["assignment_diagnostic"]
+    assert report["treatment_assigned_in_window_share"] == 1.0 and report["t0_equals_as_of_at"] is False
+    assert "treatment_minus_control" not in report and "comparison_suppressed" in report
+    aligned = evaluate(experiment, None, output)["gross_4w"]["assignment_diagnostic"]
+    assert aligned["t0_equals_as_of_at"] and "treatment_minus_control" in aligned
