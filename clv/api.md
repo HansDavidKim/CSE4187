@@ -13,7 +13,8 @@
 | 버전 정보 | `model_card.json`, `PredictionMetadata` 5항목, `producer_metadata` | [6장](#6-번들-구조와-버전-정보) |
 
 - 예측 대상은 기준 시각부터 **52주(364일)** 동안의 고객별 결제액 합이다. 열 이름 `predicted_clv_12m`은 전략 모듈
-  계약과의 호환 때문에 유지하는 이름일 뿐이며, 달력 12개월이 아니다.
+  계약과의 호환 때문에 유지하는 이름일 뿐이며, 달력 12개월이 아니다. 공식 요구사항의 '12개월' 표현과 다르게 52주로
+  구현한 것은 팀 합의에 따른 의도된 설계다([model_spec.md 0장](model_spec.md#0-문서의-성격)).
 - 최종 전략 평가는 CLV 학습에 쓰지 않은 고객으로 해야 한다. 전달한 번들은 seed 42 데이터셋으로 학습했으므로,
   평가용 Feature Store는 **다른 seed의 데이터셋**(예: seed 43)이 기본이다([3장](#3-평가-고객과-학습-고객)).
 - 학습·평가 데이터셋은 요구사항의 최소 규모인 20,000명이다(24개월).
@@ -426,4 +427,5 @@ python -m clv train --weekly results/simulator/main-84372a7/population-24m-n2000
 - `final_strategy`의 현재 입력 계약에는 4주 금액 입력이 없다. 4주 batch를 어떤 이름·검증으로 받을지는 최종 전략
   담당과 정해야 한다.
 - `is_high_value_customer`는 CLV 내부 이름이다. 전략 모듈의 Segmentation은 상위 비율을 스스로 다시 계산한다.
-- `currency=SOURCE_UNSPECIFIED`는 KRW가 아니다. 예산(`--budget 50000000`)과 비교하려면 단위 합의가 먼저다.
+- 금액은 시뮬레이터 원천 단위 그대로다(`currency=SOURCE_UNSPECIFIED`, `amount_unit=0.01`, KRW 아님). KRW 환산과 원화
+  예산과의 정합성은 팀 결정으로 CLV 범위에서 제외했으며, 필요하면 예산 최적화 통합 단계에서 다룬다.

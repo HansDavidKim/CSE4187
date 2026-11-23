@@ -13,6 +13,7 @@
 > **다른 모듈 담당자는 [api.md](api.md)부터 본다.** 학습된 번들(`artifacts/`), 전략 모듈 입력 batch를 만드는
 > `predict_for_strategy`, 버전·입력 데이터 정보, 학습 고객 중복 규칙이 정리돼 있다.
 > 예측 기간은 52주(364일)이고, `predicted_clv_12m`은 호환을 위해 유지하는 열 이름이다(달력 12개월 아님).
+> 공식 요구사항의 '12개월' 표현과 달리 52주로 구현한 것은 팀 합의다([model_spec.md 0장](model_spec.md#0-문서의-성격)).
 > 저장소의 전달 번들은 이 변경 전에 학습한 것이다(배정군 혼합 학습, 4주 모델 없음). 최종 시뮬레이터 데이터가
 > 확정되면 다시 학습한다.
 
@@ -204,7 +205,7 @@ python -m pytest clv/tests -q
 
 * 출력 열 이름 `is_high_value_customer`와 `reference_week`의 의미(예측 기준시점)는 전략·대시보드 담당과 합의해야 한다.
 * 실험 시점 이후 52주 정답 구간에는 Treatment 고객의 쿠폰 효과가 들어간다. 그래서 새 학습은 Control만 쓴다(`control_no_coupon`). 기존 전달 번들은 모두 포함해 학습했고(`observed_experiment_mix`), 그 정책 표시는 바꾸지 않는다. Uplift와의 결합식(`uplift_4w × predicted_gross_4w_if_purchase - 예상 쿠폰 비용`)은 [model_spec.md 5장](model_spec.md#5-uplift최종-전략과의-연결)에 있다.
-* 통화가 `SOURCE_UNSPECIFIED`이면 금액은 원천 최소 단위(`amount_unit`)다. KRW 환산은 하지 않는다.
+* 통화가 `SOURCE_UNSPECIFIED`이면 금액은 원천 최소 단위(`amount_unit`)다. KRW 환산·원화 예산과의 정합성은 팀 결정으로 CLV 범위 밖이며(예산 최적화 통합 단계에서 처리), 단위 검증과 메타데이터 기록은 유지한다.
 * `simulator.yaml`(원천 고객별 프로필, `data/models` 필요) 데이터에서는 아직 실행하지 않았다. 동봉 `population.yaml` 데이터와 분포·dataset_id가 다를 수 있다.
 * 기본 설정을 정할 때의 실데이터 결과(`population.yaml` 24개월, 5,000명, seed 42, 기준시점 2025-01-06). 현재 전달 번들은 같은 설정을
   20,000명으로 다시 학습했으며, 그 성능과 학습에 쓰지 않은 seed 43 데이터셋 결과는 [api.md 8장](api.md#8-현재-번들-성능)에 있다. 13주 이력이 완전한 고객은 1,601명(32%)이고,
