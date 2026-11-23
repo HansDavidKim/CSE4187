@@ -231,6 +231,11 @@ def test_cli_info_and_strategy(bundle, other_dataset, tmp_path, capsys):
                     "--output", str(tmp_path / "clv_strategy.parquet")])
     assert summary["customers"] == len(ids) and summary["metadata"]["horizon_value"] == 52
     assert len(load_strategy_predictions(tmp_path / "clv_strategy.parquet").frame) == len(ids)
+    # Uplift 결합용 검증 옵션(이 Fixture 번들은 기본 정책 control_no_coupon으로 학습했다)
+    summary = main(["strategy", "--features", str(store), "--weekly", str(other_dataset / "features"),
+                    "--model-dir", str(bundle), "--require-control-only",
+                    "--output", str(tmp_path / "clv_strategy_checked.parquet")])
+    assert summary["customers"] == len(ids)
     capsys.readouterr()
 
 

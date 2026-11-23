@@ -126,15 +126,17 @@ def predict_clv(weekly, ledger=None, model_dir: str | Path = "results/clv", refe
 
 def predict_for_strategy(features, weekly=None, ledger=None, model_dir: str | Path = "results/clv", model=None,
                          output: str | Path | None = None, allow_training_customers: bool = False,
-                         require_gross_4w: bool = False, **options) -> StrategyPredictions:
+                         require_gross_4w: bool = False, require_control_only: bool = False,
+                         **options) -> StrategyPredictions:
     """Feature Store의 모든 (고객, 기준 시각)에 대한 전략 모듈 입력 batch(``CLVModel.predict_for_strategy``).
 
     ``output``(``.parquet``)을 주면 frame, ``_metadata.json``, ``_audit.csv``(4주 모델이 있으면 ``_gross_4w.parquet``)도
     쓴다. CLV 학습·모델 선택에 쓴 고객이 있으면 기본으로 오류다(``allow_training_customers``).
+    Uplift와 결합할 batch는 ``require_control_only=True``로 만들어 Control-only 번들만 받는다.
     """
     result = load_model(model_dir, model).predict_for_strategy(
         features, weekly, ledger, allow_training_customers=allow_training_customers,
-        require_gross_4w=require_gross_4w, **options)
+        require_gross_4w=require_gross_4w, require_control_only=require_control_only, **options)
     if output is not None:
         result.save(output)
     return result

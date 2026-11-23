@@ -61,8 +61,9 @@ Uplift 담당과 합의한 내용([model_spec.md](model_spec.md))을 요약하�
 10. 52주 CLV(할인 후 실결제액)와 4주 금액(할인 전 총구매액, 구매 조건부)은 서로 다른 지표다.
 
 `PredictionMetadata`의 52주 `target_definition_id`(`clv_paid_amount_52w_v1`)는 두 정책에서 같다. 어떤 정책으로 학습한
-번들인지는 `producer_metadata["policy_condition"]`(또는 `model_card.json`)으로 확인한다. Uplift와 결합할 때는
-`control_no_coupon`인지 먼저 확인한다.
+번들인지는 `producer_metadata["policy_condition"]`(또는 `model_card.json`)으로 확인한다. Uplift와 결합할 batch는
+`predict_for_strategy(..., require_control_only=True)`(CLI `--require-control-only`)로 만들면 `control_no_coupon` 번들이
+아닐 때 오류가 난다.
 
 ## 2. 빠른 시작
 
@@ -179,7 +180,7 @@ top = model.predict(f"{DATA}/features", reference_week="2025-01-06", customers=[
 
 | 함수·클래스 | 용도 | 반환 |
 | --- | --- | --- |
-| `predict_for_strategy(features, weekly=None, ledger=None, model_dir="results/clv", model=None, output=None, allow_training_customers=False, require_gross_4w=False)` | 전략 모듈 입력 batch(4주 batch 포함) | `StrategyPredictions` |
+| `predict_for_strategy(features, weekly=None, ledger=None, model_dir="results/clv", model=None, output=None, allow_training_customers=False, require_gross_4w=False, require_control_only=False)` | 전략 모듈 입력 batch(4주 batch 포함) | `StrategyPredictions` |
 | `load_strategy_predictions(path)` | 저장한 batch를 체크섬 대조 후 읽기 | `StrategyPredictions` |
 | `load_model(model_dir="results/clv", model=None)` | 번들을 체크섬 대조 후 불러오기 | `CLVModel` |
 | `model_info(model_dir, model=None)` | 모델·버전·학습 데이터·Test 지표 요약 | dict |
@@ -215,6 +216,7 @@ top = model.predict(f"{DATA}/features", reference_week="2025-01-06", customers=[
 | 기준 시각 직전 13주에 관측 주가 하나도 없는 고객 | 이력을 지어내지 않음 |
 | `train`·`validation` 고객 포함(기본) | 3장 |
 | `require_gross_4w=True`인데 번들에 4주 모델이 없음 | 4주 값을 지어내지 않음 |
+| `require_control_only=True`(CLI `--require-control-only`)인데 번들 정책이 `control_no_coupon`이 아님 | Uplift 결합에 혼합 번들을 쓰지 않음. 기본(False)은 혼합 번들도 추론한다 |
 | 학습 출력 디렉터리에 이미 번들이 있음(`FileExistsError`) | 기존 번들 보호(`overwrite=True`로만 교체) |
 
 ## 5. 출력 형식

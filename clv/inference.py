@@ -397,7 +397,7 @@ class CLVModel:
         return warnings
 
     def predict_for_strategy(self, features, weekly=None, ledger=None, *, allow_training_customers: bool = False,
-                             strict: bool = True, require_gross_4w: bool = False,
+                             strict: bool = True, require_gross_4w: bool = False, require_control_only: bool = False,
                              **input_options) -> StrategyPredictions:
         """Feature Store의 모든 (고객, 기준 시각)에 대해 전략 모듈 입력 batch를 만든다.
 
@@ -408,11 +408,17 @@ class CLVModel:
             allow_training_customers: 기본 False면 CLV 학습(train)·모델 선택(validation)에 쓴 고객이 하나라도 있을 때
                 오류를 낸다. 최종 전략 평가는 모델이 보지 않은 고객으로 해야 한다. 개발용 확인에만 True로 둔다.
             require_gross_4w: True면 번들에 4주 모델이 없을 때 오류를 낸다.
+            require_control_only: True면 Control-only(``control_no_coupon``)로 학습한 번들이 아닐 때 입력을 읽기 전에
+                오류를 낸다. Uplift와 결합할 batch를 만들 때 쓴다. 기본 False는 기존 혼합 번들도 그대로 추론한다.
 
         Returns:
             ``StrategyPredictions``. ``as_of_at``이 서울 월요일 00:00이 아니면(주 단위 입력과 어긋나면) 오류다.
             4주 모델이 있으면 ``gross_4w``에 같은 행·같은 키의 4주 조건부 총구매액 batch가 들어 있다.
         """
+        if require_control_only and self.policy_condition != "control_no_coupon":
+            raise ValueError(f"require_control_only: bundle {self.model_dir} was trained with policy "
+                             f"{self.policy_condition!r}, not 'control_no_coupon'; Uplift combination needs a "
+                             "control-only bundle")
         if require_gross_4w:
             self._require_gross()
         checked = bool(input_options.get("verify_checksum", True))

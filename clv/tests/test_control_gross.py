@@ -206,6 +206,9 @@ def test_strategy_batch_adds_a_four_week_batch_with_the_same_keys(bundle, tmp_pa
         "reference_week": T0, "dataset_id": "synthetic-fixture-seed4", "currency": "SOURCE_UNSPECIFIED",
         "amount_unit": "0.01", "raw_database_sha256": "0" * 64})
     result = model.predict_for_strategy(population, other)
+    # Control-only 번들은 Uplift 결합용 검증(require_control_only)을 통과하고 결과도 같다.
+    checked = model.predict_for_strategy(population, other, require_control_only=True)
+    pd.testing.assert_frame_equal(checked.frame, result.frame)
     assert list(result.frame.columns) == list(STRATEGY_COLUMNS)  # 기존 11열 계약은 그대로
     assert result.gross_4w_status == "trained" and list(result.gross_4w.columns) == list(GROSS_STRATEGY_COLUMNS)
     assert result.gross_4w["customer_id"].equals(result.frame["customer_id"])
@@ -256,6 +259,9 @@ def test_existing_bundle_strategy_batch_has_no_four_week_batch(outputs, tmp_path
     assert result.gross_4w is None and result.gross_4w_metadata is None and result.gross_4w_status == "not_trained"
     assert any("xgboost_gross_4w" in warning for warning in result.producer_metadata["warnings"])
     assert result.producer_metadata["policy_condition"] == "observed_experiment_mix"
+    # Uplift 결합용 검증을 켜면 혼합 번들은 거절한다(끄면 위처럼 그대로 추론한다).
+    with pytest.raises(ValueError, match="require_control_only: .* not 'control_no_coupon'"):
+        model.predict_for_strategy(population, weekly, require_control_only=True)
     # 같은 경로에 예전 4주 batch가 있으면 저장할 때 지운다.
     (tmp_path / "batch_gross_4w.parquet").write_bytes(b"stale")
     path = result.save(tmp_path / "batch.parquet")

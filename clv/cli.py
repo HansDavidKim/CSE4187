@@ -90,6 +90,9 @@ def build_parser() -> argparse.ArgumentParser:
     strategy.add_argument("--output", type=Path, default=Path("results/clv_strategy_predictions.parquet"))
     strategy.add_argument("--allow-training-customers", action="store_true",
                           help="development only: accept customers used to fit or select the CLV model")
+    strategy.add_argument("--require-control-only", action="store_true",
+                          help="refuse bundles not trained with population_policy control_no_coupon "
+                               "(use for batches combined with Uplift)")
     return parser
 
 
@@ -154,7 +157,8 @@ def main(argv=None) -> dict:
         from .inference import CLVModel
 
         result = CLVModel(args.model_dir, args.model).predict_for_strategy(
-            args.features, args.weekly, args.ledger, allow_training_customers=args.allow_training_customers, **options)
+            args.features, args.weekly, args.ledger, allow_training_customers=args.allow_training_customers,
+            require_control_only=args.require_control_only, **options)
         path = result.save(args.output)
         summary = {"predictions": str(path), "metadata": result.metadata, "customers": int(len(result.frame)),
                    "snapshots": result.producer_metadata["snapshots"],
