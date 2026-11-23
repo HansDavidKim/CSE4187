@@ -334,3 +334,138 @@ class TwoPartXGBoostCLV:
         model.best_params, model.grid_results = meta["best_params"], meta["grid_results"]
         model.train_counts = meta.get("train_counts", {})
         return model
+
+
+GROSS_NAME = "xgboost_gross_4w"
+# 4주 금액 모델의 최소 학습 구매 고객 수(Train). 검증 분할에도 구매 고객이 2명 이상 있어야 한다.
+MIN_GROSS_BUYERS = 20
+
+
+class InsufficientBuyersError(ValueError):
+    """4주 모델을 학습할 구매 고객이 부족하다. 학습은 이 경우만 ``failed``로 기록하고 나머지 오류는 그대로 낸다."""
+
+
+class GrossXGBoost4w:
+    """4주 조건부 할인 전 총구매액 XGBoost: E[``[t0, t0 + 4주)`` 총구매액 | 4주 안에 1회 이상 구매, X(t0)].
+
+    52주 모델과 독립적으로 학습·저장·평가한다. 4주 안에 구매한 학습 고객(학습 모집단 정책을 거친 Control
+    고객)의 할인 전 총구매액(``actual_gross_4w_if_purchase``)만 회귀하며, 비구매 고객을 0 정답으로 쓰지 않는다.
+    예측 변수 계약(13주 이력, 이름·순서·float64)은 52주 XGBoost와 같다.
+    """
+
+    name = GROSS_NAME
+
+    def __init__(self, seed: int = 42, grid: dict | None = None, fixed: dict | None = None,
+                 feature_names=PREDICTOR_FEATURES):
+        from .config import DEFAULT_GROSS_4W_GRID, DEFAULT_XGB_FIXED
+
+        self.feature_names = list(feature_names)
+        check_predictors(self.feature_names)
+        self.seed = int(seed)
+        self.grid = {key: list(value) for key, value in (grid or DEFAULT_GROSS_4W_GRID).items()}
+        self.fixed = dict(fixed or DEFAULT_XGB_FIXED)
+        self.model = None
+        self.best_params: dict = {}
+        self.grid_results: list[dict] = []
+        self.train_counts: dict = {}
+        self.skipped_objectives: list[str] = []
+        self.last_clipped = 0
+
+    def matrix(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """예측 변수를 저장된 순서와 자료형(float64)으로 뽑는다. 빠진 열이 있으면 오류를 낸다."""
+        missing = [name for name in self.feature_names if name not in frame]
+        if missing:
+            raise ValueError(f"XGBoost input is missing features: {missing}")
+        return frame.loc[:, self.feature_names].astype(FEATURE_DTYPE)
+
+    def _make(self, params: dict, n_estimators: int, early_stopping: int | None):
+        """고정 seed로 ``XGBRegressor``를 만든다(``_search``가 부른다)."""
+        import xgboost as xgb
+
+        settings = {key: value for key, value in params.items() if key not in ("n_estimators", "early_stopping_rounds")}
+        return xgb.XGBRegressor(n_estimators=int(n_estimators), early_stopping_rounds=early_stopping,
+                                eval_metric="rmse", random_state=self.seed, **settings)
+
+    def fit(self, train: pd.DataFrame, y_train, validation: pd.DataFrame, y_validation) -> "GrossXGBoost4w":
+        """구매 고객의 4주 총구매액으로 학습하고 검증 분할 RMSE로 설정과 트리 수를 고른다.
+
+        행은 호출자가 구매 고객(4주 구매 1회 이상)으로 고른다. 정답은 유한한 0 이상이어야 하며(결측·음수면
+        ValueError), 금액이 0인 구매 고객도 정답으로 쓴다. 이때 0을 다룰 수 없는 ``reg:gamma`` 후보는 그리드에서
+        빼고 ``skipped_objectives``에 남긴다.
+        """
+        X_train, X_validation = self.matrix(train), self.matrix(validation)
+        y_train, y_validation = np.asarray(y_train, dtype=float), np.asarray(y_validation, dtype=float)
+        for name, values in (("train", y_train), ("validation", y_validation)):
+            if not (np.isfinite(values).all() and (values >= 0).all()):
+                raise ValueError(f"{GROSS_NAME} {name} labels must be finite nonnegative gross amounts of buyers")
+        self.train_counts = {"train_buyers": int(len(y_train)), "validation_buyers": int(len(y_validation)),
+                             "zero_gross_buyers": int((y_train == 0).sum() + (y_validation == 0).sum())}
+        if len(y_train) < MIN_GROSS_BUYERS or len(y_validation) < 2:
+            raise InsufficientBuyersError(f"{GROSS_NAME} needs at least {MIN_GROSS_BUYERS} train buyers and 2 validation buyers "
+                             f"(got {len(y_train)} and {len(y_validation)})")
+
+        def score(model, trees):
+            predicted = np.clip(model.predict(X_validation, iteration_range=(0, trees)), 0, None)
+            return _errors(y_validation, predicted)
+
+        grid = dict(self.grid)
+        self.skipped_objectives = []
+        if (y_train == 0).any() or (y_validation == 0).any():
+            # gamma 회귀는 정답이 양수여야 하므로 0 금액 구매 고객이 있으면 후보에서 뺀다.
+            objectives = list(grid.get("objective", ["reg:squarederror"]))
+            self.skipped_objectives = [value for value in objectives if value == "reg:gamma"]
+            grid["objective"] = [value for value in objectives if value != "reg:gamma"]
+            if not grid["objective"]:
+                raise ValueError(f"{GROSS_NAME} grid has only reg:gamma but some buyers have zero gross")
+        self.model, self.best_params, self.grid_results = _search(
+            self._make, grid, self.fixed, (X_train, y_train, X_validation, y_validation), score, "rmse")
+        return self
+
+    def predict(self, frame: pd.DataFrame) -> np.ndarray:
+        """구매한다면 기대되는 4주 할인 전 총구매액. 음수 예측은 0으로 자르고 건수를 ``last_clipped``에 남긴다."""
+        if self.model is None:
+            raise RuntimeError(f"{GROSS_NAME} model is not fitted")
+        raw = self.model.predict(self.matrix(frame)).astype(float)
+        self.last_clipped = int((raw < 0).sum())
+        return np.clip(raw, 0.0, None)
+
+    def summary(self) -> dict:
+        """registry에 남길 설정·그리드 결과·학습 인원."""
+        return {"best_params": self.best_params, "grid_results": self.grid_results,
+                "skipped_objectives": self.skipped_objectives, **self.train_counts}
+
+    def save(self, directory: str | Path) -> Path:
+        """``regressor.json``과 메타데이터(``gross_4w_meta.json``)를 저장한다."""
+        import xgboost
+
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        self.model.save_model(directory / "regressor.json")
+        return write_json(directory / "gross_4w_meta.json", {
+            "model": GROSS_NAME, "feature_names": self.feature_names,
+            "feature_dtypes": {name: FEATURE_DTYPE for name in self.feature_names}, "seed": self.seed,
+            "grid": self.grid, "fixed": self.fixed, "best_params": self.best_params,
+            "grid_results": self.grid_results, "train_counts": self.train_counts,
+            "skipped_objectives": self.skipped_objectives,
+            "target": "gross amount over [t0, t0 + 4 weeks) given at least one purchase",
+            "negative_prediction_policy": "clip_at_zero", "xgboost_version": xgboost.__version__,
+        })
+
+    @classmethod
+    def load(cls, directory: str | Path) -> "GrossXGBoost4w":
+        """저장된 모델을 불러오고 booster의 예측 변수 순서가 메타데이터와 같은지 확인한다."""
+        import xgboost as xgb
+
+        directory = Path(directory)
+        meta = read_json(directory / "gross_4w_meta.json")
+        if meta.get("model") != GROSS_NAME:
+            raise ValueError("not a 4-week gross XGBoost model directory")
+        model = cls(meta["seed"], meta["grid"], meta["fixed"], meta["feature_names"])
+        model.model = xgb.XGBRegressor()
+        model.model.load_model(directory / "regressor.json")
+        if list(model.model.get_booster().feature_names or []) != model.feature_names:
+            raise ValueError("saved booster feature order differs from its metadata")
+        model.best_params, model.grid_results = meta["best_params"], meta["grid_results"]
+        model.train_counts = meta.get("train_counts", {})
+        model.skipped_objectives = meta.get("skipped_objectives", [])
+        return model

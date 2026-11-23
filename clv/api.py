@@ -1,7 +1,11 @@
 """CLV 공개 API: 다른 KIT 모듈(전략·예산 최적화, 대시보드)은 이 모듈만 import하면 된다 (WBS 4.7).
 
-예측 대상은 기준시점 ``t0``부터 **52주(364일)** 동안의 결제액 합이다. 열 이름 ``predicted_clv_12m``은
-호환성 때문에 유지하는 이름이며 달력 12개월이 아니다.
+예측 대상은 두 가지이며 같은 고객·같은 기준시점 ``t0``를 쓴다(정의는 ``model_spec.md``).
+
+* ``predicted_clv_12m``: ``t0``부터 **52주(364일)** 동안의 할인 후 실결제액 합. 열 이름은 호환성 때문에 유지하는
+  이름이며 달력 12개월이 아니다. 새 학습(``control_no_coupon``)에서는 쿠폰을 보내지 않았을 때의 값이다.
+* ``predicted_gross_4w_if_purchase``: ``t0``부터 **4주** 안에 한 번 이상 구매한다면 기대되는 할인 전 총구매액
+  (반복 주문 포함). 4주 모델이 없는 번들(기존 전달 번들)에서는 결측이며 ``gross_4w_status``로 상태를 알린다.
 
 결과 파일만 읽을 때::
 
@@ -19,6 +23,7 @@
     from clv.api import HANDOFF_BUNDLE, predict_for_strategy
     result = predict_for_strategy("<features 디렉터리>", ledger="<dataset 디렉터리>", model_dir=HANDOFF_BUNDLE)
     # result.frame(11열), result.metadata(PredictionMetadata 5항목), result.audit, result.producer_metadata
+    # result.gross_4w(같은 행의 4주 batch 또는 None), result.gross_4w_metadata, result.gross_4w_status
 """
 from __future__ import annotations
 
@@ -26,23 +31,30 @@ from pathlib import Path
 
 import pandas as pd
 
-from .bundle import HANDOFF_BUNDLE, TARGET, TARGET_DEFINITION_ID, VALUE_SEMANTICS
-from .config import CLVConfig, load_config
-from .inference import STRATEGY_COLUMNS, CLVModel, StrategyPredictions, load_strategy_predictions
+from .bundle import (
+    GROSS_NOT_TRAINED, GROSS_TARGET, GROSS_TARGET_DEFINITION_ID, HANDOFF_BUNDLE, TARGET, TARGET_DEFINITION_ID,
+    VALUE_SEMANTICS,
+)
+from .config import POPULATION_POLICIES, CLVConfig, load_config
+from .inference import (
+    GROSS_STRATEGY_COLUMNS, STRATEGY_COLUMNS, CLVModel, StrategyPredictions, load_strategy_predictions,
+)
 from .pipeline import evaluate, run, train, write_predictions
-from .schema import HIGH_VALUE_COLUMN, OUTPUT_COLUMNS, PREDICTION_COLUMN, SEOUL
+from .schema import GROSS_PREDICTION_COLUMN, HIGH_VALUE_COLUMN, OUTPUT_COLUMNS, PREDICTION_COLUMN, SEOUL
 
 __all__ = [
     # 학습·평가
-    "train_clv", "evaluate_clv", "run_clv", "CLVConfig", "load_config",
+    "train_clv", "evaluate_clv", "run_clv", "CLVConfig", "load_config", "POPULATION_POLICIES",
     # 추론(전달 번들 위치는 HANDOFF_BUNDLE)
     "load_model", "CLVModel", "predict_clv", "model_info", "HANDOFF_BUNDLE",
     # 전략 모듈 입력
     "predict_for_strategy", "StrategyPredictions", "load_strategy_predictions", "STRATEGY_COLUMNS",
+    "GROSS_STRATEGY_COLUMNS",
     # 결과 파일
     "load_clv_predictions", "write_predictions",
     # 계약 상수
     "PREDICTION_COLUMN", "HIGH_VALUE_COLUMN", "TARGET", "TARGET_DEFINITION_ID", "VALUE_SEMANTICS",
+    "GROSS_PREDICTION_COLUMN", "GROSS_TARGET", "GROSS_TARGET_DEFINITION_ID", "GROSS_NOT_TRAINED",
 ]
 
 
@@ -56,7 +68,8 @@ def _config(config) -> CLVConfig | None:
 
 
 def train_clv(weekly, ledger=None, output_dir: str | Path = "results/clv", config=None, cutoff=None, **options) -> dict:
-    """CLV 모델 4종(Baseline, BG/NBD + GG, XGBoost, 두 파트 XGBoost)을 학습·평가하고 번들로 저장한다.
+    """52주 CLV 모델 4종(Baseline, BG/NBD + GG, XGBoost, 두 파트 XGBoost)과 4주 조건부 총구매액 XGBoost를
+    학습·평가하고 번들로 저장한다. 학습 모집단은 ``config.population_policy``(기본 Control-only)다.
 
     Args:
         weekly: ``weekly_panel.parquet``, 시뮬레이터 features 디렉터리, CSV 또는 DataFrame.
@@ -65,6 +78,7 @@ def train_clv(weekly, ledger=None, output_dir: str | Path = "results/clv", confi
         output_dir: 번들(모델, ``registry.json``, ``model_card.json``, 보고서)을 저장할 위치.
         config: ``CLVConfig``, dict 또는 JSON/YAML 경로.
         cutoff: 학습 기준시점 t0(서울 월요일). 기본값은 적격 고객이 가장 많은 기준시점.
+        options: ``overwrite=True``면 이미 번들이 있는 ``output_dir``을 덮어쓴다(기본은 거절).
 
     Returns:
         저장한 registry(dict).
@@ -96,10 +110,15 @@ def model_info(model_dir: str | Path = "results/clv", model: str | None = None) 
 
 
 def predict_clv(weekly, ledger=None, model_dir: str | Path = "results/clv", reference_week=None, model=None,
-                output: str | Path | None = None, customers=None, **options) -> pd.DataFrame:
-    """52주 CLV를 예측한다(``CLVModel.predict``). 미래 정답은 필요 없고, ``output``을 주면 CSV도 쓴다."""
+                output: str | Path | None = None, customers=None, require_gross_4w: bool = False,
+                **options) -> pd.DataFrame:
+    """52주 CLV와 4주 조건부 총구매액을 같은 행으로 예측한다(``CLVModel.predict``). ``output``을 주면 CSV도 쓴다.
+
+    번들에 4주 모델이 없으면 ``predicted_gross_4w_if_purchase``는 결측이다(``require_gross_4w=True``면 오류).
+    """
     predictions = load_model(model_dir, model).predict(weekly, ledger, reference_week=reference_week,
-                                                       customers=customers, **options)
+                                                       customers=customers, require_gross_4w=require_gross_4w,
+                                                       **options)
     if output is not None:
         write_predictions(predictions, output)
     return predictions
@@ -107,14 +126,15 @@ def predict_clv(weekly, ledger=None, model_dir: str | Path = "results/clv", refe
 
 def predict_for_strategy(features, weekly=None, ledger=None, model_dir: str | Path = "results/clv", model=None,
                          output: str | Path | None = None, allow_training_customers: bool = False,
-                         **options) -> StrategyPredictions:
+                         require_gross_4w: bool = False, **options) -> StrategyPredictions:
     """Feature Store의 모든 (고객, 기준 시각)에 대한 전략 모듈 입력 batch(``CLVModel.predict_for_strategy``).
 
-    ``output``(``.parquet``)을 주면 frame, ``_metadata.json``, ``_audit.csv``도 쓴다.
-    CLV 학습·모델 선택에 쓴 고객이 있으면 기본으로 오류다(``allow_training_customers``).
+    ``output``(``.parquet``)을 주면 frame, ``_metadata.json``, ``_audit.csv``(4주 모델이 있으면 ``_gross_4w.parquet``)도
+    쓴다. CLV 학습·모델 선택에 쓴 고객이 있으면 기본으로 오류다(``allow_training_customers``).
     """
     result = load_model(model_dir, model).predict_for_strategy(
-        features, weekly, ledger, allow_training_customers=allow_training_customers, **options)
+        features, weekly, ledger, allow_training_customers=allow_training_customers,
+        require_gross_4w=require_gross_4w, **options)
     if output is not None:
         result.save(output)
     return result
@@ -137,6 +157,8 @@ def load_clv_predictions(path: str | Path = "results/clv_predictions.csv") -> pd
     if "prediction_end_at" in frame:
         frame["prediction_end_at"] = pd.to_datetime(frame["prediction_end_at"], utc=True).dt.tz_convert(SEOUL)
     frame[PREDICTION_COLUMN] = frame[PREDICTION_COLUMN].astype(float)
+    if GROSS_PREDICTION_COLUMN in frame:
+        frame[GROSS_PREDICTION_COLUMN] = frame[GROSS_PREDICTION_COLUMN].astype(float)
     # CSV의 Boolean은 문자열로 읽힐 수 있으므로 "true"/"1"만 참으로 본다.
     frame[HIGH_VALUE_COLUMN] = frame[HIGH_VALUE_COLUMN].map(
         lambda value: str(value).strip().lower() in ("true", "1")).astype(bool)

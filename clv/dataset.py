@@ -2,6 +2,9 @@
 
 정답은 ``[t0, t0 + 52주)`` 결제액(``gross_revenue - redemption_discount_cost``, 쿠폰 발송비 미차감)의 합이고,
 52주가 모두 완전 관측일 때만 만든다. 시뮬레이터 ``future_revenue_12m``(달력 12개월, Control만)은 쓰지 않는다.
+
+같은 ``t0``의 4주 정답(``build_gross_labels``)은 ``[t0, t0 + 4주)``의 할인 전 총구매액(``gross_revenue``, 반복 주문
+포함, 할인액·쿠폰 발송비 미차감)이다. 4주가 모두 완전 관측이고 한 번 이상 구매한 고객만 금액 정답이 있다.
 """
 from __future__ import annotations
 
@@ -9,7 +12,10 @@ import numpy as np
 import pandas as pd
 
 from .features import WEEK, build_features, fully_observed, to_cutoff
-from .schema import CONTEXT_COLUMNS, INPUT_WEEKS, LABEL_COLUMN, LABEL_WEEKS, PROVENANCE_COLUMNS
+from .schema import (
+    ASSIGNMENT_COLUMN, CONTEXT_COLUMNS, GROSS_COMPLETE_COLUMN, GROSS_LABEL_COLUMN, GROSS_PURCHASES_COLUMN,
+    GROSS_WEEKS, INPUT_WEEKS, LABEL_COLUMN, LABEL_WEEKS, PROVENANCE_COLUMNS,
+)
 
 SPLITS = ("train", "validation", "test")
 
@@ -112,11 +118,39 @@ def build_labels(panel: pd.DataFrame, t0) -> pd.DataFrame:
     return result.drop(columns="label_paid_sum")
 
 
-def ledger_label_sums(orders: pd.DataFrame, t0) -> pd.Series:
-    """주문 원장에서 ``[t0, t0 + 52주)`` 안의 고객별 결제액 합을 구한다(정답 대조용)."""
+def build_gross_labels(panel: pd.DataFrame, t0) -> pd.DataFrame:
+    """``[t0, t0 + 4주)``의 구매 횟수와 구매 고객의 할인 전 총구매액(4주 조건부 금액 모델의 정답).
+
+    주마다 ``gross_revenue``(할인 전 금액)를 더하므로 4주 안의 반복 주문이 모두 들어가고, 할인액과 쿠폰 발송비는
+    빼지 않는다. 4주 중 미관측·부분 관측 주가 있으면 과소 집계되므로 두 값 모두 결측이다. 구매가 없는 고객의
+    금액은 0이 아니라 결측으로 두어 조건부 금액 모델의 정답으로 쓰지 않는다.
+    """
     t0 = to_cutoff(t0)
-    inside = orders.loc[orders["order_at"].ge(t0) & orders["order_at"].lt(t0 + LABEL_WEEKS * WEEK)]
-    return inside.groupby("customer_id")["paid_amount"].sum()
+    rows = panel.loc[panel["week"].ge(t0) & panel["week"].lt(t0 + GROSS_WEEKS * WEEK)]
+    grouped = rows.assign(_full=fully_observed(rows)).groupby("customer_id")
+    complete = grouped["_full"].sum().astype(int).eq(GROSS_WEEKS)
+    purchases = grouped["purchases"].sum(min_count=1).where(complete)
+    gross = grouped["gross_revenue"].sum(min_count=1).where(complete & purchases.gt(0).fillna(False))
+    result = pd.DataFrame({GROSS_COMPLETE_COLUMN: complete, GROSS_PURCHASES_COLUMN: purchases.astype("Float64"),
+                           GROSS_LABEL_COLUMN: gross.astype("Float64")})
+    result.index.name = "customer_id"
+    return result
+
+
+def ledger_label_sums(orders: pd.DataFrame, t0, weeks: int = LABEL_WEEKS, column: str = "paid_amount") -> pd.Series:
+    """주문 원장에서 ``[t0, t0 + weeks주)`` 안의 고객별 ``column`` 합을 구한다(정답 대조용)."""
+    t0 = to_cutoff(t0)
+    inside = orders.loc[orders["order_at"].ge(t0) & orders["order_at"].lt(t0 + weeks * WEEK)]
+    return inside.groupby("customer_id")[column].sum()
+
+
+def _ledger_check(values: pd.Series, ledger: pd.Series, what: str) -> None:
+    """주간 패널로 만든 고객별 값이 원장 합계(원장에 없으면 0)와 정확히 같은지 본다. 다르면 ValueError."""
+    expected = ledger.reindex(values.index).fillna(0)
+    differs = values.astype(float).ne(expected.astype(float))
+    if differs.any():
+        raise ValueError(f"{int(differs.sum())} {what} disagree with the order ledger, e.g. "
+                         f"{list(values.index[differs][:5])}")
 
 
 def build_dataset(panel: pd.DataFrame, t0, orders: pd.DataFrame | None = None) -> pd.DataFrame:
@@ -129,28 +163,38 @@ def build_dataset(panel: pd.DataFrame, t0, orders: pd.DataFrame | None = None) -
     # 예측 변수는 [t0 - 13주, t0), 정답은 [t0, t0 + 52주)에서 따로 계산하므로 정답이 예측 변수로 새지 않는다.
     features = build_features(panel, t0)
     labels = build_labels(panel, t0)
-    result = features.join(labels, how="left")
-    result["label_window_complete"] = result["label_window_complete"].astype("boolean").fillna(False).astype(bool)
+    result = features.join(labels, how="left").join(build_gross_labels(panel, t0), how="left")
+    for name in ("label_window_complete", GROSS_COMPLETE_COLUMN):
+        result[name] = result[name].astype("boolean").fillna(False).astype(bool)
     result["label_weeks_observed"] = result["label_weeks_observed"].fillna(0).astype(int)
     if orders is not None:
-        # 원장 대조: 주간 패널로 만든 정답이 원장 주문 결제액 합과 정확히 같아야 한다(원장에 주문이 없으면 0).
-        ledger = ledger_label_sums(orders, t0)
-        labelled = result.loc[result["label_window_complete"], LABEL_COLUMN]
-        expected = ledger.reindex(labelled.index).fillna(0)
-        differs = labelled.astype(float).ne(expected.astype(float))
-        if differs.any():
-            raise ValueError(f"{int(differs.sum())} labels disagree with the order ledger, e.g. "
-                             f"{list(labelled.index[differs][:5])}")
+        # 원장 대조: 주간 패널로 만든 정답이 원장 주문 합계와 정확히 같아야 한다(원장에 주문이 없으면 0).
+        _ledger_check(result.loc[result["label_window_complete"], LABEL_COLUMN], ledger_label_sums(orders, t0),
+                      "labels")
+        complete = result.loc[result[GROSS_COMPLETE_COLUMN]]
+        counts = orders.assign(_one=1)
+        _ledger_check(complete[GROSS_PURCHASES_COLUMN], ledger_label_sums(counts, t0, GROSS_WEEKS, "_one"),
+                      "4-week purchase counts")
+        buyers = complete[GROSS_LABEL_COLUMN].dropna()
+        _ledger_check(buyers, ledger_label_sums(orders, t0, GROSS_WEEKS, "gross_amount"), "4-week gross labels")
         result["ledger_checked"] = result["label_window_complete"]
+    # 정답 구간(52주) 관측 주에 받은 쿠폰 수. Control-only 정책이 '쿠폰 미발송' 조건을 확인하는 데 쓴다.
+    label_rows = panel.loc[panel["week"].ge(t0) & panel["week"].lt(t0 + LABEL_WEEKS * WEEK)]
+    result["coupons_in_label_window"] = (label_rows.groupby("customer_id")["coupons"].sum(min_count=0)
+                                         .reindex(result.index).fillna(0).astype(int))
     customer = panel.groupby("customer_id")
-    if "treatment" in panel:
-        result["treatment"] = customer["treatment"].first().reindex(result.index).astype("Int64")
+    if ASSIGNMENT_COLUMN in panel:
+        result[ASSIGNMENT_COLUMN] = customer[ASSIGNMENT_COLUMN].first().reindex(result.index).astype("Int64")
     if "assigned_at" in panel:
         # 정답 구간 안에 실험 배정된 Treatment 고객 표시(정답에 쿠폰 효과가 섞인다).
         assigned = customer["assigned_at"].first().reindex(result.index)
         inside = assigned.ge(t0) & assigned.lt(t0 + LABEL_WEEKS * WEEK)
         result["treatment_in_label_window"] = (result.get("treatment", pd.Series(0, index=result.index))
                                                .fillna(0).eq(1) & inside.fillna(False))
+        # 4주 구간 안에 배정된 Treatment 고객(4주 배정군 비교 진단이 쿠폰 효과를 담는지 확인하는 데 쓴다).
+        inside_4w = assigned.ge(t0) & assigned.lt(t0 + GROSS_WEEKS * WEEK)
+        result["treatment_in_gross_window"] = (result.get("treatment", pd.Series(0, index=result.index))
+                                               .fillna(0).eq(1) & inside_4w.fillna(False))
     # 출력 `reference_week`는 예측 기준시점 t0이다(시뮬레이터 주간 행의 `reference_week`와 다른 개념).
     result.insert(0, "reference_week", t0)
     for name in ("currency", "amount_unit", "dataset_id"):

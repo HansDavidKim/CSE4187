@@ -1,7 +1,7 @@
 """CLV 컬럼 계약, 시뮬레이터 컬럼 매핑, 예측 변수 누수 방지 검사 (WBS 4.1·4.3).
 
-구간 계약은 고정이다: 기준시점 ``t0`` 이전 13주가 입력, ``t0``부터 52주가 정답 구간이다.
-예측 변수 이름에 이 길이가 들어가므로 설정값이 아니라 상수로 둔다.
+구간 계약은 고정이다: 기준시점 ``t0`` 이전 13주가 입력, ``t0``부터 52주가 CLV 정답 구간, ``t0``부터 4주가
+조건부 총구매액 정답 구간이다. 예측 변수·정답 이름에 이 길이가 들어가므로 설정값이 아니라 상수로 둔다.
 """
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ WEEK_SECONDS = 7 * 24 * 3600
 INPUT_WEEKS = 13
 RECENT_WEEKS = 4
 LABEL_WEEKS = 52
+# 4주 조건부 총구매액 모델의 정답 구간 길이(쿠폰 유효기간 28일, Uplift의 향후 4주 구매와 같은 구간).
+GROSS_WEEKS = 4
 # 13주 안에 활동이 없을 때의 경과 주 수 값(구간 바로 바깥인 14).
 NO_EVENT_RECENCY = INPUT_WEEKS + 1
 
@@ -38,6 +40,12 @@ PROVENANCE_COLUMNS = ("currency", "amount_unit", "dataset_id")
 CONTEXT_COLUMNS = ("treatment", "group", "assigned_at", "as_of_at", "signed_up_at")
 # 금액 대조(`net_revenue_minor` == 총매출 - 할인액)에만 읽는 시뮬레이터 컬럼.
 CHECK_COLUMNS = {"net_revenue_minor": "source_net_revenue"}
+# 실험 배정 열(어댑터가 검사하는 내부 이름). 시뮬레이터 ``treatment``: 0 = Control(쿠폰 미발송군),
+# 그 밖의 값 = 쿠폰 발송군. ``group``이 있으면 ``"control"``이 ``treatment == 0``과 일치해야 한다.
+# 시뮬레이터 배정 규약이 바뀌면 이 상수와 ``adapter.adapt_weekly``만 고친다.
+ASSIGNMENT_COLUMN = "treatment"
+CONTROL_CODE = 0
+CONTROL_GROUP_LABEL = "control"
 # 이 통화 값은 KRW로 간주하지 않는다(단위 환산도 하지 않음).
 UNSPECIFIED_CURRENCY = "SOURCE_UNSPECIFIED"
 
@@ -67,13 +75,19 @@ LABEL_COLUMN = "actual_clv_12m"
 PREDICTION_COLUMN = "predicted_clv_12m"
 # CLV 내부 이름이다. 공용 출력 열 이름은 팀 합의가 더 필요하다.
 HIGH_VALUE_COLUMN = "is_high_value_customer"
+# 4주 조건부 총구매액: 4주 안 구매 횟수, 구매 고객의 할인 전 총구매액(비구매 고객은 결측), 4주 관측 완전 여부.
+GROSS_PURCHASES_COLUMN = "actual_purchases_4w"
+GROSS_LABEL_COLUMN = "actual_gross_4w_if_purchase"
+GROSS_COMPLETE_COLUMN = "gross_4w_window_complete"
+GROSS_PREDICTION_COLUMN = "predicted_gross_4w_if_purchase"
 OUTPUT_COLUMNS = ("customer_id", "reference_week", PREDICTION_COLUMN, HIGH_VALUE_COLUMN)
 
 # 누수 방지: 고객 식별자, 절대 시각, 실험 배정, 정답·예측, 기준시점 이후 사실을 드러내는 이름.
 _FORBIDDEN_EXACT = {
     "customer_id", "week", "reference_week", "as_of_at", "snapshot_id", "offset_week", "relative_week",
     "treatment", "group", "assigned_at", "assignment_probability", "signed_up_at", "split",
-    LABEL_COLUMN, PREDICTION_COLUMN, HIGH_VALUE_COLUMN,
+    LABEL_COLUMN, PREDICTION_COLUMN, HIGH_VALUE_COLUMN, GROSS_LABEL_COLUMN, GROSS_PREDICTION_COLUMN,
+    GROSS_COMPLETE_COLUMN, "coupons_in_label_window", "policy_eligible",
 }
 _FORBIDDEN_PREFIXES = ("gap_", "future_", "label", "latent", "posthoc", "factual_", "outcome_",
                        "redeemed", "redemption_", "actual_", "churn", "response_")

@@ -68,11 +68,17 @@ def test_model_card_records_versions_and_checksums(bundle):
     registry = json.loads((bundle / "registry.json").read_text())
     assert card["target"]["horizon_value"] == 52 and card["target"]["horizon_unit"] == "weeks"
     assert card["target"]["definition_id"] == TARGET_DEFINITION_ID
-    expected = {"registry.json", "splits.csv", *(path for name in registry["trained_models"] for path in MODEL_FILES[name])}
+    # 4주 모델도 같은 방식으로 파일 체크섬과 버전을 남긴다.
+    assert registry["gross_4w"]["status"] == "trained"
+    versioned = [*registry["trained_models"], "xgboost_gross_4w"]
+    expected = {"registry.json", "splits.csv", *(path for name in versioned for path in MODEL_FILES[name])}
     assert set(card["files_sha256"]) == expected
     assert all(file_sha256(bundle / path) == digest for path, digest in card["files_sha256"].items())
-    assert set(card["model_versions"]) == set(registry["trained_models"])
+    assert set(card["model_versions"]) == set(versioned)
     assert re.fullmatch(r"clv-\d+\.\d+\.\d+\+xgboost\.[0-9a-f]{12}", card["model_versions"]["xgboost"])
+    assert card["gross_4w"]["model_version"] == card["model_versions"]["xgboost_gross_4w"]
+    assert card["bundle_schema_version"] == 2 and card["policy_condition"] == "control_no_coupon"
+    assert card["gross_4w"]["target"]["horizon_value"] == 4
     assert card["training_data"]["dataset_id"] == "synthetic-fixture-seed0"
     assert card["training_data"]["simulator"]["seed"] == 0  # raw manifest에서 옮겨 적은 출처
     assert card["environment"]["xgboost"] and card["code"]["clv_version"]

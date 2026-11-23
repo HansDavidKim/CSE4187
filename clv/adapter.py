@@ -15,8 +15,8 @@ import numpy as np
 import pandas as pd
 
 from .schema import (
-    AMOUNT_COLUMNS, CHECK_COLUMNS, CONTEXT_COLUMNS, COUNT_COLUMNS, COVERAGE_COLUMNS, ORDER_ALIASES,
-    REQUIRED_WEEKLY, SEOUL, SIMULATOR_TO_CLV, WEEK_SECONDS,
+    AMOUNT_COLUMNS, ASSIGNMENT_COLUMN, CHECK_COLUMNS, CONTEXT_COLUMNS, CONTROL_CODE, CONTROL_GROUP_LABEL,
+    COUNT_COLUMNS, COVERAGE_COLUMNS, ORDER_ALIASES, REQUIRED_WEEKLY, SEOUL, SIMULATOR_TO_CLV, WEEK_SECONDS,
 )
 
 # 모델 카드에 학습 데이터 출처로 옮겨 적는 시뮬레이터 manifest 항목(재생성·대조용).
@@ -130,6 +130,25 @@ def _require_units(currency, amount_unit, source: str) -> None:
         raise ValueError(f"{source} requires explicit currency and amount_unit; no default currency is assumed")
 
 
+def _check_assignment(result: pd.DataFrame) -> None:
+    """실험 배정(``ASSIGNMENT_COLUMN``)이 고객마다 하나이고, ``group``이 있으면 Control 표기와 일치하는지 본다.
+
+    Control-only 학습(``population.control_no_coupon``)이 이 열로 모집단을 고르므로, 규약이 어긋나면 조용히
+    섞지 않고 중단한다. 배정 값이 없는 고객(결측)은 허용하며 학습 정책에서 미배정으로 다룬다.
+    """
+    if ASSIGNMENT_COLUMN not in result:
+        return
+    assignment = result[ASSIGNMENT_COLUMN]
+    if assignment.groupby(result["customer_id"]).nunique().gt(1).any():
+        raise ValueError(f"{ASSIGNMENT_COLUMN} must be constant per customer")
+    if "group" in result:
+        labelled = assignment.notna() & result["group"].notna()
+        control_code = assignment.eq(CONTROL_CODE).fillna(False)
+        control_label = result["group"].astype("string").eq(CONTROL_GROUP_LABEL).fillna(False)
+        if (labelled & control_code.ne(control_label)).any():
+            raise ValueError(f"group {CONTROL_GROUP_LABEL!r} must match {ASSIGNMENT_COLUMN} == {CONTROL_CODE}")
+
+
 def adapt_weekly(frame: pd.DataFrame, *, currency: str | None = None, amount_unit: str | None = None,
                  dataset_id: str | None = None) -> pd.DataFrame:
     """주간 프레임을 CLV 스키마로 매핑하고 결제액을 만든다.
@@ -207,6 +226,7 @@ def adapt_weekly(frame: pd.DataFrame, *, currency: str | None = None, amount_uni
             elif name == "treatment":
                 values = _whole_numbers(values, name)
             result[name] = values.to_numpy()
+    _check_assignment(result)
     # 통화·단위는 입력 그대로 전달한다(`SOURCE_UNSPECIFIED`도 KRW로 바꾸지 않고 환산하지 않음).
     currency = _provenance(frame, "currency", currency)
     amount_unit = _provenance(frame, "amount_unit", amount_unit)

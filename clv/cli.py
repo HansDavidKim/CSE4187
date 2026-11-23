@@ -3,11 +3,11 @@
 Commands
     validate   schema, money, units, coverage and ledger checks
     cutoffs    list cutoffs t0 whose 13 + 52 weeks are observed
-    train      fit and evaluate baseline, BG/NBD + Gamma-Gamma, XGBoost and two-part XGBoost
+    train      fit and evaluate the four 52-week CLV models and the 4-week gross model
     evaluate   score saved models at a cutoff
     predict    write the prediction CSV (no label needed)
     run        train + evaluate + predict
-    info       model version, target (52 weeks), training data and code versions of a bundle
+    info       model versions, targets (52 weeks, 4 weeks), policy, training data and code versions
     strategy   prediction batch for the final_strategy module, keyed like a feature store
 """
 # WBS 4.7: CLV 명령행 진입점(validate, cutoffs, train, evaluate, predict, run, info, strategy).
@@ -52,6 +52,9 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--output", type=Path, default=Path("results/clv"))
     train.add_argument("--config", type=Path, help="JSON or YAML settings (a 'clv:' section is allowed)")
     train.add_argument("--cutoff", help="training cutoff t0 (Asia/Seoul Monday), default: most eligible customers")
+    train.add_argument("--overwrite", action="store_true", help="replace a bundle already in --output")
+    train.add_argument("--require-gross-4w", action="store_true",
+                       help="fail (and save nothing) if the 4-week gross model cannot be trained")
     evaluate = commands.add_parser("evaluate")
     _inputs(evaluate)
     evaluate.add_argument("--model-dir", type=Path, default=Path("results/clv"))
@@ -72,6 +75,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--config", type=Path)
     run.add_argument("--cutoff")
     run.add_argument("--reference-week")
+    run.add_argument("--overwrite", action="store_true", help="replace a bundle already in --output")
+    run.add_argument("--require-gross-4w", action="store_true",
+                     help="fail (and save nothing) if the 4-week gross model cannot be trained")
     info = commands.add_parser("info")
     info.add_argument("--model-dir", type=Path, default=Path("results/clv"))
     info.add_argument("--model", choices=MODELS, help="default: registry final model")
@@ -123,15 +129,18 @@ def main(argv=None) -> dict:
         summary = {"cutoffs": table.loc[table["eligible_customers"] > 0].to_dict("records"),
                    "candidate_cutoffs": int(len(table))}
     elif args.command == "train":
-        registry = pipeline.train(args.weekly, args.ledger, args.output, load_config(args.config), args.cutoff, **options)
-        summary = {key: registry[key] for key in ("reference_week", "dataset", "split_counts", "model_status",
-                                                  "final_model", "test_metrics")}
+        registry = pipeline.train(args.weekly, args.ledger, args.output, load_config(args.config), args.cutoff,
+                                  overwrite=args.overwrite, require_gross_4w=args.require_gross_4w, **options)
+        summary = {key: registry[key] for key in ("reference_week", "population", "dataset", "split_counts",
+                                                  "model_status", "final_model", "test_metrics")}
+        summary["gross_4w"] = {key: registry["gross_4w"][key] for key in ("status", "split_counts", "test_metrics")}
     elif args.command == "evaluate":
         report = pipeline.evaluate(args.weekly, args.ledger, args.model_dir, args.cutoff, args.population,
                                    args.output, **options)
         summary = {"reference_week": report["reference_week"], "customers": report["customers"],
                    "models": {name: {key: value[key] for key in ("mae", "rmse")} | {"top20_overlap_rate": value["top"]["overlap_rate"]}
-                              for name, value in report["models"].items()}}
+                              for name, value in report["models"].items()},
+                   "gross_4w": report["gross_4w"]}
     elif args.command == "predict":
         predictions = pipeline.predict(args.weekly, args.ledger, args.model_dir, args.reference_week, args.model,
                                        customers=_customer_ids(args.customers), **options)
@@ -139,7 +148,8 @@ def main(argv=None) -> dict:
         summary = {"predictions": str(path), "customers": int(len(predictions)),
                    "reference_week": predictions["reference_week"].iloc[0], "model": predictions["model_name"].iloc[0],
                    "model_version": predictions["model_version"].iloc[0],
-                   "high_value_customers": int(predictions["is_high_value_customer"].sum())}
+                   "high_value_customers": int(predictions["is_high_value_customer"].sum()),
+                   "gross_4w_status": predictions["gross_4w_status"].iloc[0]}
     elif args.command == "strategy":
         from .inference import CLVModel
 
@@ -149,10 +159,12 @@ def main(argv=None) -> dict:
         summary = {"predictions": str(path), "metadata": result.metadata, "customers": int(len(result.frame)),
                    "snapshots": result.producer_metadata["snapshots"],
                    "training_overlap": result.producer_metadata["training_overlap"],
+                   "gross_4w_status": result.gross_4w_status, "gross_4w_metadata": result.gross_4w_metadata,
                    "warnings": result.producer_metadata["warnings"]}
     else:
         result = pipeline.run(args.weekly, args.ledger, args.output, args.predictions, load_config(args.config),
-                              args.cutoff, args.reference_week, **options)
+                              args.cutoff, args.reference_week, overwrite=args.overwrite,
+                              require_gross_4w=args.require_gross_4w, **options)
         registry = result.pop("registry")
         summary = {**result, "training_reference_week": registry["reference_week"], "final_model": registry["final_model"],
                    "model_status": registry["model_status"], "test_metrics": registry["test_metrics"]}

@@ -1,7 +1,7 @@
 # CLV 전달 문서: 모델 파일·추론 API·입력 데이터·버전
 
 전략·예산 최적화(`final_strategy`)와 대시보드가 CLV 예측을 같은 평가 고객에 대해 직접 만들 수 있도록 정리한 문서다.
-설치·학습 방법과 모델 설명은 [readme.md](readme.md)에 있다.
+설치·학습 방법과 모델 설명은 [readme.md](readme.md), 예측 대상과 Uplift 담당과의 합의는 [model_spec.md](model_spec.md)에 있다.
 
 ## 0. 요약
 
@@ -17,6 +17,10 @@
 - 최종 전략 평가는 CLV 학습에 쓰지 않은 고객으로 해야 한다. 전달한 번들은 seed 42 데이터셋으로 학습했으므로,
   평가용 Feature Store는 **다른 seed의 데이터셋**(예: seed 43)이 기본이다([3장](#3-평가-고객과-학습-고객)).
 - 학습·평가 데이터셋은 요구사항의 최소 규모인 20,000명이다(24개월).
+- 같은 고객·같은 기준 시각의 **4주 조건부 총구매액**(`predicted_gross_4w_if_purchase`)을 별도 batch로 함께 준다.
+  저장소의 전달 번들은 이 모델이 생기기 전에 학습해 4주 값이 없다(`gross_4w_status = "not_trained"`, 1·5장).
+- 새 학습은 Control만 쓰는 `control_no_coupon`이 기본이다. 전달 번들은 배정군을 섞어 학습했고(`observed_experiment_mix`),
+  최종 시뮬레이터 데이터가 확정되면 새 정책으로 다시 학습해 교체한다.
 
 ## 1. 예측 대상 계약
 
@@ -28,11 +32,36 @@
 | 예측값 | 고객별 결제액 합 = `gross_revenue - redemption_discount_cost`. 쿠폰 발송비는 빼지 않는다 |
 | 값의 성질 | 0 이상의 유한한 금액(`nonnegative_amount`). 모든 모델이 음수 예측을 0으로 자른다 |
 | 금액 단위 | 원천 최소 단위 그대로. 현재 데이터는 `currency=SOURCE_UNSPECIFIED`, `amount_unit=0.01`이며 KRW로 환산하지 않는다 |
-| 정책 조건 | `observed_experiment_mix`. 학습 정답 구간에 학습용 실험의 쿠폰 발송(Treatment 50%)이 섞여 있다 |
+| 정책 조건 | 번들의 `policy_condition`. 새 학습은 `control_no_coupon`(쿠폰을 보내지 않았을 때의 값), 현재 전달 번들은 `observed_experiment_mix`(학습 정답 구간에 실험 쿠폰 발송이 섞임) |
 | 대상 정의 ID | `clv_paid_amount_52w_v1`. 정의가 바뀌면 번호를 올린다 |
 
-정책 조건 때문에 이 CLV는 "쿠폰을 보내지 않았을 때의 CLV"가 아니다. `Uplift × CLV` 우선순위 점수에서 쿠폰 효과를
-두 번 세지 않는지는 팀 합의가 필요하다([9장](#9-제한과-합의가-필요한-점)).
+4주 조건부 총구매액(같은 `customer_id`·같은 `t0`)의 계약은 다음과 같다.
+
+| 항목 | 값 |
+| --- | --- |
+| 예측 구간 | `[t0, t0 + 4주)` = 28일. `prediction_end_at = as_of_at + 4주` |
+| 예측값 | 4주 안에 한 번 이상 구매한다면 기대되는 할인 전 총구매액(`gross_revenue` 합, 반복 주문 포함). 할인액·발송비 미차감 |
+| 학습 모집단 | Control 중 4주 관측이 완전하고 4주 안에 구매한 고객 |
+| 대상 정의 ID | `gross_amount_4w_if_purchase_v1` |
+| 모델이 없을 때 | 값을 만들지 않는다. 0이나 52주 값으로 채우지 않고 상태(`not_trained`)로 알린다 |
+
+Uplift 담당과 합의한 내용([model_spec.md](model_spec.md))을 요약하면 다음과 같다.
+
+1. 52주 CLV는 Control(쿠폰 미발송군)만으로 학습한다.
+2. 52주 CLV는 쿠폰을 보내지 않았을 때의 예상 실결제액이다.
+3. 4주 금액 모델은 Control 고객 중 4주 안에 구매한 고객만으로 학습한다.
+4. 4주 금액은 구매한다면 기대되는 할인 전 총구매액이다.
+5. 4주 금액에는 반복 주문이 포함된다.
+6. 두 모델은 같은 `customer_id`와 같은 `t0`를 쓴다.
+7. Uplift 담당은 같은 고객·같은 `t0`의 `p0`(미발송 시 4주 구매 확률), `p1`(발송 시), `uplift_4w = p1 - p0`를 준다.
+8. 최종 전략은 `uplift_4w × predicted_gross_4w_if_purchase - 예상 쿠폰 비용`을 근사적인 발송 가치로 쓴다.
+9. 발송군과 미발송군의 구매자당 금액은 다를 수 있다. 그래서 학습 보고서의 배정군 진단(`gross_4w.assignment_diagnostic`)으로
+   이 가정을 확인한다.
+10. 52주 CLV(할인 후 실결제액)와 4주 금액(할인 전 총구매액, 구매 조건부)은 서로 다른 지표다.
+
+`PredictionMetadata`의 52주 `target_definition_id`(`clv_paid_amount_52w_v1`)는 두 정책에서 같다. 어떤 정책으로 학습한
+번들인지는 `producer_metadata["policy_condition"]`(또는 `model_card.json`)으로 확인한다. Uplift와 결합할 때는
+`control_no_coupon`인지 먼저 확인한다.
 
 ## 2. 빠른 시작
 
@@ -62,6 +91,10 @@ features = load_feature_store(f"{DATA}/features")
 - `clv.metadata`는 `PredictionMetadata`와 필드 이름이 같은 dict다. CLV는 `final_strategy`를 import하지 않는다.
 - `ledger`를 생략해도 최종 모델(XGBoost)은 예측할 수 있다. 다만 원장과의 체크섬 대조는 빠지고,
   Feature Store manifest와의 대조만 남는다.
+- 4주 모델이 있는 번들이면 `clv.gross_4w`가 같은 행·같은 키의 4주 batch이고, `clv.gross_4w_metadata`가 그
+  `PredictionMetadata` 5항목(4주, `gross_amount_4w_if_purchase_v1`)이다. 없으면 둘 다 None이고 `clv.gross_4w_status`가
+  `not_trained`다. 4주 값이 반드시 필요하면 `require_gross_4w=True`로 호출해 없을 때 오류를 받는다.
+  현재 `final_strategy` 검증기는 CLV에 52주만 받으므로 4주 batch는 별도 입력으로 다뤄야 한다.
 
 ### 명령행과 파일 전달
 
@@ -78,6 +111,7 @@ python -m clv strategy \
 - `clv_strategy_predictions.parquet`: frame
 - `clv_strategy_predictions_metadata.json`: 메타데이터와 체크섬
 - `clv_strategy_predictions_audit.csv`: 감사용 표
+- 4주 모델이 있으면 `clv_strategy_predictions_gross_4w.parquet`: 4주 batch
 
 다시 읽을 때는 `clv.api.load_strategy_predictions(path)`를 쓴다. 체크섬을 대조한 뒤 같은 `StrategyPredictions`를 돌려준다.
 
@@ -91,6 +125,7 @@ top = model.predict(f"{DATA}/features", reference_week="2025-01-06", customers=[
 ```
 
 `customers`를 주면 그 고객만 예측한다. 상위 20% 표시와 순위는 반환되는 고객들 안에서 다시 정한다.
+같은 행에 `predicted_gross_4w_if_purchase`와 `gross_4w_status`가 붙는다(4주 모델이 없으면 값은 결측).
 
 ## 3. 평가 고객과 학습 고객
 
@@ -129,6 +164,8 @@ top = model.predict(f"{DATA}/features", reference_week="2025-01-06", customers=[
   test_only = store.loc[roles.eq("test").to_numpy()]
   clv = predict_for_strategy(test_only, weekly=FEATURES, model_dir=HANDOFF_BUNDLE)   # DataFrame이면 weekly 필수
   ```
+- `control_no_coupon` 번들에서는 학습 데이터셋의 Treatment 고객이 분할되지 않아 `unused`다. 모델이 본 적 없는 고객이라
+  허용된다.
 - `allow_training_customers=True`(CLI `--allow-training-customers`)는 개발 중 배선 확인용이다. 결과를 만들되
   `producer_metadata["warnings"]`에 겹친 인원을 남긴다.
 - 한계: 학습 고객 판정은 `dataset_id`가 같은지로 한다. seed 42로 설정만 바꿔 다시 만든 데이터셋은 `dataset_id`가 달라
@@ -141,13 +178,13 @@ top = model.predict(f"{DATA}/features", reference_week="2025-01-06", customers=[
 
 | 함수·클래스 | 용도 | 반환 |
 | --- | --- | --- |
-| `predict_for_strategy(features, weekly=None, ledger=None, model_dir="results/clv", model=None, output=None, allow_training_customers=False)` | 전략 모듈 입력 batch | `StrategyPredictions` |
+| `predict_for_strategy(features, weekly=None, ledger=None, model_dir="results/clv", model=None, output=None, allow_training_customers=False, require_gross_4w=False)` | 전략 모듈 입력 batch(4주 batch 포함) | `StrategyPredictions` |
 | `load_strategy_predictions(path)` | 저장한 batch를 체크섬 대조 후 읽기 | `StrategyPredictions` |
 | `load_model(model_dir="results/clv", model=None)` | 번들을 체크섬 대조 후 불러오기 | `CLVModel` |
 | `model_info(model_dir, model=None)` | 모델·버전·학습 데이터·Test 지표 요약 | dict |
-| `predict_clv(weekly, ledger=None, model_dir=..., reference_week=None, model=None, output=None, customers=None)` | 고객별 예측(CSV 선택) | DataFrame |
+| `predict_clv(weekly, ledger=None, model_dir=..., reference_week=None, model=None, output=None, customers=None, require_gross_4w=False)` | 고객별 52주·4주 예측(CSV 선택) | DataFrame |
 | `load_clv_predictions(path)` | `results/clv_predictions.csv`를 자료형 맞춰 읽기 | DataFrame |
-| `train_clv`, `evaluate_clv`, `run_clv` | 학습·평가·일괄 실행 | dict |
+| `train_clv`, `evaluate_clv`, `run_clv` | 학습·평가·일괄 실행. 이미 번들이 있는 디렉터리에는 `overwrite=True` 없이 쓰지 않는다. `train_clv(..., require_gross_4w=True)`는 4주 모델이 없으면 저장하지 않는다 | dict |
 
 인자 설명:
 
@@ -158,7 +195,8 @@ top = model.predict(f"{DATA}/features", reference_week="2025-01-06", customers=[
 
 `CLVModel`의 주요 속성·메서드는 다음과 같다.
 
-- 속성: `name`, `model_version`, `metadata`, `needs_ledger`, `training_reference_week`, `card`(모델 카드), `registry`
+- 속성: `name`, `model_version`, `metadata`, `needs_ledger`, `training_reference_week`, `card`(모델 카드), `registry`,
+  `policy_condition`, `has_gross_4w`, `gross_4w_status`, `gross_4w_version`, `gross_4w_metadata`
 - 메서드: `predict(...)`, `predict_for_strategy(...)`, `info()`, `training_roles(dataset_id, customer_ids)`
 
 ### 거절하는 입력
@@ -175,6 +213,8 @@ top = model.predict(f"{DATA}/features", reference_week="2025-01-06", customers=[
 | 키 중복, 한 batch에 여러 데이터셋·통화·단위 | 전략 모듈 계약과 같음 |
 | 기준 시각 직전 13주에 관측 주가 하나도 없는 고객 | 이력을 지어내지 않음 |
 | `train`·`validation` 고객 포함(기본) | 3장 |
+| `require_gross_4w=True`인데 번들에 4주 모델이 없음 | 4주 값을 지어내지 않음 |
+| 학습 출력 디렉터리에 이미 번들이 있음(`FileExistsError`) | 기존 번들 보호(`overwrite=True`로만 교체) |
 
 ## 5. 출력 형식
 
@@ -194,6 +234,13 @@ top = model.predict(f"{DATA}/features", reference_week="2025-01-06", customers=[
 | `input_cutoff_at` | `datetime64[ns, UTC]` | 입력 관측 상한(배타적). `as_of_at`과 같다 |
 | `prediction_end_at` | `datetime64[ns, UTC]` | `as_of_at + 52주` |
 | `predicted_clv_12m` | float64 | 52주 예상 결제액(원천 최소 단위, 0 이상) |
+
+### 4주 batch (`StrategyPredictions.gross_4w`)
+
+`frame`과 같은 행·같은 순서다. 열은 키 8열, `input_cutoff_at`, `prediction_end_at`(`as_of_at + 4주`),
+`predicted_gross_4w_if_purchase`(float64, 0 이상, 원천 최소 단위)다. 4주 모델이 없는 번들이면 None이다.
+`gross_4w_metadata`는 `model_version`(`clv-<버전>+xgboost_gross_4w.<12자>`), `target_definition_id`
+(`gross_amount_4w_if_purchase_v1`), `horizon_value`·`horizon_unit`(`4`, `"weeks"`), `value_semantics`(`"nonnegative_amount"`)다.
 
 ### `metadata`
 
@@ -227,6 +274,7 @@ top = model.predict(f"{DATA}/features", reference_week="2025-01-06", customers=[
 | `snapshots` | 기준 시각별 `input_cutoff_at`, `prediction_end_at`, 고객 수 |
 | `customers`, `history_incomplete_customers` | 인원 |
 | `training_overlap` | 같은 데이터셋 여부, 역할별 인원, 허용 여부 |
+| `gross_4w` | 4주 모델 이름·상태·버전·대상 정의 |
 | `warnings`, `created_at` | 경고와 생성 시각 |
 
 `raw_database_sha256_verified_by`에는 파일 해시까지 확인한 출처만 들어간다. 값은 `weekly_manifest`(features manifest)와
@@ -249,6 +297,8 @@ manifest 값이 일치한 출처만 `raw_database_sha256_matched`에 남는다. 
 - `history_complete`, `history_weeks_13w`
 - `currency`, `amount_unit`, `dataset_id`
 - 두 파트 모델이면 `purchase_probability_52w`, `expected_amount_if_purchase`
+- `predicted_gross_4w_if_purchase`(4주 모델이 없으면 빈 값), `gross_4w_status`, `gross_4w_model_version`,
+  `gross_4w_prediction_end_at`
 
 ## 6. 번들 구조와 버전 정보
 
@@ -261,17 +311,27 @@ artifacts/population-24m-n20000-seed42/
   reports/evaluation.json  Validation·Test 지표(이력 완전/미완전 구간 포함)
 ```
 
+이 번들은 형식 1이다. 새로 학습한 번들(형식 2)에는 다음이 더 있다.
+
+- `models/xgboost_gross_4w/`: 4주 모델
+- `splits.csv`: 정책 밖 고객(`unused`)과 배정·정책 대상 열
+- `reports/evaluation.json → gross_4w`: 4주 지표와 배정군 진단
+- `model_card.json → gross_4w`: 4주 모델의 상태·버전·대상·Test 지표
+
+기존 모델 파일과 모델 카드의 정책 표시는 바꾸지 않는다.
+
 `model_card.json`의 주요 항목은 다음과 같다.
 
 | 항목 | 내용 |
 | --- | --- |
 | `model_versions` | 모델별 버전. `clv-<CLV 버전>+<모델>.<registry·splits·모델 파일 체크섬 요약>`이므로 파일이 하나라도 바뀌면 달라진다 |
 | `final_model` | Validation RMSE가 가장 낮은 모델 |
-| `target`, `policy_condition` | 1장 계약 |
+| `target`, `policy_condition` | 1장 계약. `policy_condition`은 학습 모집단 정책이다 |
+| `gross_4w` | 4주 모델 상태(`trained`, `failed: ...`)와 버전·대상·Test 지표(형식 2만) |
 | `code` | 학습 당시 CLV 버전, git 커밋, `clv/` 미커밋 변경 여부 |
 | `environment` | Python·numpy·pandas·scipy·xgboost·pyarrow 버전 |
 | `training_data` | 학습 기준시점, `dataset_id`, `raw_database_sha256`, 주간 파일 체크섬, 시뮬레이터 manifest 일부(seed, months, 버전, 설정·코드 체크섬, 실험 시각, 최소 이력 일수 등), 분할 인원 |
-| `files_sha256` | registry, splits, 모델 파일의 SHA256. `load_model`이 불러올 때마다 대조한다 |
+| `files_sha256` | registry, splits, 모델 파일(4주 모델 포함)의 SHA256. `load_model`이 불러올 때마다 대조한다 |
 
 `artifacts/.gitattributes`가 줄바꿈 변환을 끈다. 그래서 Windows에서 받아도 체크섬이 유지된다.
 `python -m clv info --model-dir <번들>`로 요약을 볼 수 있다.
@@ -309,11 +369,14 @@ done
 - 관측 기간: 2024-01-01 ~ 2026-01-05T15:00Z(52주 정답 구간 전체 포함)
 - 고객 수: 데이터셋마다 20,000명(요구사항 최소 규모). 실험 적격: 배정 직전 28일 내 세션, `min_customer_history_days=0`
 
-번들을 다시 학습하려면 다음 명령을 쓴다(약 20초).
+번들을 다시 학습하려면 다음 명령을 쓴다(약 20초). 기본 정책은 `control_no_coupon`이고 4주 모델도 함께 학습한다.
+현재 전달 번들과 같은 배정군 혼합 학습은 `--config clv/configs/observed_experiment_mix.json`을 더한다.
+이미 번들이 있는 `--output`에는 쓰지 않는다. `control_no_coupon`에서 `--cutoff`를 빼면 실험 시각(`as_of_at`)이 t0가 된다.
+최종 학습에서는 `--require-gross-4w`를 붙여 4주 모델을 학습하지 못하면 아무것도 저장하지 않게 한다.
 
 ```bash
 python -m clv train --weekly results/simulator/main-84372a7/population-24m-n20000-seed42/features \
-  --ledger results/simulator/main-84372a7/population-24m-n20000-seed42/dataset --output results/clv
+  --ledger results/simulator/main-84372a7/population-24m-n20000-seed42/dataset --cutoff 2025-01-06 --output results/clv
 ```
 
 다시 학습하면 `model_version`이 바뀐다. 전략 결과에는 사용한 `model_version`을 함께 기록한다.
@@ -321,6 +384,8 @@ python -m clv train --weekly results/simulator/main-84372a7/population-24m-n2000
 ## 8. 현재 번들 성능
 
 모두 실제로 실행한 결과다. 금액은 원천 최소 단위이며, 실제 52주 결제액은 고객 82%가 0원이다.
+현재 전달 번들(`observed_experiment_mix`, 배정군 혼합 학습)의 성능이다. Control-only 52주 모델과 4주 모델의 성능은
+최종 시뮬레이터 데이터로 다시 학습한 뒤 추가한다.
 
 **seed 42 Test 4,000명**(학습 데이터셋의 보고용 고객, 평균 실제값 2,202)
 
@@ -356,6 +421,9 @@ python -m clv train --weekly results/simulator/main-84372a7/population-24m-n2000
 
 - 한 batch는 한 데이터셋이다. 기준 시각은 서울 월요일 00:00만 지원한다(현재 시뮬레이터 실험 시각과 같다).
 - 학습 기준시점(2025-01-06)과 다른 시각에도 예측할 수 있다. 하지만 학습 분포와 달라질 수 있어 성능은 위 표와 다를 수 있다.
-- 정책 조건이 `observed_experiment_mix`다. Uplift 점수와 곱할 때 쿠폰 효과 중복 반영 여부는 팀 합의가 필요하다.
+- 현재 전달 번들은 `observed_experiment_mix`이고 4주 모델이 없다. Uplift와의 결합(`uplift_4w × 4주 금액`)에는
+  Control-only로 다시 학습한 번들을 쓴다([model_spec.md](model_spec.md)).
+- `final_strategy`의 현재 입력 계약에는 4주 금액 입력이 없다. 4주 batch를 어떤 이름·검증으로 받을지는 최종 전략
+  담당과 정해야 한다.
 - `is_high_value_customer`는 CLV 내부 이름이다. 전략 모듈의 Segmentation은 상위 비율을 스스로 다시 계산한다.
 - `currency=SOURCE_UNSPECIFIED`는 KRW가 아니다. 예산(`--budget 50000000`)과 비교하려면 단위 합의가 먼저다.

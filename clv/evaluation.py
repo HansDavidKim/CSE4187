@@ -1,6 +1,8 @@
 """WBS 4.6: 모든 모델을 같은 고객, 같은 52주 정답으로 비교 평가한다.
 
 MAE·RMSE·편향, 분포, 10분위, Top-N, 상위 20% 고객 일치율을 계산한다.
+4주 조건부 총구매액 모델은 구매 고객만으로 따로 평가하고(``evaluate_gross_4w``), Treatment·Control의
+구매자당 4주 총구매액을 비교하는 진단(``gross_by_assignment``)을 만든다.
 """
 from __future__ import annotations
 
@@ -9,7 +11,9 @@ import math
 import numpy as np
 import pandas as pd
 
-from .schema import LABEL_COLUMN
+from .schema import (
+    ASSIGNMENT_COLUMN, CONTROL_CODE, GROSS_COMPLETE_COLUMN, GROSS_LABEL_COLUMN, GROSS_PREDICTION_COLUMN, LABEL_COLUMN,
+)
 
 QUANTILES = (0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99)
 
@@ -163,4 +167,70 @@ def evaluate_by_history(frame: pd.DataFrame, models, fraction: float = 0.2) -> d
     for name, value in HISTORY_SEGMENTS.items():
         part = frame.loc[flags.eq(value)]
         report[name] = evaluate_predictions(part, models, fraction) if len(part) > 1 else {"customers": int(len(part))}
+    return report
+
+
+def evaluate_gross_4w(frame: pd.DataFrame) -> dict:
+    """4주 금액 모델을 ``frame``의 구매 고객(``actual_gross_4w_if_purchase``가 있는 행)으로 평가한다.
+
+    MAE·RMSE, 평가 고객 수(``n``), 실제·예측 평균 총구매액(``mean_actual``·``mean_predicted``) 등을 돌려준다.
+    구매 고객이 없으면 ``{"n": 0}``.
+    """
+    buyers = frame.loc[frame[GROSS_LABEL_COLUMN].notna()]
+    if buyers.empty:
+        return {"n": 0}
+    return regression_metrics(buyers[GROSS_LABEL_COLUMN], buyers[GROSS_PREDICTION_COLUMN])
+
+
+def _gross_summary(part: pd.DataFrame, predicted: bool) -> dict:
+    """한 배정군의 4주 관측 완전 고객 수, 구매 고객 수·비율, 구매자당 총구매액 요약.
+
+    예측 요약(평균·MAE)은 ``out_of_sample`` 열이 있으면 모델이 적합·선택에 쓰지 않은 구매 고객으로만 낸다.
+    """
+    buyers = part.loc[part[GROSS_LABEL_COLUMN].notna()]
+    amounts = buyers[GROSS_LABEL_COLUMN].astype(float)
+    result = {"customers": int(len(part)), "buyers": int(len(buyers)),
+              "buyer_share": float(len(buyers) / len(part)) if len(part) else None,
+              "mean_gross_per_buyer": float(amounts.mean()) if len(buyers) else None,
+              "median_gross_per_buyer": float(amounts.median()) if len(buyers) else None,
+              "std_gross_per_buyer": float(amounts.std(ddof=1)) if len(buyers) > 1 else None}
+    if predicted:
+        unseen = buyers.loc[buyers["out_of_sample"].astype(bool)] if "out_of_sample" in buyers else buyers
+        result["predicted_buyers"] = int(len(unseen))
+        if len(unseen):
+            values = unseen[GROSS_PREDICTION_COLUMN].astype(float)
+            result.update(mean_predicted_gross_per_buyer=float(values.mean()),
+                          mae_on_buyers=float(np.mean(np.abs(values - unseen[GROSS_LABEL_COLUMN].astype(float)))))
+    return result
+
+
+def gross_by_assignment(frame: pd.DataFrame) -> dict:
+    """Treatment와 Control의 구매자당 4주 할인 전 총구매액을 비교한다(전략 가정 진단, 학습에는 쓰지 않음).
+
+    최종 전략은 ``uplift_4w × predicted_gross_4w_if_purchase``를 쓰는데, 이 곱은 쿠폰을 받아 구매한 고객의
+    총구매액이 Control 구매 고객과 같다고 가정한다. ``frame``은 4주 관측이 완전한 고객이며, 예측 열이 있으면
+    배정군별 예측 평균과 구매 고객 MAE도 남긴다(``out_of_sample`` 고객만). 차이의 95% 구간은 Welch 표준오차의
+    정규 근사다.
+    """
+    if ASSIGNMENT_COLUMN not in frame or frame[ASSIGNMENT_COLUMN].isna().all():
+        return {"available": False, "reason": f"no {ASSIGNMENT_COLUMN} column"}
+    if GROSS_COMPLETE_COLUMN in frame:
+        frame = frame.loc[frame[GROSS_COMPLETE_COLUMN].astype(bool)]
+    assignment = frame[ASSIGNMENT_COLUMN]
+    predicted = GROSS_PREDICTION_COLUMN in frame
+    control = assignment.eq(CONTROL_CODE).fillna(False).astype(bool)
+    groups = {"control": _gross_summary(frame.loc[control], predicted),
+              "treatment": _gross_summary(frame.loc[assignment.notna() & ~control], predicted)}
+    report = {"available": True, "groups": groups,
+              "note": "descriptive diagnostic over customers with a complete 4-week window; treatment customers "
+                      "are never used to train the 4-week model"}
+    c, t = groups["control"], groups["treatment"]
+    if c["buyers"] > 1 and t["buyers"] > 1:
+        difference = t["mean_gross_per_buyer"] - c["mean_gross_per_buyer"]
+        se = math.sqrt(t["std_gross_per_buyer"] ** 2 / t["buyers"] + c["std_gross_per_buyer"] ** 2 / c["buyers"])
+        report["treatment_minus_control"] = {
+            "difference": difference,
+            "ratio": (t["mean_gross_per_buyer"] / c["mean_gross_per_buyer"] if c["mean_gross_per_buyer"] else None),
+            "standard_error": se, "ci95": [difference - 1.96 * se, difference + 1.96 * se],
+        }
     return report

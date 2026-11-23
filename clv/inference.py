@@ -2,7 +2,9 @@
 
 전략 모듈(``final_strategy``) 입력 계약에 맞춘 batch는 Feature Store와 같은 고객·기준 시각 키를 그대로 덮는다.
 frame 열은 ``STRATEGY_COLUMNS`` 11개, 메타데이터는 ``PredictionMetadata``와 같은 이름의 5개 항목이다.
-누락 예측을 0으로 채우거나 고객을 조용히 빼지 않는다.
+4주 조건부 총구매액(``predicted_gross_4w_if_purchase``)은 같은 키·같은 기준 시각의 별도 batch(``gross_4w``)로 준다.
+번들에 4주 모델이 없으면 그 batch는 None이고 상태(``gross_4w_status``)로 알린다.
+누락 예측을 0이나 52주 값으로 채우거나 고객을 조용히 빼지 않는다. 추론은 Treatment·Control 전체 고객을 예측한다.
 """
 from __future__ import annotations
 
@@ -15,14 +17,15 @@ import pandas as pd
 
 from . import __version__
 from .bundle import (
-    TARGET, TARGET_DEFINITION_ID, VALUE_SEMANTICS, code_version, environment, file_sha256, read_model_card,
+    GROSS_MODEL, GROSS_NOT_TRAINED, GROSS_TARGET, GROSS_TARGET_DEFINITION_ID, TARGET, TARGET_DEFINITION_ID,
+    VALUE_SEMANTICS, code_version, environment, file_sha256, gross_status, read_model_card,
 )
 from .config import CLVConfig
 from .evaluation import ranks, top_flags
 from .features import build_features, to_cutoff
 from .io import read_json, write_json
 from .pipeline import _check_units, _models_for, _score as score_model, default_reference_week, prepare_inputs
-from .schema import HIGH_VALUE_COLUMN, LABEL_WEEKS, PREDICTION_COLUMN, SEOUL
+from .schema import GROSS_PREDICTION_COLUMN, GROSS_WEEKS, HIGH_VALUE_COLUMN, LABEL_WEEKS, PREDICTION_COLUMN, SEOUL
 
 # Feature Store에서 가져오는 고객·기준 시각 키와 출처 열(전략 batch에 그대로 복사한다)
 STRATEGY_KEY_COLUMNS = ("dataset_id", "customer_id", "as_of_at", "reference_week", "snapshot_id", "currency",
@@ -31,6 +34,9 @@ STRATEGY_KEY_COLUMNS = ("dataset_id", "customer_id", "as_of_at", "reference_week
 STRATEGY_COLUMNS = (*STRATEGY_KEY_COLUMNS, "input_cutoff_at", "prediction_end_at", PREDICTION_COLUMN)
 JOIN_KEYS = ("dataset_id", "customer_id", "as_of_at")
 HORIZON = pd.Timedelta(weeks=LABEL_WEEKS)
+GROSS_HORIZON = pd.Timedelta(weeks=GROSS_WEEKS)
+# 4주 총구매액 batch의 열(순서 포함). 키는 CLV batch와 같고 prediction_end_at은 as_of_at + 4주다.
+GROSS_STRATEGY_COLUMNS = (*STRATEGY_KEY_COLUMNS, "input_cutoff_at", "prediction_end_at", GROSS_PREDICTION_COLUMN)
 UTC_TIME = "datetime64[ns, UTC]"
 # 학습 고객 역할: train(적합), validation(모델 선택), test(보고만), unused(이 모델이 본 적 없음)
 FITTED_ROLES = ("train", "validation")
@@ -46,16 +52,26 @@ class StrategyPredictions:
         metadata: ``model_version``, ``target_definition_id``, ``horizon_value``(52), ``horizon_unit``("weeks"),
             ``value_semantics``("nonnegative_amount"). ``PredictionMetadata(**metadata)``로 그대로 쓸 수 있다.
         audit: 같은 키에 이력 완전 여부, 관측 주 수, CLV 학습 고객 역할(``clv_training_role``)을 붙인 감사용 표.
-        producer_metadata: 모델·학습 데이터·입력 출처·기준 시각별 고객 수·학습 고객 중복·경고.
+        producer_metadata: 모델·학습 데이터·입력 출처·기준 시각별 고객 수·학습 고객 중복·경고·4주 모델 상태.
+        gross_4w: ``GROSS_STRATEGY_COLUMNS`` 순서의 4주 조건부 총구매액 batch(``frame``과 같은 행·같은 순서).
+            번들에 4주 모델이 없으면 None이다.
+        gross_4w_metadata: 4주 batch의 ``PredictionMetadata`` 5항목(4주 모델이 없으면 None).
+        gross_4w_status: ``trained``면 4주 batch가 있다. 그 밖(``not_trained``, ``failed: ...``)이면 없다.
     """
 
     frame: pd.DataFrame
     metadata: dict
     audit: pd.DataFrame
     producer_metadata: dict
+    gross_4w: pd.DataFrame | None = None
+    gross_4w_metadata: dict | None = None
+    gross_4w_status: str = GROSS_NOT_TRAINED
 
     def save(self, path: str | Path) -> Path:
-        """``<이름>.parquet``(frame), ``<이름>_metadata.json``, ``<이름>_audit.csv``를 쓰고 Parquet 경로를 돌려준다."""
+        """``<이름>.parquet``(frame), ``<이름>_metadata.json``, ``<이름>_audit.csv``를 쓰고 Parquet 경로를 돌려준다.
+
+        4주 batch가 있으면 ``<이름>_gross_4w.parquet``도 쓴다.
+        """
         path = Path(path)
         if path.suffix != ".parquet":
             raise ValueError("strategy predictions are written as .parquet (keeps UTC timestamps and string IDs)")
@@ -63,11 +79,18 @@ class StrategyPredictions:
         self.frame.to_parquet(path, index=False)
         audit = self.audit.assign(as_of_at=self.audit["as_of_at"].map(lambda value: value.isoformat()))
         audit.to_csv(_sibling(path, "_audit.csv"), index=False)
+        files = [path, _sibling(path, "_audit.csv")]
+        if self.gross_4w is not None:
+            self.gross_4w.to_parquet(_sibling(path, "_gross_4w.parquet"), index=False)
+            files.append(_sibling(path, "_gross_4w.parquet"))
+        else:
+            # 같은 경로에 예전 4주 batch가 남아 있으면 다른 모델의 값으로 읽히지 않게 지운다.
+            _sibling(path, "_gross_4w.parquet").unlink(missing_ok=True)
         write_json(_sibling(path, "_metadata.json"), {
             "prediction_metadata": self.metadata, "producer_metadata": self.producer_metadata,
             "columns": list(self.frame.columns), "rows": int(len(self.frame)),
-            "files_sha256": {path.name: file_sha256(path),
-                             _sibling(path, "_audit.csv").name: file_sha256(_sibling(path, "_audit.csv"))},
+            "gross_4w_status": self.gross_4w_status, "gross_4w_metadata": self.gross_4w_metadata,
+            "files_sha256": {file.name: file_sha256(file) for file in files},
         })
         return path
 
@@ -90,7 +113,13 @@ def load_strategy_predictions(path: str | Path) -> StrategyPredictions:
     audit = pd.read_csv(_sibling(path, "_audit.csv"),
                         dtype={"dataset_id": str, "customer_id": str, "clv_training_role": str})
     audit["as_of_at"] = pd.to_datetime(audit["as_of_at"], utc=True)
-    return StrategyPredictions(frame, meta["prediction_metadata"], audit, meta["producer_metadata"])
+    gross_path = _sibling(path, "_gross_4w.parquet")
+    gross = pd.read_parquet(gross_path) if gross_path.name in meta["files_sha256"] else None
+    if gross is not None and (list(gross.columns) != list(GROSS_STRATEGY_COLUMNS) or len(gross) != len(frame)
+                              or not gross[list(JOIN_KEYS)].equals(frame[list(JOIN_KEYS)])):
+        raise ValueError("4-week gross batch does not match the CLV batch rows")
+    return StrategyPredictions(frame, meta["prediction_metadata"], audit, meta["producer_metadata"], gross,
+                               meta.get("gross_4w_metadata"), meta.get("gross_4w_status", GROSS_NOT_TRAINED))
 
 
 def _seoul_week(value) -> str:
@@ -173,8 +202,11 @@ class CLVModel:
 
     Args:
         model_dir: 번들 디렉터리(``registry.json``, ``model_card.json``, ``models/``, ``splits.csv``).
-        model: 모델 이름(``baseline``, ``bgnbd_gg``, ``xgboost``, ``xgboost_two_part``). 기본은 registry 최종 모델.
+        model: 52주 모델 이름(``baseline``, ``bgnbd_gg``, ``xgboost``, ``xgboost_two_part``). 기본은 registry 최종 모델.
         verify: False면 체크섬 대조를 건너뛴다(디버깅용).
+
+    번들에 4주 조건부 총구매액 모델(``xgboost_gross_4w``)이 있으면 함께 불러와 같은 고객·같은 t0로 예측한다.
+    없으면(기존 번들) ``has_gross_4w``가 False이고 4주 예측은 결측 + 상태 값으로 표시한다.
     """
 
     def __init__(self, model_dir: str | Path = "results/clv", model: str | None = None, verify: bool = True):
@@ -184,9 +216,38 @@ class CLVModel:
         self.name = model or self.registry["final_model"]
         if self.name not in self.registry["trained_models"]:
             raise ValueError(f"model {self.name} was not trained: {self.registry['model_status'].get(self.name)}")
-        self.config = CLVConfig.from_dict(self.registry["config"])
+        self.config = CLVConfig.from_registry(self.registry["config"])
         self.model_version = self.card["model_versions"][self.name]
         self._model = _models_for(self.model_dir, [self.name])[self.name]
+        # 4주 모델 상태: trained면 불러오고, 기존 번들(이 모델 이전)은 not_trained다.
+        self.gross_4w_status = gross_status(self.registry)
+        self.gross_4w_version = self.card["model_versions"].get(GROSS_MODEL)
+        self._gross = (_models_for(self.model_dir, [GROSS_MODEL])[GROSS_MODEL] if self.gross_4w_status == "trained"
+                       else None)
+
+    @property
+    def has_gross_4w(self) -> bool:
+        """번들에 학습된 4주 조건부 총구매액 모델이 있으면 True."""
+        return self._gross is not None
+
+    @property
+    def policy_condition(self) -> str:
+        """학습 모집단 정책(``control_no_coupon`` 또는 기존 번들의 ``observed_experiment_mix``)."""
+        return self.card["policy_condition"]
+
+    @property
+    def gross_4w_metadata(self) -> dict | None:
+        """4주 batch의 ``PredictionMetadata`` 5항목. 4주 모델이 없으면 None."""
+        if not self.has_gross_4w:
+            return None
+        return {"model_version": self.gross_4w_version, "target_definition_id": GROSS_TARGET_DEFINITION_ID,
+                "horizon_value": GROSS_WEEKS, "horizon_unit": "weeks", "value_semantics": VALUE_SEMANTICS}
+
+    def _require_gross(self) -> None:
+        """4주 모델이 없으면 ValueError(대체값을 만들지 않는다)."""
+        if not self.has_gross_4w:
+            raise ValueError(f"bundle {self.model_dir} has no trained {GROSS_MODEL} (status: {self.gross_4w_status}); "
+                             "retrain with this clv version to get predicted_gross_4w_if_purchase")
 
     @property
     def needs_ledger(self) -> bool:
@@ -210,7 +271,10 @@ class CLVModel:
                 "final_model": self.registry["final_model"], "target": TARGET, "code": self.card["code"],
                 "training_data": self.card["training_data"], "policy_condition": self.card["policy_condition"],
                 "needs_ledger": self.needs_ledger, "predictors": self.card["predictors"],
-                "test_metrics": self.registry["test_metrics"].get(self.name)}
+                "test_metrics": self.registry["test_metrics"].get(self.name),
+                "gross_4w": {"model_name": GROSS_MODEL, "status": self.gross_4w_status,
+                             "model_version": self.gross_4w_version, "target": GROSS_TARGET,
+                             "test_metrics": (self.registry.get("gross_4w") or {}).get("test_metrics")}}
 
     def _inputs(self, weekly, ledger, strict, input_options):
         """입력을 변환·검증하고 학습 때와 통화·단위가 같은지 확인한다."""
@@ -241,6 +305,14 @@ class CLVModel:
         if not (np.isfinite(values).all() and (values >= 0).all()):
             raise ValueError("CLV predictions must be finite and nonnegative")
         scored[PREDICTION_COLUMN] = values
+        # 4주 조건부 총구매액: 같은 예측 변수(같은 고객·같은 t0)로 예측한다. 모델이 없으면 결측으로 둔다.
+        if self.has_gross_4w:
+            gross = self._gross.predict(features)
+            if not (np.isfinite(gross).all() and (gross >= 0).all()):
+                raise ValueError("4-week gross predictions must be finite and nonnegative")
+            scored[GROSS_PREDICTION_COLUMN] = gross
+        else:
+            scored[GROSS_PREDICTION_COLUMN] = np.nan
         # 두 파트 모델이면 구매 확률과 구매 시 기대 결제액도 붙인다.
         if hasattr(self._model, "predict_parts"):
             parts = self._model.predict_parts(features)
@@ -249,18 +321,23 @@ class CLVModel:
         return scored
 
     def predict(self, weekly, ledger=None, *, reference_week=None, customers=None, strict: bool = True,
-                **input_options) -> pd.DataFrame:
-        """기준시점 직전 13주 이력이 있는 고객의 향후 52주 CLV를 예측한다(미래 정답 불필요).
+                require_gross_4w: bool = False, **input_options) -> pd.DataFrame:
+        """기준시점 직전 13주 이력이 있는 고객의 향후 52주 CLV와 4주 조건부 총구매액을 예측한다(미래 정답 불필요).
 
         Args:
             weekly: ``weekly_panel.parquet``, 시뮬레이터 features 디렉터리, CSV 또는 DataFrame.
             ledger: ``raw.sqlite`` 또는 데이터셋 디렉터리. ``bgnbd_gg``에만 필요하고, 주면 주간 패널과 대조한다.
             reference_week: 예측 기준시점 t0(서울 월요일 00:00). 기본: 실험 ``as_of_at``, 없으면 데이터 끝.
             customers: 예측할 고객 ID 목록. 기본은 이력이 있는 모든 고객. 이력이 없는 고객이 있으면 오류다.
+            require_gross_4w: True면 번들에 4주 모델이 없을 때 오류를 낸다.
 
         Returns:
-            ``clv_rank`` 순 DataFrame. 상위 20% 표시와 순위는 반환되는 고객들 안에서 정한다.
+            ``clv_rank`` 순 DataFrame. 상위 20% 표시와 순위는 반환되는 고객들 안에서 정한다. 같은 행에
+            ``predicted_gross_4w_if_purchase``(4주 모델이 없으면 결측)와 ``gross_4w_status``(번들의 4주 모델
+            상태: ``trained``면 값이 있고, ``not_trained``·``failed: ...``·``skipped: ...``면 결측)를 붙인다.
         """
+        if require_gross_4w:
+            self._require_gross()
         panel, orders = self._inputs(weekly, ledger, strict, input_options)
         t0 = to_cutoff(reference_week) if reference_week is not None else default_reference_week(panel)
         scored = self._scored(panel, orders, t0, customers)
@@ -274,6 +351,10 @@ class CLVModel:
             "history_weeks_13w": scored["history_weeks_13w"].to_numpy(dtype=float),
             "currency": panel.attrs.get("currency"), "amount_unit": panel.attrs.get("amount_unit"),
             "dataset_id": panel.attrs.get("dataset_id"),
+            GROSS_PREDICTION_COLUMN: scored[GROSS_PREDICTION_COLUMN].to_numpy(dtype=float),
+            "gross_4w_status": self.gross_4w_status,
+            "gross_4w_model_version": self.gross_4w_version,
+            "gross_4w_prediction_end_at": (t0 + GROSS_HORIZON).isoformat(),
         })
         for column in ("purchase_probability_52w", "expected_amount_if_purchase"):
             if column in scored:
@@ -301,7 +382,7 @@ class CLVModel:
         if trained != __version__:
             warnings.append(f"bundle was trained with clv {trained}, inference runs clv {__version__}")
         library = self.card["environment"].get("xgboost")
-        if self.name.startswith("xgboost") and library != environment()["xgboost"]:
+        if (self.name.startswith("xgboost") or self.has_gross_4w) and library != environment()["xgboost"]:
             warnings.append(f"bundle was trained with xgboost {library}, inference runs xgboost {environment()['xgboost']}")
         if not self.same_dataset(dataset_id):
             source = orders.attrs.get("source_metadata") if orders is not None else None
@@ -316,7 +397,8 @@ class CLVModel:
         return warnings
 
     def predict_for_strategy(self, features, weekly=None, ledger=None, *, allow_training_customers: bool = False,
-                             strict: bool = True, **input_options) -> StrategyPredictions:
+                             strict: bool = True, require_gross_4w: bool = False,
+                             **input_options) -> StrategyPredictions:
         """Feature Store의 모든 (고객, 기준 시각)에 대해 전략 모듈 입력 batch를 만든다.
 
         Args:
@@ -325,10 +407,14 @@ class CLVModel:
             ledger: ``raw.sqlite`` 또는 데이터셋 디렉터리. 주면 Feature Store의 ``raw_database_sha256``과 대조한다.
             allow_training_customers: 기본 False면 CLV 학습(train)·모델 선택(validation)에 쓴 고객이 하나라도 있을 때
                 오류를 낸다. 최종 전략 평가는 모델이 보지 않은 고객으로 해야 한다. 개발용 확인에만 True로 둔다.
+            require_gross_4w: True면 번들에 4주 모델이 없을 때 오류를 낸다.
 
         Returns:
             ``StrategyPredictions``. ``as_of_at``이 서울 월요일 00:00이 아니면(주 단위 입력과 어긋나면) 오류다.
+            4주 모델이 있으면 ``gross_4w``에 같은 행·같은 키의 4주 조건부 총구매액 batch가 들어 있다.
         """
+        if require_gross_4w:
+            self._require_gross()
         checked = bool(input_options.get("verify_checksum", True))
         population = load_population(features, verify_checksum=checked)
         if weekly is None:
@@ -397,6 +483,15 @@ class CLVModel:
 
         frame = joined.loc[:, list(STRATEGY_COLUMNS)].reset_index(drop=True)
         frame[PREDICTION_COLUMN] = frame[PREDICTION_COLUMN].astype("float64")
+        gross = None
+        if self.has_gross_4w:
+            # 같은 행·같은 키로 4주 batch를 만든다. prediction_end_at만 as_of_at + 4주다.
+            gross = joined.loc[:, list(GROSS_STRATEGY_COLUMNS)].reset_index(drop=True)
+            gross["prediction_end_at"] = (gross["as_of_at"] + GROSS_HORIZON).astype(UTC_TIME)
+            gross[GROSS_PREDICTION_COLUMN] = gross[GROSS_PREDICTION_COLUMN].astype("float64")
+        else:
+            warnings.append(f"bundle has no trained {GROSS_MODEL} (status: {self.gross_4w_status}); "
+                            "predicted_gross_4w_if_purchase is not provided")
         extra = [name for name in ("purchase_probability_52w", "expected_amount_if_purchase") if name in joined]
         audit = joined.loc[:, [*JOIN_KEYS, "history_complete", "history_weeks_13w", "clv_training_role", *extra]]
         audit = audit.reset_index(drop=True)
@@ -418,6 +513,9 @@ class CLVModel:
             "history_incomplete_customers": int((~audit["history_complete"].astype(bool)).sum()),
             "training_overlap": {"same_dataset": self.same_dataset(dataset_id), "roles": roles,
                                  "allowed": bool(allow_training_customers)},
+            "gross_4w": {"model_name": GROSS_MODEL, "status": self.gross_4w_status,
+                         "model_version": self.gross_4w_version, "target": GROSS_TARGET},
             "warnings": warnings, "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
-        return StrategyPredictions(frame, self.metadata, audit, producer)
+        return StrategyPredictions(frame, self.metadata, audit, producer, gross, self.gross_4w_metadata,
+                                   self.gross_4w_status)

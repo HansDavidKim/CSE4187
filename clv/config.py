@@ -20,6 +20,17 @@ DEFAULT_TWO_PART_REGRESSOR_GRID = {
     "min_child_weight": [1, 5],
     "learning_rate": [0.05],
 }
+# 4주 조건부 총구매액 XGBoost(Control 구매 고객 회귀, 검증 RMSE로 선택). 금액이 양수라 gamma도 후보다.
+DEFAULT_GROSS_4W_GRID = {
+    "objective": ["reg:squarederror", "reg:gamma"],
+    "max_depth": [3, 5],
+    "min_child_weight": [1, 5],
+    "learning_rate": [0.05],
+}
+# 학습 모집단 정책(``population`` 모듈). 새 학습의 기본은 Control-only다.
+POPULATION_POLICIES = ("control_no_coupon", "observed_experiment_mix")
+# 이 설정 항목이 생기기 전 registry(기존 번들)에 적용하는 값. 기존 번들은 배정군을 섞어 학습했다.
+LEGACY_REGISTRY_DEFAULTS = {"population_policy": "observed_experiment_mix"}
 # 모든 그리드 점에 공통인 설정. n_jobs=1로 고정해 같은 입력이면 같은 예측이 나오게 한다.
 DEFAULT_XGB_FIXED = {
     "n_estimators": 1000, "early_stopping_rounds": 50, "subsample": 0.8,
@@ -33,6 +44,10 @@ class CLVConfig:
 
     Attributes:
         seed: 고객 분할과 XGBoost의 난수 seed.
+        population_policy: 학습 모집단 정책. ``control_no_coupon``(기본)은 Control(쿠폰 미발송군) 중 정답 구간에
+            쿠폰을 받지 않은 고객만 Train/Validation/Test로 나누고 Treatment는 ``unused``로 둔다.
+            ``observed_experiment_mix``는 배정과 무관하게 모두 쓴다(기존 전달 번들의 정책). 분할 전에 적용되어
+            모든 모델(52주 4종, 4주 총구매액)이 같은 모집단을 쓴다. 추론은 정책과 무관하게 전체 고객을 예측한다.
         split_fractions: 학습/검증/테스트 분할의 고객 비율.
         top_fraction: 고가치 고객으로 표시할 상위 비율(기본 상위 20% 고객).
         require_complete_history: True면 13주 입력이 모두 완전 관측인 고객만 학습·평가한다. 기본 False는
@@ -53,9 +68,11 @@ class CLVConfig:
         xgb_fixed: 모든 그리드 점에 공통인 XGBoost 설정(두 파트 XGBoost도 같이 쓴다).
         two_part_classifier_grid: 두 파트 XGBoost 1파트(구매 여부 분류) 탐색 그리드.
         two_part_regressor_grid: 두 파트 XGBoost 2파트(구매 고객 결제액 회귀) 탐색 그리드.
+        gross_4w_grid: 4주 조건부 총구매액 XGBoost(``xgboost_gross_4w``) 탐색 그리드.
     """
 
     seed: int = 42
+    population_policy: str = "control_no_coupon"
     split_fractions: tuple[float, float, float] = (0.6, 0.2, 0.2)
     top_fraction: float = 0.2
     require_complete_history: bool = False
@@ -73,6 +90,8 @@ class CLVConfig:
         default_factory=lambda: {key: list(value) for key, value in DEFAULT_TWO_PART_CLASSIFIER_GRID.items()})
     two_part_regressor_grid: dict = field(
         default_factory=lambda: {key: list(value) for key, value in DEFAULT_TWO_PART_REGRESSOR_GRID.items()})
+    gross_4w_grid: dict = field(
+        default_factory=lambda: {key: list(value) for key, value in DEFAULT_GROSS_4W_GRID.items()})
 
     def __post_init__(self):
         """비율 범위와 허용 선택지를 검사한다(잘못되면 ValueError)."""
@@ -85,7 +104,8 @@ class CLVConfig:
         if not 0 < self.top_fraction < 1:
             raise ValueError("top_fraction must be between zero and one")
         choices = {"calibration": ("feature_window", "full_history"), "transaction_period": ("D", "order"),
-                   "no_purchase_fallback": ("zero", "train_mean"), "selection_metric": ("rmse", "mae")}
+                   "no_purchase_fallback": ("zero", "train_mean"), "selection_metric": ("rmse", "mae"),
+                   "population_policy": POPULATION_POLICIES}
         for name, allowed in choices.items():
             if getattr(self, name) not in allowed:
                 raise ValueError(f"{name} must be one of {allowed}")
@@ -107,6 +127,11 @@ class CLVConfig:
         if unknown:
             raise ValueError(f"unknown CLV settings: {sorted(unknown)}")
         return cls(**values)
+
+    @classmethod
+    def from_registry(cls, values: dict | None) -> "CLVConfig":
+        """번들 registry에 저장된 설정을 읽는다. 나중에 생긴 항목은 기존 번들의 값(``LEGACY_REGISTRY_DEFAULTS``)으로 채운다."""
+        return cls.from_dict({**LEGACY_REGISTRY_DEFAULTS, **dict(values or {})})
 
 
 def load_config(path: str | Path | None = None) -> CLVConfig:
