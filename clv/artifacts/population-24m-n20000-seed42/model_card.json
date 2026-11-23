@@ -1,12 +1,12 @@
 {
   "bundle_schema_version": 1,
-  "created_at": "2026-11-22T07:20:10+00:00",
+  "created_at": "2026-11-23T05:08:19+00:00",
   "final_model": "xgboost",
   "model_versions": {
-    "baseline": "clv-0.2.0+baseline.b3024dd35112",
-    "bgnbd_gg": "clv-0.2.0+bgnbd_gg.bdfc69a5473f",
-    "xgboost": "clv-0.2.0+xgboost.9ddc5cfa3337",
-    "xgboost_two_part": "clv-0.2.0+xgboost_two_part.35ad951f7625"
+    "baseline": "clv-0.2.0+baseline.7427d4cbc55a",
+    "bgnbd_gg": "clv-0.2.0+bgnbd_gg.e5860be8a485",
+    "xgboost": "clv-0.2.0+xgboost.682f683fbe72",
+    "xgboost_two_part": "clv-0.2.0+xgboost_two_part.08c4580706a5"
   },
   "model_status": {
     "baseline": "trained",
@@ -46,7 +46,7 @@
   ],
   "code": {
     "clv_version": "0.2.0",
-    "git_commit": "5338faf8414a4938156c3355c86cb722f1515326",
+    "git_commit": "1ff64724b06777c2a6b018f5c059fc9d2ff369cb",
     "clv_dirty": false
   },
   "environment": {
@@ -59,16 +59,16 @@
   },
   "training_data": {
     "reference_week": "2025-01-06T00:00:00+09:00",
-    "dataset_id": "cosmetics-source-v10-six-event-checkout-tianchi-joint-timing-population-gmm-return-full-24m-seed42-n5000-36a6b3788c9bd6a2-28d",
+    "dataset_id": "cosmetics-source-v10-six-event-checkout-tianchi-joint-timing-population-gmm-return-full-24m-seed42-n20000-b01a48dbed12819e-28d",
     "currency": "SOURCE_UNSPECIFIED",
     "amount_unit": "0.01",
-    "raw_database_sha256": "8c35f7639425fb8cfdffee21a608b1624db8cbd15ea222e0123a37bc2c202579",
-    "weekly_panel_sha256": "4a01164b3f118efb8ba5a80a74cb35f3254211e5a66a76c5bc3c87e4de74dbde",
+    "raw_database_sha256": "d49f8df331dbbba46f7bce04e7d9f086da7f1d7a1b5de43f9c721ea9ebd7e180",
+    "weekly_panel_sha256": "c338fa84628cfa9a594cfa6cc47e37b660e6f783ef651ae6aa370c8cac97a208",
     "simulator": {
-      "dataset_id": "cosmetics-source-v10-six-event-checkout-tianchi-joint-timing-population-gmm-return-full-24m-seed42-n5000-36a6b3788c9bd6a2-28d",
+      "dataset_id": "cosmetics-source-v10-six-event-checkout-tianchi-joint-timing-population-gmm-return-full-24m-seed42-n20000-b01a48dbed12819e-28d",
       "seed": 42,
       "months": 24,
-      "eligible_customers": 5000,
+      "eligible_customers": 20000,
       "simulator_version": "source-shopping-v10",
       "configuration_sha256": "b52890886daae302cf253b76071398e2dea24b8b8adbcf50833d110a4d8c34be",
       "simulator_code_sha256": "32dcda3d275cd9215d57f163994d583d7b2759946eb60b8d81b5ebf614c453b5",
@@ -83,45 +83,45 @@
     },
     "training_population": "all labelled customers",
     "split_counts": {
-      "train": 3000,
-      "validation": 1000,
-      "test": 1000
+      "train": 12000,
+      "validation": 4000,
+      "test": 4000
     },
-    "labelled_customers": 5000,
-    "treatment_in_label_window": 2500
+    "labelled_customers": 20000,
+    "treatment_in_label_window": 10000
   },
   "policy_condition": "observed_experiment_mix",
   "test_metrics": {
     "baseline": {
-      "mae": 7136.0714671444675,
-      "rmse": 26617.292435665724,
-      "top20_overlap_rate": 0.46
+      "mae": 7876.202557039182,
+      "rmse": 30125.53373684614,
+      "top20_overlap_rate": 0.48875
     },
     "bgnbd_gg": {
-      "mae": 3080.4577119379924,
-      "rmse": 9159.509371239814,
-      "top20_overlap_rate": 0.46
+      "mae": 2500.2530688217075,
+      "rmse": 8068.215922205094,
+      "top20_overlap_rate": 0.48875
     },
     "xgboost": {
-      "mae": 3512.48996887207,
-      "rmse": 8934.952554621657,
-      "top20_overlap_rate": 0.47
+      "mae": 3098.1660801239013,
+      "rmse": 7833.32958010699,
+      "top20_overlap_rate": 0.4425
     },
     "xgboost_two_part": {
-      "mae": 3529.0561885332068,
-      "rmse": 8945.360223439939,
-      "top20_overlap_rate": 0.425
+      "mae": 3168.7402731032103,
+      "rmse": 7852.063990208561,
+      "top20_overlap_rate": 0.44125
     }
   },
   "files_sha256": {
-    "registry.json": "55687f466964ed3696668a5223353f06442d2ed57b3f08e88ef4de57fefbfc9a",
-    "splits.csv": "4f404a060667420aa885b047e36018a9796a1b6a75cb72d9d15f02dd61fe6c50",
+    "registry.json": "7a74a3159c19b927a3572dc26c3143c49b437f81ed4a2a3a152ea02ddc871275",
+    "splits.csv": "e862904b6521a8af7863601c5c98758ab7208da78c03d7ba12831f490b432865",
     "models/baseline.json": "9f074f952900208f0db96f9068dd91c6971acdc3daf8dae2883f9c1a7141635c",
-    "models/bgnbd_gg.json": "b749c2c3f1e390acf6cd25b76a0596a77437cbe94361c9a5d4268b8123910c99",
-    "models/xgboost/xgboost_model.json": "d127f35e562df46f824c7f36cdb1c5e20befd14894c073602f98a9e1c6764764",
-    "models/xgboost/xgboost_meta.json": "eaca592e18ce3870fe2588af872c1d47b88e1ebfb8dc8d52d5600ba3cbbc8f05",
-    "models/xgboost_two_part/classifier.json": "e9f89b1471cde8b4fc20d793277993745835fdc1f0e4a9776a537de3a6a52ce1",
-    "models/xgboost_two_part/regressor.json": "4269bea4dfb5d9706c4b7662cd9c07255ade8c405a1b68e41c5e2926a8bc93cf",
-    "models/xgboost_two_part/two_part_meta.json": "60e23088d4b502a1566bc936c5f675a8d56692e8c303865043903c8ea15558f3"
+    "models/bgnbd_gg.json": "ec52fc634322585667595142bafb9ad912cb1ae2d6756cfc995d73b0127f5e83",
+    "models/xgboost/xgboost_model.json": "921fe7ceedf568fbb54b1adc738dc5f8d6d644e07f2e2c33549738069e84f778",
+    "models/xgboost/xgboost_meta.json": "33f9960c720595174abcd2754a909733c44513dd9307de849d9e7a706c9da6dd",
+    "models/xgboost_two_part/classifier.json": "be9fc380b998a851848fadb5eed8fff9b10f2bba1b00445fdcd8041930addf7f",
+    "models/xgboost_two_part/regressor.json": "c31a4ca447b387884e45ee2ca9dc493daca0aeee078f808fb49b7356127c9a98",
+    "models/xgboost_two_part/two_part_meta.json": "744124b7cacf1c19b1720a9737746f0bffd2a02f9bb6958d153fc57d3376694c"
   }
 }

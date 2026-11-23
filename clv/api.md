@@ -7,7 +7,7 @@
 
 | 요청 항목 | CLV가 제공하는 것 | 위치 |
 | --- | --- | --- |
-| 학습된 모델 파일 | 체크섬이 기록된 번들(모델 4종, registry, 고객 분할, 모델 카드) | [`artifacts/population-24m-n5000-seed42/`](artifacts/population-24m-n5000-seed42/) |
+| 학습된 모델 파일 | 체크섬이 기록된 번들(모델 4종, registry, 고객 분할, 모델 카드) | [`artifacts/population-24m-n20000-seed42/`](artifacts/population-24m-n20000-seed42/) |
 | 추론 API | `clv.api.predict_for_strategy`, `clv.api.load_model`, CLI `python -m clv strategy` | [api.py](api.py), [inference.py](inference.py) |
 | 입력 데이터 | 시뮬레이터 `features/`(Feature Store + 주간 패널)와 `dataset/raw.sqlite`, 재생성 명령과 체크섬 | [7장](#7-입력-데이터와-재현) |
 | 버전 정보 | `model_card.json`, `PredictionMetadata` 5항목, `producer_metadata` | [6장](#6-번들-구조와-버전-정보) |
@@ -16,6 +16,7 @@
   계약과의 호환 때문에 유지하는 이름일 뿐이며, 달력 12개월이 아니다.
 - 최종 전략 평가는 CLV 학습에 쓰지 않은 고객으로 해야 한다. 전달한 번들은 seed 42 데이터셋으로 학습했으므로,
   평가용 Feature Store는 **다른 seed의 데이터셋**(예: seed 43)이 기본이다([3장](#3-평가-고객과-학습-고객)).
+- 학습·평가 데이터셋은 요구사항의 최소 규모인 20,000명이다(24개월).
 
 ## 1. 예측 대상 계약
 
@@ -40,11 +41,11 @@
 저장소 루트에서 실행한다. `simulator/src`와 `final_strategy`를 import할 수 있어야 한다.
 
 ```python
-from clv.api import HANDOFF_BUNDLE, predict_for_strategy   # HANDOFF_BUNDLE = clv/artifacts/population-24m-n5000-seed42
+from clv.api import HANDOFF_BUNDLE, predict_for_strategy   # HANDOFF_BUNDLE = clv/artifacts/population-24m-n20000-seed42
 from final_strategy.inputs import PredictionBatch, load_feature_store
 from final_strategy.validation import PredictionMetadata
 
-DATA = "results/simulator/main-84372a7/population-24m-n5000-seed43"   # 학습에 쓰지 않은 데이터셋
+DATA = "results/simulator/main-84372a7/population-24m-n20000-seed43"   # 학습에 쓰지 않은 데이터셋
 
 clv = predict_for_strategy(
     f"{DATA}/features",                   # feature_store.parquet과 weekly_panel.parquet이 있는 디렉터리
@@ -66,9 +67,9 @@ features = load_feature_store(f"{DATA}/features")
 
 ```bash
 python -m clv strategy \
-  --features results/simulator/main-84372a7/population-24m-n5000-seed43/features \
-  --ledger   results/simulator/main-84372a7/population-24m-n5000-seed43/dataset \
-  --model-dir clv/artifacts/population-24m-n5000-seed42 \
+  --features results/simulator/main-84372a7/population-24m-n20000-seed43/features \
+  --ledger   results/simulator/main-84372a7/population-24m-n20000-seed43/dataset \
+  --model-dir clv/artifacts/population-24m-n20000-seed42 \
   --output   results/clv_strategy_predictions.parquet
 ```
 
@@ -95,13 +96,13 @@ top = model.predict(f"{DATA}/features", reference_week="2025-01-06", customers=[
 
 요구사항([docs/request.md](../docs/request.md))상 최종 전략 평가는 모델 학습·튜닝에 쓰지 않은 고객으로 해야 한다.
 
-전달한 번들은 seed 42 데이터셋의 실험 고객 5,000명 전원을 기준 시각 2025-01-06에서 고객 단위로 나눠 학습했다.
+전달한 번들은 seed 42 데이터셋의 실험 고객 20,000명 전원을 기준 시각 2025-01-06에서 고객 단위로 나눠 학습했다.
 
 | 분할 | 인원 | 역할 |
 | --- | --- | --- |
-| train | 3,000 | 적합 |
-| validation | 1,000 | 모델 선택 |
-| test | 1,000 | 보고 |
+| train | 12,000 | 적합 |
+| validation | 4,000 | 모델 선택 |
+| test | 4,000 | 보고 |
 
 `predict_for_strategy`는 고객마다 `clv_training_role`을 계산한다.
 
@@ -112,17 +113,17 @@ top = model.predict(f"{DATA}/features", reference_week="2025-01-06", customers=[
 | `test` | 학습 데이터셋의 보고용 고객. 적합·선택에는 쓰지 않음 | 허용 |
 | `unused` | 이 모델이 본 적 없는 고객(다른 데이터셋이면 전원) | 허용 |
 
-- 같은 데이터셋(seed 42)의 Feature Store를 그대로 넣으면 4,000명이 `train`·`validation`이므로 오류가 난다.
+- 같은 데이터셋(seed 42)의 Feature Store를 그대로 넣으면 16,000명이 `train`·`validation`이므로 오류가 난다.
 - 권장 1: 전략 평가용으로 다른 seed의 데이터셋을 생성해 쓴다. 고객 ID(`U0000001` 등)는 데이터셋마다 다시 매겨지지만
   `dataset_id`가 다르므로 학습 고객과 섞이지 않는다.
-- 권장 2: seed 42를 꼭 써야 하면 Test 고객 1,000명만 고른다. 고른 표는 manifest 행 수와 달라 `load_feature_store`를
+- 권장 2: seed 42를 꼭 써야 하면 Test 고객 4,000명만 고른다. 고른 표는 manifest 행 수와 달라 `load_feature_store`를
   다시 통과하지 못하므로, 전략 모듈도 같은 고객으로 Feature Store를 걸러 써야 한다. 다른 모델(Churn·Uplift)의 학습
   고객과 겹치지 않는지는 각 모델이 따로 확인해야 한다.
 
   ```python
   import pandas as pd
   from clv.api import HANDOFF_BUNDLE, load_model, predict_for_strategy
-  FEATURES = "results/simulator/main-84372a7/population-24m-n5000-seed42/features"
+  FEATURES = "results/simulator/main-84372a7/population-24m-n20000-seed42/features"
   store = pd.read_parquet(f"{FEATURES}/feature_store.parquet")
   roles = load_model(HANDOFF_BUNDLE).training_roles(store["dataset_id"].iloc[0], store["customer_id"])
   test_only = store.loc[roles.eq("test").to_numpy()]
@@ -252,7 +253,7 @@ manifest 값이 일치한 출처만 `raw_database_sha256_matched`에 남는다. 
 ## 6. 번들 구조와 버전 정보
 
 ```text
-artifacts/population-24m-n5000-seed42/
+artifacts/population-24m-n20000-seed42/
   model_card.json      버전·코드·라이브러리·학습 데이터 출처·파일 체크섬
   registry.json        기준시점, 계약, 설정, 모델 상태·진단, 최종 모델, 지표
   splits.csv           customer_id -> train/validation/test (학습 고객 역할 판정에 사용)
@@ -277,7 +278,7 @@ artifacts/population-24m-n5000-seed42/
 
 ## 7. 입력 데이터와 재현
 
-입력 데이터(raw.sqlite 약 120MB, features 약 240MB)는 저장소에 올리지 않는다. 같은 명령으로 다시 만들고 체크섬으로 확인한다.
+입력 데이터(seed마다 raw.sqlite 약 450MiB, features 약 940MiB)는 저장소에 올리지 않는다. 같은 명령으로 다시 만들고 체크섬으로 확인한다.
 루트 `.gitignore`에는 아직 `results/`가 없다(팀 공용 파일이라 CLV 작업에서 바꾸지 않았다). `git add .`로 올리지 않도록 주의하거나
 각자 `.git/info/exclude`에 `/results/`를 추가한다.
 이 문서의 수치는 `main` 84372a7의 시뮬레이터 코드로 만들었다(`population.yaml`, 외부 자산 불필요).
@@ -285,34 +286,34 @@ artifacts/population-24m-n5000-seed42/
 ```bash
 cd simulator
 for SEED in 42 43; do
-  OUT=../results/simulator/main-84372a7/population-24m-n5000-seed$SEED
+  OUT=../results/simulator/main-84372a7/population-24m-n20000-seed$SEED
   PYTHONPATH=src python -m cli v4 generate --config src/simulate/v4/config/population.yaml --mode full \
-    --n-customers 5000 --months 24 --seed $SEED --output $OUT/dataset          # 약 3분
+    --n-customers 20000 --months 24 --seed $SEED --output $OUT/dataset         # 약 10분
   PYTHONPATH=src python -m cli v4 validate --data $OUT/dataset/raw.sqlite
-  PYTHONPATH=src python -m cli v4 features --data $OUT/dataset --output $OUT/features   # 약 1분
+  PYTHONPATH=src python -m cli v4 features --data $OUT/dataset --output $OUT/features   # 약 5분
 done
 ```
 
 | seed | 용도 | `raw_database_sha256` | `dataset_id` 끝부분 |
 | --- | --- | --- | --- |
-| 42 | CLV 학습(번들) | `8c35f7639425fb8cfdffee21a608b1624db8cbd15ea222e0123a37bc2c202579` | `...-seed42-n5000-36a6b3788c9bd6a2-28d` |
-| 43 | 전략 평가 예시(학습 미사용) | `c8a322428d84c181fcbf23be294265c5bd92b1cce7b86dd4f72de749206d1710` | `...-seed43-n5000-52b60a4299c7a349-28d` |
+| 42 | CLV 학습(번들) | `d49f8df331dbbba46f7bce04e7d9f086da7f1d7a1b5de43f9c721ea9ebd7e180` | `...-seed42-n20000-b01a48dbed12819e-28d` |
+| 43 | 전략 평가 예시(학습 미사용) | `fcfc8320ec387035caf336d6a87f73c3dde3d51e468b167c96f505e9ef28c71a` | `...-seed43-n20000-c0340729c4865a46-28d` |
 
-생성 데이터의 `raw.manifest.json`에 있는 `database_sha256`이 위 값과 같아야 한다. 이 기계에서는 seed 42의 raw
-SQLite 체크섬이 시뮬레이터 커밋 8b5c03c와 84372a7에서 같았다. 다른 환경에서 달라지면 번들은 그대로 쓰고,
-그 데이터셋의 체크섬이 Feature Store·원장 사이에서만 일치하면 된다.
+생성 데이터의 `raw.manifest.json`에 있는 `database_sha256`이 위 값과 같아야 한다. 시뮬레이터는 설정·seed가 같으면
+같은 raw SQLite를 만들도록 되어 있다(이 기계에서 5,000명 seed 42의 체크섬이 시뮬레이터 커밋 8b5c03c와 84372a7에서 같았다).
+다른 환경에서 달라지면 번들은 그대로 쓰고, 그 데이터셋의 체크섬이 Feature Store·원장 사이에서만 일치하면 된다.
 
 공통 조건은 다음과 같다.
 
 - 실험 기준 시각: `as_of_at = 2025-01-05T15:00:00Z`(서울 2025-01-06 월요일 00:00)
 - 관측 기간: 2024-01-01 ~ 2026-01-05T15:00Z(52주 정답 구간 전체 포함)
-- 고객 수: 데이터셋마다 5,000명. 실험 적격: 배정 직전 28일 내 세션, `min_customer_history_days=0`
+- 고객 수: 데이터셋마다 20,000명(요구사항 최소 규모). 실험 적격: 배정 직전 28일 내 세션, `min_customer_history_days=0`
 
-번들을 다시 학습하려면 다음 명령을 쓴다(약 10초).
+번들을 다시 학습하려면 다음 명령을 쓴다(약 20초).
 
 ```bash
-python -m clv train --weekly results/simulator/main-84372a7/population-24m-n5000-seed42/features \
-  --ledger results/simulator/main-84372a7/population-24m-n5000-seed42/dataset --output results/clv
+python -m clv train --weekly results/simulator/main-84372a7/population-24m-n20000-seed42/features \
+  --ledger results/simulator/main-84372a7/population-24m-n20000-seed42/dataset --output results/clv
 ```
 
 다시 학습하면 `model_version`이 바뀐다. 전략 결과에는 사용한 `model_version`을 함께 기록한다.
@@ -321,32 +322,35 @@ python -m clv train --weekly results/simulator/main-84372a7/population-24m-n5000
 
 모두 실제로 실행한 결과다. 금액은 원천 최소 단위이며, 실제 52주 결제액은 고객 82%가 0원이다.
 
-**seed 42 Test 1,000명**(학습 데이터셋의 보고용 고객, 평균 실제값 2,557)
+**seed 42 Test 4,000명**(학습 데이터셋의 보고용 고객, 평균 실제값 2,202)
 
 | 모델 | MAE | RMSE | R² | Spearman | 상위 20% 일치율 | 상위 20% 포착 가치 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Baseline | 7,136 | 26,617 | -7.52 | 0.32 | 0.46 | 0.48 |
-| BG/NBD + GG | 3,080 | 9,160 | -0.01 | 0.32 | 0.46 | 0.48 |
-| **XGBoost (최종)** | 3,512 | 8,935 | 0.04 | 0.36 | 0.47 | 0.49 |
-| 두 파트 XGBoost | 3,529 | 8,945 | 0.04 | 0.34 | 0.43 | 0.44 |
+| Baseline | 7,876 | 30,126 | -12.7 | 0.34 | 0.49 | 0.49 |
+| BG/NBD + GG | 2,500 | 8,068 | 0.02 | 0.34 | 0.49 | 0.49 |
+| **XGBoost (최종)** | 3,098 | 7,833 | 0.07 | 0.35 | 0.44 | 0.54 |
+| 두 파트 XGBoost | 3,169 | 7,852 | 0.07 | 0.36 | 0.44 | 0.53 |
 
-**seed 43 전체 5,000명**(학습에 쓰지 않은 데이터셋, 평균 실제값 2,079)
+**seed 43 전체 20,000명**(학습에 쓰지 않은 데이터셋, 평균 실제값 2,140)
 
 | 모델 | MAE | RMSE | R² | Spearman | 상위 20% 일치율 | 상위 20% 포착 가치 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Baseline | 11,422 | 74,865 | -86.5 | 0.33 | 0.49 | 0.49 |
-| BG/NBD + GG | 2,558 | 8,047 | -0.01 | 0.33 | 0.49 | 0.49 |
-| **XGBoost (최종)** | 3,060 | 7,748 | 0.06 | 0.34 | 0.43 | 0.55 |
-| 두 파트 XGBoost | 3,086 | 7,760 | 0.06 | 0.34 | 0.41 | 0.51 |
+| Baseline | 9,491 | 58,931 | -48.8 | 0.32 | 0.50 | 0.49 |
+| BG/NBD + GG | 2,447 | 8,219 | 0.03 | 0.32 | 0.50 | 0.49 |
+| **XGBoost (최종)** | 3,076 | 8,000 | 0.08 | 0.34 | 0.43 | 0.55 |
+| 두 파트 XGBoost | 3,136 | 8,021 | 0.08 | 0.35 | 0.44 | 0.56 |
 
 해석:
 
 - 최종 모델(Validation RMSE 기준)인 XGBoost는 학습에 쓰지 않은 데이터셋에서도 RMSE가 가장 낮다. 상위 20% 고객이
-  가진 실제 가치의 55%를 포착한다.
+  가진 실제 가치의 55%를 포착한다(두 파트 XGBoost 56%와 비슷하다).
 - 고객 수로 센 상위 20% 일치율과 MAE는 BG/NBD가 더 좋다. 우선순위를 "누가 상위인가"로 쓰면 BG/NBD도 후보다
-  (`model="bgnbd_gg"`, 원장 필요).
-- R²는 0.06 이하다. 13주 이력만으로 52주 금액을 맞추는 정확도는 낮으므로, 점수는 순위·규모 신호로 해석한다.
-- seed 43 이력 완전 고객 1,546명은 XGBoost MAE 4,880 / RMSE 9,596이다. 미완전 고객 3,454명은 2,246 / 6,759다.
+  (`model="bgnbd_gg"`, 원장 필요). 실제값 0원이 82.6%라 실제 상위 20%의 경계가 0원이고, 경계의 0원 고객은
+  ID 순으로 채워지므로 일치율에는 그만큼의 임의성이 있다.
+- R²는 0.1 미만이다. 13주 이력만으로 52주 금액을 맞추는 정확도는 낮으므로, 점수는 순위·규모 신호로 해석한다.
+- seed 43 이력 완전 고객 6,273명은 XGBoost MAE 5,508 / RMSE 11,693이다. 미완전 고객 13,727명은 1,965 / 5,547이다.
+- 같은 seed 43 20,000명으로 이전의 5,000명 학습 번들과 비교하면 XGBoost MAE 3,139→3,076, RMSE 8,077→8,000,
+  R² 0.065→0.083으로 조금 나아졌고, Spearman(0.34)과 포착 가치(0.56→0.55)는 비슷했다.
 
 ## 9. 제한과 합의가 필요한 점
 

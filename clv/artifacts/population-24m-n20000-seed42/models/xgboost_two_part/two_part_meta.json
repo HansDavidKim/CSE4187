@@ -80,18 +80,7 @@
   },
   "best_params": {
     "classifier": {
-      "n_estimators": 29,
-      "subsample": 0.8,
-      "colsample_bytree": 0.8,
-      "reg_lambda": 1.0,
-      "tree_method": "hist",
-      "n_jobs": 1,
-      "learning_rate": 0.05,
-      "max_depth": 5,
-      "min_child_weight": 1
-    },
-    "regressor": {
-      "n_estimators": 9,
+      "n_estimators": 74,
       "subsample": 0.8,
       "colsample_bytree": 0.8,
       "reg_lambda": 1.0,
@@ -99,8 +88,19 @@
       "n_jobs": 1,
       "learning_rate": 0.05,
       "max_depth": 3,
-      "min_child_weight": 1,
-      "objective": "reg:gamma"
+      "min_child_weight": 1
+    },
+    "regressor": {
+      "n_estimators": 118,
+      "subsample": 0.8,
+      "colsample_bytree": 0.8,
+      "reg_lambda": 1.0,
+      "tree_method": "hist",
+      "n_jobs": 1,
+      "learning_rate": 0.05,
+      "max_depth": 3,
+      "min_child_weight": 5,
+      "objective": "reg:squarederror"
     }
   },
   "grid_results": {
@@ -109,45 +109,45 @@
         "learning_rate": 0.05,
         "max_depth": 3,
         "min_child_weight": 1,
-        "n_estimators": 34,
-        "validation_n": 1000,
-        "validation_buyer_share": 0.153,
-        "validation_auc": 0.6888479909870284,
-        "validation_logloss": 0.39619323258411804,
-        "validation_brier": 0.12101712379501899
+        "n_estimators": 74,
+        "validation_n": 4000,
+        "validation_buyer_share": 0.169,
+        "validation_auc": 0.7592170800133866,
+        "validation_logloss": 0.38837181349145,
+        "validation_brier": 0.11972925079253983
       },
       {
         "learning_rate": 0.05,
         "max_depth": 3,
         "min_child_weight": 5,
-        "n_estimators": 34,
-        "validation_n": 1000,
-        "validation_buyer_share": 0.153,
-        "validation_auc": 0.6910973755893542,
-        "validation_logloss": 0.39592575783423145,
-        "validation_brier": 0.12076243991200243
+        "n_estimators": 103,
+        "validation_n": 4000,
+        "validation_buyer_share": 0.169,
+        "validation_auc": 0.7596465369306247,
+        "validation_logloss": 0.388498703304216,
+        "validation_brier": 0.11980799833080044
       },
       {
         "learning_rate": 0.05,
         "max_depth": 5,
         "min_child_weight": 1,
-        "n_estimators": 29,
-        "validation_n": 1000,
-        "validation_buyer_share": 0.153,
-        "validation_auc": 0.6956038613792624,
-        "validation_logloss": 0.39560503473198655,
-        "validation_brier": 0.12068996856018657
+        "n_estimators": 61,
+        "validation_n": 4000,
+        "validation_buyer_share": 0.169,
+        "validation_auc": 0.7593301184144006,
+        "validation_logloss": 0.3891646973863535,
+        "validation_brier": 0.1201882984894451
       },
       {
         "learning_rate": 0.05,
         "max_depth": 5,
         "min_child_weight": 5,
-        "n_estimators": 34,
-        "validation_n": 1000,
-        "validation_buyer_share": 0.153,
-        "validation_auc": 0.6954495296741287,
-        "validation_logloss": 0.39613170964805433,
-        "validation_brier": 0.12111927884042994
+        "n_estimators": 50,
+        "validation_n": 4000,
+        "validation_buyer_share": 0.169,
+        "validation_auc": 0.7592415568325038,
+        "validation_logloss": 0.3893673751175328,
+        "validation_brier": 0.1201814402553897
       }
     ],
     "regressor": [
@@ -156,80 +156,80 @@
         "max_depth": 3,
         "min_child_weight": 1,
         "objective": "reg:squarederror",
-        "n_estimators": 3,
-        "validation_rmse": 15341.56051958465,
-        "validation_mae": 9847.639954810049
+        "n_estimators": 12,
+        "validation_rmse": 16091.452268376639,
+        "validation_mae": 10246.769112310467
       },
       {
         "learning_rate": 0.05,
         "max_depth": 3,
         "min_child_weight": 1,
         "objective": "reg:gamma",
-        "n_estimators": 9,
-        "validation_rmse": 15305.741923145768,
-        "validation_mae": 9719.329893024918
+        "n_estimators": 82,
+        "validation_rmse": 16007.988839941332,
+        "validation_mae": 10052.17664946607
       },
       {
         "learning_rate": 0.05,
         "max_depth": 3,
         "min_child_weight": 5,
         "objective": "reg:squarederror",
-        "n_estimators": 1,
-        "validation_rmse": 15341.12669138795,
-        "validation_mae": 9812.272882199755
+        "n_estimators": 118,
+        "validation_rmse": 15889.53069797252,
+        "validation_mae": 10166.638268103967
       },
       {
         "learning_rate": 0.05,
         "max_depth": 3,
         "min_child_weight": 5,
         "objective": "reg:gamma",
-        "n_estimators": 4,
-        "validation_rmse": 15322.414647257156,
-        "validation_mae": 9767.227111417484
+        "n_estimators": 82,
+        "validation_rmse": 16014.308501340787,
+        "validation_mae": 10087.371687488443
       },
       {
         "learning_rate": 0.05,
         "max_depth": 5,
         "min_child_weight": 1,
         "objective": "reg:squarederror",
-        "n_estimators": 1,
-        "validation_rmse": 15366.916396853312,
-        "validation_mae": 9848.554355596405
+        "n_estimators": 7,
+        "validation_rmse": 16090.364777285635,
+        "validation_mae": 10212.222763151813
       },
       {
         "learning_rate": 0.05,
         "max_depth": 5,
         "min_child_weight": 1,
         "objective": "reg:gamma",
-        "n_estimators": 2,
-        "validation_rmse": 15331.931626931693,
-        "validation_mae": 9789.509535845587
+        "n_estimators": 16,
+        "validation_rmse": 16144.488944874956,
+        "validation_mae": 10085.855858074843
       },
       {
         "learning_rate": 0.05,
         "max_depth": 5,
         "min_child_weight": 5,
         "objective": "reg:squarederror",
-        "n_estimators": 1,
-        "validation_rmse": 15310.44310247233,
-        "validation_mae": 9781.921670751633
+        "n_estimators": 55,
+        "validation_rmse": 15920.935412224744,
+        "validation_mae": 10232.70243013822
       },
       {
         "learning_rate": 0.05,
         "max_depth": 5,
         "min_child_weight": 5,
         "objective": "reg:gamma",
-        "n_estimators": 1,
-        "validation_rmse": 15340.040354855504,
-        "validation_mae": 9816.003976460375
+        "n_estimators": 13,
+        "validation_rmse": 16117.321179539931,
+        "validation_mae": 10113.455127964358
       }
     ]
   },
   "train_counts": {
-    "train_customers": 3000,
-    "train_buyers": 518,
-    "validation_customers": 1000,
-    "validation_buyers": 153
+    "train_customers": 12000,
+    "train_buyers": 2062,
+    "validation_customers": 4000,
+    "validation_buyers": 676
   },
   "combination": "purchase_probability_52w * expected_amount_if_purchase",
   "negative_prediction_policy": "clip_amount_at_zero",

@@ -44,8 +44,8 @@ MODEL_FILES = {
 }
 # 모든 모델이 함께 쓰는 파일
 SHARED_FILES = ("registry.json", "splits.csv")
-# 저장소에 함께 올린 전달용 번들(seed 42 학습 데이터셋, api.md 참고)
-HANDOFF_BUNDLE = Path(__file__).resolve().parent / "artifacts" / "population-24m-n5000-seed42"
+# 저장소에 함께 올린 전달용 번들(seed 42 학습 데이터셋 20,000명, api.md 참고)
+HANDOFF_BUNDLE = Path(__file__).resolve().parent / "artifacts" / "population-24m-n20000-seed42"
 
 
 def file_sha256(path: str | Path) -> str:
