@@ -1,9 +1,17 @@
 """Assemble an uplift cohort from factual simulator assignments and precomputed KIT39."""
 
+import re
+
 import pandas as pd
 
 from common.simulator_features import SNAPSHOT_KEYS, open_feature_store, read_kit_features
 from . import schema as S
+
+_ELIGIBILITY_DEFINITION = (
+    re.escape(f"session start in [as_of_at-{S.ELIGIBILITY_DAYS}d,as_of_at)")
+    + r"(?: and first observed shopping event <= as_of_at-[1-9][0-9]*d "
+    r"\(view/cart/remove_from_cart/purchase before as_of_at\))?"
+)
 
 
 def load_feature_dataset(path):
@@ -19,8 +27,10 @@ def load_feature_dataset(path):
     if (experiment.empty or experiment[SNAPSHOT_KEYS].isna().any().any()
             or experiment.customer_id.duplicated().any() or experiment.dataset_id.nunique() != 1):
         raise ValueError("Expected one experiment with one assignment per customer")
+    eligibility = experiment.eligibility_definition.astype("string")
     if (not experiment.assigned_at.eq(experiment.as_of_at).all()
-            or not experiment.eligibility_definition.eq("session start in [as_of_at-28d,as_of_at)").all()
+            or eligibility.nunique() != 1
+            or not eligibility.str.fullmatch(_ELIGIBILITY_DEFINITION, na=False).all()
             or not experiment.outcome_horizon_days.eq(S.OUTCOME_DAYS).all()
             or not experiment.assignment_probability.eq(0.5).all()):
         raise ValueError("Expected a 1:1 assignment with 28-day eligibility and outcomes")

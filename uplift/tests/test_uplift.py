@@ -240,15 +240,26 @@ def test_decile_qini_compares_equal_fractions_of_each_arm():
     np.testing.assert_allclose(tied["qini"], tied["random"], atol=1e-15)
 
 
-def test_simulator_sqlite_cohort(tmp_path):
+@pytest.mark.parametrize(("eligibility_days", "history_days", "valid"), [
+    (28, 0, True),
+    (28, 84, True),
+    (28, 90, True),
+    (30, 84, False),
+    (28, -1, False),
+])
+def test_simulator_sqlite_cohort(tmp_path, eligibility_days, history_days, valid):
     from uplift.common.simulator import load_feature_dataset
 
     keys = pd.DataFrame({"customer_id": list("ABCD"), "snapshot_id": list("abcd"),
                          "dataset_id": "run", "as_of_at": T0.isoformat()})
     features = keys.assign(**{name: [1, 2, None, 4] for name in S.KIT39})
+    eligibility = f"session start in [as_of_at-{eligibility_days}d,as_of_at)"
+    if history_days:
+        eligibility += (f" and first observed shopping event <= as_of_at-{history_days}d"
+                        " (view/cart/remove_from_cart/purchase before as_of_at)")
     experiment = keys.assign(
         assigned_at=T0.isoformat(), assignment_probability=0.5, treatment=[0, 1, 0, 1],
-        eligibility_definition="session start in [as_of_at-28d,as_of_at)",
+        eligibility_definition=eligibility,
         eligible_at_assignment=[1, 1, 1, 0], outcome_horizon_days=28,
         outcome_observed=[1, 1, 0, 1], factual_no_order=[0, 1, None, 1],
     )
@@ -259,6 +270,11 @@ def test_simulator_sqlite_cohort(tmp_path):
         registry.to_sql("feature_registry", conn, index=False)
         experiment.to_sql("experiment_log", conn, index=False)
     conn.close()
+
+    if not valid:
+        with pytest.raises(ValueError, match="28-day eligibility and outcomes"):
+            load_feature_dataset(tmp_path)
+        return
 
     data = load_feature_dataset(tmp_path).set_index("customer_id").sort_index()
     assert data.index.tolist() == list("ABC")
