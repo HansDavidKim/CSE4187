@@ -216,6 +216,16 @@ def audit_observed_coupon_order(items, *, purchase_at, as_of_at, actual_discount
 def build_retention_strategy(segmentation, eligibility, coupons, redemptions, cost_inputs, cost_metadata, *,
                              dataset_id, as_of_at, currency, amount_unit, history_context, history_policy, policies=None):
     """Evaluate one cohort; calculate only declared candidate costs; never send."""
+    return _build_retention_strategy(
+        segmentation, eligibility, coupons, redemptions, cost_inputs, cost_metadata,
+        dataset_id=dataset_id, as_of_at=as_of_at, currency=currency, amount_unit=amount_unit,
+        history_context=history_context, history_policy=history_policy, policies=policies,
+    )
+
+
+def _build_retention_strategy(segmentation, eligibility, coupons, redemptions, cost_inputs, cost_metadata, *,
+                              dataset_id, as_of_at, currency, amount_unit, history_context, history_policy,
+                              policies, common_cost_inputs=False):
     if not isinstance(segmentation, SegmentationResult):
         _fail("SegmentationResult required")
     if not isinstance(history_context, HistoryContext):
@@ -291,7 +301,17 @@ def build_retention_strategy(segmentation, eligibility, coupons, redemptions, co
         "requires_eligibility_recheck", "policy_id", "policy_version", "exclusion_reason"])
     candidate_mask = evaluation.budget_candidate.astype(bool)
     candidates = source.loc[candidate_mask].copy()
-    estimates = _aligned(cost_inputs, COST_INPUT_COLUMNS, candidates, "cost_inputs")
+    if common_cost_inputs:
+        table = engine._table(_columns(cost_inputs, COST_INPUT_COLUMNS, "common cost_inputs"),
+                              COST_INPUT_COLUMNS, "common cost_inputs")
+        cost_scope = all_context.merge(table[list(JOIN_KEYS)], on=list(JOIN_KEYS), validate="one_to_one")
+        estimates = _aligned(table, COST_INPUT_COLUMNS, cost_scope, "common cost_inputs")
+        candidate_keys = candidates[list(JOIN_KEYS)]
+        covered = candidate_keys.merge(estimates[list(JOIN_KEYS)], on=list(JOIN_KEYS), how="left", indicator=True)
+        if not covered._merge.eq("both").all():
+            _fail("cost_inputs missing candidate customers/snapshots")
+    else:
+        estimates = _aligned(cost_inputs, COST_INPUT_COLUMNS, candidates, "cost_inputs")
     for key in ("send_cost", "redemption_probability", "expected_discount_if_redeemed"):
         estimates[key] = estimates[key].astype(object)
     estimates["expected_cost"] = pd.Series([None] * len(estimates), dtype=object)
@@ -314,7 +334,8 @@ def build_retention_strategy(segmentation, eligibility, coupons, redemptions, co
         for key, value in (("send_cost", send), ("redemption_probability", probability),
                            ("expected_discount_if_redeemed", discount), ("expected_cost", total)):
             estimates.loc[index, key] = value
-    if "expected_cost" not in estimates: estimates["expected_cost"] = pd.Series(dtype=object)
+    if common_cost_inputs:
+        estimates = candidate_keys.merge(estimates, on=list(JOIN_KEYS), validate="one_to_one")
     costs = estimates[list(engine.COST_COLUMNS)].copy()
     policy_excluded = source.loc[~candidate_mask].copy()
     policy_excluded["exclusion_reason"] = evaluation.loc[~candidate_mask, "exclusion_reason"].values
