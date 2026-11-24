@@ -1,0 +1,157 @@
+{
+  "model": "xgboost",
+  "feature_names": [
+    "purchase_count_4w",
+    "purchase_count_13w",
+    "session_count_4w",
+    "session_count_13w",
+    "net_spend_4w",
+    "net_spend_13w",
+    "weeks_since_last_purchase",
+    "purchase_active_weeks_13w",
+    "zero_purchase_streak",
+    "purchase_trend",
+    "spend_trend",
+    "purchase_per_session_13w",
+    "weeks_since_last_session",
+    "session_active_weeks_13w",
+    "session_trend",
+    "avg_paid_per_purchase_13w",
+    "coupon_sent_13w"
+  ],
+  "feature_dtypes": {
+    "purchase_count_4w": "float64",
+    "purchase_count_13w": "float64",
+    "session_count_4w": "float64",
+    "session_count_13w": "float64",
+    "net_spend_4w": "float64",
+    "net_spend_13w": "float64",
+    "weeks_since_last_purchase": "float64",
+    "purchase_active_weeks_13w": "float64",
+    "zero_purchase_streak": "float64",
+    "purchase_trend": "float64",
+    "spend_trend": "float64",
+    "purchase_per_session_13w": "float64",
+    "weeks_since_last_session": "float64",
+    "session_active_weeks_13w": "float64",
+    "session_trend": "float64",
+    "avg_paid_per_purchase_13w": "float64",
+    "coupon_sent_13w": "float64"
+  },
+  "seed": 42,
+  "selection_metric": "rmse",
+  "grid": {
+    "objective": [
+      "reg:squarederror",
+      "reg:tweedie"
+    ],
+    "max_depth": [
+      3,
+      5
+    ],
+    "min_child_weight": [
+      1,
+      5
+    ],
+    "learning_rate": [
+      0.05
+    ]
+  },
+  "fixed": {
+    "n_estimators": 1000,
+    "early_stopping_rounds": 50,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "reg_lambda": 1.0,
+    "tree_method": "hist",
+    "n_jobs": 1
+  },
+  "best_params": {
+    "n_estimators": 119,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "reg_lambda": 1.0,
+    "tree_method": "hist",
+    "n_jobs": 1,
+    "learning_rate": 0.05,
+    "max_depth": 3,
+    "min_child_weight": 1,
+    "objective": "reg:tweedie"
+  },
+  "grid_results": [
+    {
+      "learning_rate": 0.05,
+      "max_depth": 3,
+      "min_child_weight": 1,
+      "objective": "reg:squarederror",
+      "n_estimators": 25,
+      "validation_rmse": 7745.845112226421,
+      "validation_mae": 3145.576007904053
+    },
+    {
+      "learning_rate": 0.05,
+      "max_depth": 3,
+      "min_child_weight": 1,
+      "objective": "reg:tweedie",
+      "n_estimators": 119,
+      "validation_rmse": 7649.488906995632,
+      "validation_mae": 2968.8816336975096
+    },
+    {
+      "learning_rate": 0.05,
+      "max_depth": 3,
+      "min_child_weight": 5,
+      "objective": "reg:squarederror",
+      "n_estimators": 49,
+      "validation_rmse": 7698.152810493721,
+      "validation_mae": 3074.7061201782226
+    },
+    {
+      "learning_rate": 0.05,
+      "max_depth": 3,
+      "min_child_weight": 5,
+      "objective": "reg:tweedie",
+      "n_estimators": 119,
+      "validation_rmse": 7649.488906995632,
+      "validation_mae": 2968.8816336975096
+    },
+    {
+      "learning_rate": 0.05,
+      "max_depth": 5,
+      "min_child_weight": 1,
+      "objective": "reg:squarederror",
+      "n_estimators": 25,
+      "validation_rmse": 7718.629840685904,
+      "validation_mae": 3116.7853220367433
+    },
+    {
+      "learning_rate": 0.05,
+      "max_depth": 5,
+      "min_child_weight": 1,
+      "objective": "reg:tweedie",
+      "n_estimators": 87,
+      "validation_rmse": 7717.744254161022,
+      "validation_mae": 2927.697914001465
+    },
+    {
+      "learning_rate": 0.05,
+      "max_depth": 5,
+      "min_child_weight": 5,
+      "objective": "reg:squarederror",
+      "n_estimators": 57,
+      "validation_rmse": 7703.802873389909,
+      "validation_mae": 3072.199484436035
+    },
+    {
+      "learning_rate": 0.05,
+      "max_depth": 5,
+      "min_child_weight": 5,
+      "objective": "reg:tweedie",
+      "n_estimators": 87,
+      "validation_rmse": 7717.744254161022,
+      "validation_mae": 2927.697914001465
+    }
+  ],
+  "negative_prediction_policy": "clip_at_zero",
+  "xgboost_version": "3.4.1"
+}

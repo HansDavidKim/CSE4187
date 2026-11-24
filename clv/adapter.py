@@ -15,10 +15,16 @@ import numpy as np
 import pandas as pd
 
 from .schema import (
-    AMOUNT_COLUMNS, CHECK_COLUMNS, CONTEXT_COLUMNS, COUNT_COLUMNS, COVERAGE_COLUMNS, ORDER_ALIASES,
-    REQUIRED_WEEKLY, SEOUL, SIMULATOR_TO_CLV, WEEK_SECONDS,
+    AMOUNT_COLUMNS, ASSIGNMENT_COLUMN, CHECK_COLUMNS, CONTEXT_COLUMNS, CONTROL_CODE, CONTROL_GROUP_LABEL,
+    COUNT_COLUMNS, COVERAGE_COLUMNS, ORDER_ALIASES, REQUIRED_WEEKLY, SEOUL, SIMULATOR_TO_CLV, WEEK_SECONDS,
 )
 
+# 모델 카드에 학습 데이터 출처로 옮겨 적는 시뮬레이터 manifest 항목(재생성·대조용).
+SIMULATOR_METADATA_KEYS = (
+    "dataset_id", "seed", "months", "eligible_customers", "simulator_version", "configuration_sha256",
+    "simulator_code_sha256", "as_of_at", "observation_start_at", "observation_end_at", "retention_mode",
+    "distribution", "min_customer_history_days", "eligibility_window_days", "coupon_validity_days",
+)
 # 문자열 끝의 시간대 표기(`Z`, `+09:00`, `+0900`)를 찾는 패턴.
 _ZONE = r"(?:Z|[+-]\d{2}:?\d{2})$"
 
@@ -124,6 +130,25 @@ def _require_units(currency, amount_unit, source: str) -> None:
         raise ValueError(f"{source} requires explicit currency and amount_unit; no default currency is assumed")
 
 
+def _check_assignment(result: pd.DataFrame) -> None:
+    """실험 배정(``ASSIGNMENT_COLUMN``)이 고객마다 하나이고, ``group``이 있으면 Control 표기와 일치하는지 본다.
+
+    Control-only 학습(``population.control_no_coupon``)이 이 열로 모집단을 고르므로, 규약이 어긋나면 조용히
+    섞지 않고 중단한다. 배정 값이 없는 고객(결측)은 허용하며 학습 정책에서 미배정으로 다룬다.
+    """
+    if ASSIGNMENT_COLUMN not in result:
+        return
+    assignment = result[ASSIGNMENT_COLUMN]
+    if assignment.groupby(result["customer_id"]).nunique().gt(1).any():
+        raise ValueError(f"{ASSIGNMENT_COLUMN} must be constant per customer")
+    if "group" in result:
+        labelled = assignment.notna() & result["group"].notna()
+        control_code = assignment.eq(CONTROL_CODE).fillna(False)
+        control_label = result["group"].astype("string").eq(CONTROL_GROUP_LABEL).fillna(False)
+        if (labelled & control_code.ne(control_label)).any():
+            raise ValueError(f"group {CONTROL_GROUP_LABEL!r} must match {ASSIGNMENT_COLUMN} == {CONTROL_CODE}")
+
+
 def adapt_weekly(frame: pd.DataFrame, *, currency: str | None = None, amount_unit: str | None = None,
                  dataset_id: str | None = None) -> pd.DataFrame:
     """주간 프레임을 CLV 스키마로 매핑하고 결제액을 만든다.
@@ -201,6 +226,7 @@ def adapt_weekly(frame: pd.DataFrame, *, currency: str | None = None, amount_uni
             elif name == "treatment":
                 values = _whole_numbers(values, name)
             result[name] = values.to_numpy()
+    _check_assignment(result)
     # 통화·단위는 입력 그대로 전달한다(`SOURCE_UNSPECIFIED`도 KRW로 바꾸지 않고 환산하지 않음).
     currency = _provenance(frame, "currency", currency)
     amount_unit = _provenance(frame, "amount_unit", amount_unit)
@@ -209,16 +235,47 @@ def adapt_weekly(frame: pd.DataFrame, *, currency: str | None = None, amount_uni
     result["currency"], result["amount_unit"] = currency, amount_unit
     result["dataset_id"] = dataset_id
     result = result.sort_values(["customer_id", "week"], kind="mergesort").reset_index(drop=True)
+    # 시뮬레이터 seed(값이 하나일 때만). 학습 데이터셋과 같은 seed로 다시 만든 데이터셋인지 경고하는 데 쓴다.
+    seeds = pd.Series(frame["seed"]).dropna().unique() if "seed" in frame else []
     result.attrs = {"source_format": source, "currency": currency, "amount_unit": amount_unit,
-                    "dataset_id": dataset_id, "coverage_source": coverage_source, "notes": notes}
+                    "dataset_id": dataset_id, "coverage_source": coverage_source, "notes": notes,
+                    "seed": int(seeds[0]) if len(seeds) == 1 else None}
     return result
 
 
-def load_weekly(path: str | Path, **units) -> pd.DataFrame:
-    """주간 패널 파일(또는 디렉터리)을 읽어 ``adapt_weekly``로 변환한다. ``units``는 통화·단위·dataset_id."""
+def _features_manifest(file: Path, verify_checksum: bool) -> dict:
+    """시뮬레이터 features 디렉터리의 ``manifest.json``에서 주간 파일 체크섬과 원천 raw SQLite 체크섬을 읽는다.
+
+    manifest가 없거나(직접 만든 CSV 등) 이 파일의 체크섬이 기록돼 있지 않으면 계산한 체크섬만 돌려준다.
+    """
+    digest = _sha256(file)
+    result = {"weekly_sha256": digest, "raw_database_sha256": None}
+    manifest_path = file.parent / "manifest.json"
+    if not manifest_path.is_file():
+        return result
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except ValueError:
+        return result
+    recorded = (manifest.get("file_sha256") or {}).get(file.name) if isinstance(manifest, dict) else None
+    if recorded is None:
+        return result
+    # 주간 파일이 features manifest 생성 이후 바뀌었으면 출처(raw SQLite 체크섬)를 믿을 수 없으므로 중단한다.
+    if verify_checksum and recorded != digest:
+        raise ValueError(f"{file.name} checksum differs from {manifest_path}")
+    result["raw_database_sha256"] = manifest.get("raw_database_sha256")
+    return result
+
+
+def load_weekly(path: str | Path, *, verify_checksum: bool = True, **units) -> pd.DataFrame:
+    """주간 패널 파일(또는 디렉터리)을 읽어 ``adapt_weekly``로 변환한다. ``units``는 통화·단위·dataset_id.
+
+    시뮬레이터 features 디렉터리의 파일이면 옆 ``manifest.json``의 체크섬과 대조하고(``verify_checksum``),
+    원천 ``raw_database_sha256``을 ``attrs``에 남긴다.
+    """
     file = resolve_weekly_path(path)
     frame = adapt_weekly(read_table(file), **units)
-    frame.attrs["path"] = str(file)
+    frame.attrs.update(path=str(file), **_features_manifest(file, verify_checksum))
     return frame
 
 
@@ -296,7 +353,8 @@ def load_orders_sqlite(path: str | Path, verify_checksum: bool = True) -> pd.Dat
                           dataset_id=metadata.get("dataset_id"))
     result.attrs.update(path=str(path), observation_start_at=metadata.get("observation_start_at"),
                         observation_end_at=metadata.get("observation_end_at"),
-                        raw_database_sha256=manifest.get("database_sha256"))
+                        raw_database_sha256=manifest.get("database_sha256"),
+                        source_metadata={key: metadata[key] for key in SIMULATOR_METADATA_KEYS if key in metadata})
     return result
 
 

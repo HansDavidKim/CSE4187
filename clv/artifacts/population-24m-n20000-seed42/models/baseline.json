@@ -1,0 +1,5 @@
+{
+  "model": "baseline",
+  "formula": "(net_spend_13w / history_weeks_13w) * 52; history_weeks_13w = 13 for complete history",
+  "horizon_weeks": 52
+}
