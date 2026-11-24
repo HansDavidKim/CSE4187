@@ -1,0 +1,127 @@
+{
+  "bundle_schema_version": 1,
+  "created_at": "2026-11-23T05:08:19+00:00",
+  "final_model": "xgboost",
+  "model_versions": {
+    "baseline": "clv-0.2.0+baseline.7427d4cbc55a",
+    "bgnbd_gg": "clv-0.2.0+bgnbd_gg.e5860be8a485",
+    "xgboost": "clv-0.2.0+xgboost.682f683fbe72",
+    "xgboost_two_part": "clv-0.2.0+xgboost_two_part.08c4580706a5"
+  },
+  "model_status": {
+    "baseline": "trained",
+    "bgnbd_gg": "trained",
+    "xgboost": "trained",
+    "xgboost_two_part": "trained"
+  },
+  "target": {
+    "definition_id": "clv_paid_amount_52w_v1",
+    "column": "predicted_clv_12m",
+    "horizon_value": 52,
+    "horizon_unit": "weeks",
+    "window": "[t0, t0 + 52 weeks) = 364 days; not 12 calendar months",
+    "input_window": "[t0 - 13 weeks, t0)",
+    "definition": "sum of paid amount (gross_revenue - redemption_discount_cost) per customer; coupon send cost is not deducted",
+    "value_semantics": "nonnegative_amount",
+    "column_name_note": "predicted_clv_12m keeps its historical name; the horizon is 52 weeks"
+  },
+  "predictors": [
+    "purchase_count_4w",
+    "purchase_count_13w",
+    "session_count_4w",
+    "session_count_13w",
+    "net_spend_4w",
+    "net_spend_13w",
+    "weeks_since_last_purchase",
+    "purchase_active_weeks_13w",
+    "zero_purchase_streak",
+    "purchase_trend",
+    "spend_trend",
+    "purchase_per_session_13w",
+    "weeks_since_last_session",
+    "session_active_weeks_13w",
+    "session_trend",
+    "avg_paid_per_purchase_13w",
+    "coupon_sent_13w"
+  ],
+  "code": {
+    "clv_version": "0.2.0",
+    "git_commit": "1ff64724b06777c2a6b018f5c059fc9d2ff369cb",
+    "clv_dirty": false
+  },
+  "environment": {
+    "python": "3.12.3",
+    "numpy": "2.5.5",
+    "pandas": "2.3.3",
+    "scipy": "1.18.1",
+    "xgboost": "3.4.1",
+    "pyarrow": "26.0.1"
+  },
+  "training_data": {
+    "reference_week": "2025-01-06T00:00:00+09:00",
+    "dataset_id": "cosmetics-source-v10-six-event-checkout-tianchi-joint-timing-population-gmm-return-full-24m-seed42-n20000-b01a48dbed12819e-28d",
+    "currency": "SOURCE_UNSPECIFIED",
+    "amount_unit": "0.01",
+    "raw_database_sha256": "d49f8df331dbbba46f7bce04e7d9f086da7f1d7a1b5de43f9c721ea9ebd7e180",
+    "weekly_panel_sha256": "c338fa84628cfa9a594cfa6cc47e37b660e6f783ef651ae6aa370c8cac97a208",
+    "simulator": {
+      "dataset_id": "cosmetics-source-v10-six-event-checkout-tianchi-joint-timing-population-gmm-return-full-24m-seed42-n20000-b01a48dbed12819e-28d",
+      "seed": 42,
+      "months": 24,
+      "eligible_customers": 20000,
+      "simulator_version": "source-shopping-v10",
+      "configuration_sha256": "b52890886daae302cf253b76071398e2dea24b8b8adbcf50833d110a4d8c34be",
+      "simulator_code_sha256": "32dcda3d275cd9215d57f163994d583d7b2759946eb60b8d81b5ebf614c453b5",
+      "as_of_at": "2025-01-05T15:00:00+00:00",
+      "observation_start_at": "2024-01-01T00:00:00+00:00",
+      "observation_end_at": "2026-01-05T15:00:00+00:00",
+      "retention_mode": "source",
+      "distribution": "source_conditioned_without_retention_intercept_shift",
+      "min_customer_history_days": 0,
+      "eligibility_window_days": 28,
+      "coupon_validity_days": 28
+    },
+    "training_population": "all labelled customers",
+    "split_counts": {
+      "train": 12000,
+      "validation": 4000,
+      "test": 4000
+    },
+    "labelled_customers": 20000,
+    "treatment_in_label_window": 10000
+  },
+  "policy_condition": "observed_experiment_mix",
+  "test_metrics": {
+    "baseline": {
+      "mae": 7876.202557039182,
+      "rmse": 30125.53373684614,
+      "top20_overlap_rate": 0.48875
+    },
+    "bgnbd_gg": {
+      "mae": 2500.2530688217075,
+      "rmse": 8068.215922205094,
+      "top20_overlap_rate": 0.48875
+    },
+    "xgboost": {
+      "mae": 3098.1660801239013,
+      "rmse": 7833.32958010699,
+      "top20_overlap_rate": 0.4425
+    },
+    "xgboost_two_part": {
+      "mae": 3168.7402731032103,
+      "rmse": 7852.063990208561,
+      "top20_overlap_rate": 0.44125
+    }
+  },
+  "files_sha256": {
+    "registry.json": "7a74a3159c19b927a3572dc26c3143c49b437f81ed4a2a3a152ea02ddc871275",
+    "splits.csv": "e862904b6521a8af7863601c5c98758ab7208da78c03d7ba12831f490b432865",
+    "models/baseline.json": "9f074f952900208f0db96f9068dd91c6971acdc3daf8dae2883f9c1a7141635c",
+    "models/bgnbd_gg.json": "ec52fc634322585667595142bafb9ad912cb1ae2d6756cfc995d73b0127f5e83",
+    "models/xgboost/xgboost_model.json": "921fe7ceedf568fbb54b1adc738dc5f8d6d644e07f2e2c33549738069e84f778",
+    "models/xgboost/xgboost_meta.json": "33f9960c720595174abcd2754a909733c44513dd9307de849d9e7a706c9da6dd",
+    "models/xgboost_two_part/classifier.json": "be9fc380b998a851848fadb5eed8fff9b10f2bba1b00445fdcd8041930addf7f",
+    "models/xgboost_two_part/regressor.json": "c31a4ca447b387884e45ee2ca9dc493daca0aeee078f808fb49b7356127c9a98",
+    "models/xgboost_two_part/two_part_meta.json": "744124b7cacf1c19b1720a9737746f0bffd2a02f9bb6958d153fc57d3376694c"
+  }
+}

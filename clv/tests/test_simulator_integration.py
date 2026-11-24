@@ -11,7 +11,7 @@ import pytest
 from clv.config import CLVConfig
 from clv.dataset import build_dataset, find_eligible_cutoffs, labeled_rows
 from clv.pipeline import predict, prepare_inputs, train, write_predictions
-from clv.api import load_clv_predictions
+from clv.api import load_clv_predictions, predict_for_strategy
 
 from .simulator_fixture import generate, import_simulator
 
@@ -79,3 +79,19 @@ def test_end_to_end_on_simulator_outputs(simulated, tmp_path):
     loaded = load_clv_predictions(path)
     assert set(loaded["customer_id"]) <= set(experiment["customer_id"])
     assert loaded["is_high_value_customer"].sum() == int(-(-len(loaded) * 2 // 10))  # ceil(0.2·N)
+
+
+def test_strategy_batch_covers_the_simulator_feature_store(simulated, tmp_path):
+    """실제 시뮬레이터 Feature Store의 모든 (고객, as_of_at) 키를 그대로 덮고, 원천 raw SQLite 체크섬을 두 입력과 대조한다."""
+    pytest.importorskip("xgboost")
+    dataset, features = simulated
+    train(features, dataset, tmp_path / "clv", CLVConfig.from_dict(FAST))
+    # 같은 데이터셋이므로 학습 고객이 섞여 기본 설정에서는 거절하고, 개발용 허용 시에만 만든다.
+    with pytest.raises(ValueError, match="never saw"):
+        predict_for_strategy(features, ledger=dataset, model_dir=tmp_path / "clv")
+    result = predict_for_strategy(features, ledger=dataset, model_dir=tmp_path / "clv", allow_training_customers=True)
+    store = pd.read_parquet(features / "feature_store.parquet")
+    keys = ["dataset_id", "customer_id", "as_of_at", "snapshot_id", "reference_week", "raw_database_sha256"]
+    pd.testing.assert_frame_equal(result.frame[keys], store[keys].astype({"as_of_at": "datetime64[ns, UTC]"}))
+    assert result.frame["prediction_end_at"].eq(result.frame["as_of_at"] + pd.Timedelta(weeks=52)).all()
+    assert result.producer_metadata["inputs"]["raw_database_sha256_verified_by"] == ["weekly_manifest", "ledger_manifest"]

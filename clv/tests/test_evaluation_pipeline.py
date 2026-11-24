@@ -153,10 +153,14 @@ def test_api_run_and_cli(raw_dir, tmp_path, capsys):
     capsys.readouterr()
 
 
-def test_history_segments_use_the_same_customer_split(trained, raw_dir):
-    """기본 설정은 정답 고객 전체로 학습하고, 이력 완전·미완전 고객은 하나의 분할을 나눠 쓴다."""
-    output, registry = trained
-    assert registry["training_population"] == "all labelled customers"
+def test_history_segments_use_the_same_customer_split(raw_dir, tmp_path):
+    """정답 고객 전체로 학습하면(기존 번들 정책 observed_experiment_mix) 이력 완전·미완전 고객이 하나의 분할을
+    나눠 쓴다. 작은 Fixture의 Control만으로는 Test에 이력 미완전 고객이 거의 없어 혼합 정책으로 확인한다."""
+    output = tmp_path / "clv"
+    registry = train(raw_dir / "features", raw_dir / "dataset", output,
+                     CLVConfig.from_dict({**FAST, "population_policy": "observed_experiment_mix"}))
+    assert registry["training_population"] == "observed_experiment_mix customers"
+    assert registry["population"]["eligible"] == registry["population"]["customers"]
     assert registry["split_counts"] == registry["split_counts_all_labelled"]
     evaluation = json.loads((output / "reports" / "evaluation.json").read_text())
     segments = evaluation["by_history"]["test"]
@@ -167,8 +171,10 @@ def test_history_segments_use_the_same_customer_split(trained, raw_dir):
         for name in registry["trained_models"]:
             assert registry["test_metrics_by_history"][segment][name]["n"] == segments[segment]["customers"]
     splits = pd.read_csv(output / "splits.csv", dtype={"customer_id": str})
-    assert {"history_complete", "training_population"} <= set(splits.columns) and splits["training_population"].all()
-    assert len(splits) == sum(registry["split_counts_all_labelled"].values())
+    assert {"history_complete", "training_population", "policy_eligible"} <= set(splits.columns)
+    used = splits.loc[splits["split"].ne("unused")]
+    assert used["training_population"].all() and splits.loc[~splits["policy_eligible"], "split"].eq("unused").all()
+    assert len(used) == sum(registry["split_counts_all_labelled"].values())
     report = evaluate(raw_dir / "features", raw_dir / "dataset", output)
     assert report["by_history"]["incomplete"]["customers"] == segments["incomplete"]["customers"]
 
@@ -181,7 +187,8 @@ def test_complete_history_only_training_keeps_the_same_split(trained, raw_dir, t
     wide_splits = pd.read_csv(output / "splits.csv", dtype={"customer_id": str})
     narrow_splits = pd.read_csv(tmp_path / "narrow" / "splits.csv", dtype={"customer_id": str})
     pd.testing.assert_series_equal(narrow_splits["split"], wide_splits["split"])
-    assert narrow_splits["training_population"].equals(narrow_splits["history_complete"])
+    assert narrow_splits["training_population"].equals(narrow_splits["history_complete"]
+                                                       & narrow_splits["policy_eligible"])
     assert narrow["split_counts_all_labelled"] == registry["split_counts_all_labelled"]
     evaluation = json.loads((tmp_path / "narrow" / "reports" / "evaluation.json").read_text())
     complete = evaluation["by_history"]["test"]["complete"]

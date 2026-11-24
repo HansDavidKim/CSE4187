@@ -1,0 +1,76 @@
+{
+  "model": "bgnbd_gg",
+  "calibration": "feature_window",
+  "transaction_period": "D",
+  "no_purchase_fallback": "zero",
+  "fallback_value": 0.0,
+  "bgnbd_penalizer": 0.0,
+  "gg_penalizer": 0.0,
+  "bgnbd_params": {
+    "r": 0.3133576254502626,
+    "alpha": 1.6311350978564243,
+    "a": 6.856998212571551,
+    "b": 21.082086214466838
+  },
+  "gamma_gamma_params": {
+    "p": 1.9045290008616158,
+    "q": 5.923008748714737,
+    "v": 12452.901596349086
+  },
+  "horizon_weeks": 52,
+  "time_unit": "week",
+  "diagnostics": {
+    "cutoff": "2025-01-06T00:00:00+09:00",
+    "calibration": "feature_window",
+    "transaction_period": "D",
+    "fit_customers": 12000,
+    "customers_with_purchase": 1721,
+    "customers_without_purchase": 10279,
+    "repeat_customers": 559,
+    "bgnbd": {
+      "params": {
+        "r": 0.3133576254502626,
+        "alpha": 1.6311350978564243,
+        "a": 6.856998212571551,
+        "b": 21.082086214466838
+      },
+      "converged": true,
+      "method": "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL",
+      "objective": 1.872384925110178,
+      "iterations": 18
+    },
+    "gamma_gamma": {
+      "params": {
+        "p": 1.9045290008616158,
+        "q": 5.923008748714737,
+        "v": 12452.901596349086
+      },
+      "converged": true,
+      "method": "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL",
+      "objective": 0.8504476003398753,
+      "iterations": 12,
+      "amount_scale": 4735.798266030332,
+      "population_mean_value": 4817.564510994335
+    },
+    "frequency_monetary_correlation": 0.05720069890627567,
+    "mean_dropout_probability": 0.2454267329510486,
+    "dropout_concentration": 27.939084427038388,
+    "checks": {
+      "bgnbd_converged": true,
+      "gamma_gamma_converged": true,
+      "finite_positive_params": true,
+      "a_gt_1": true,
+      "q_gt_1": true,
+      "dropout_heterogeneity_identified": true,
+      "independence_ok": true,
+      "repeat_sample_ok": true,
+      "correlation_limit": 0.3,
+      "dropout_concentration_limit": 1000.0,
+      "small_repeat_sample": 30
+    },
+    "rejections": [],
+    "warnings": [],
+    "no_purchase_fallback": "zero",
+    "fallback_value": 0.0
+  }
+}

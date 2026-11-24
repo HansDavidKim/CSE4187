@@ -3,12 +3,14 @@
 Commands
     validate   schema, money, units, coverage and ledger checks
     cutoffs    list cutoffs t0 whose 13 + 52 weeks are observed
-    train      fit and evaluate baseline, BG/NBD + Gamma-Gamma and XGBoost
+    train      fit and evaluate the four 52-week CLV models and the 4-week gross model
     evaluate   score saved models at a cutoff
     predict    write the prediction CSV (no label needed)
     run        train + evaluate + predict
+    info       model versions, targets (52 weeks, 4 weeks), policy, training data and code versions
+    strategy   prediction batch for the final_strategy module, keyed like a feature store
 """
-# WBS 4.7: CLV 명령행 진입점(validate, cutoffs, train, evaluate, predict, run).
+# WBS 4.7: CLV 명령행 진입점(validate, cutoffs, train, evaluate, predict, run, info, strategy).
 # 위 모듈 docstring은 `--help` 설명(description=__doc__)으로 출력되므로 영어 그대로 둔다.
 from __future__ import annotations
 
@@ -19,15 +21,18 @@ from pathlib import Path
 from .config import load_config
 from .io import jsonable
 
+MODELS = ("baseline", "bgnbd_gg", "xgboost", "xgboost_two_part")
 
-def _inputs(parser):
-    """모든 하위 명령에 공통인 입력 인자(주간 패널, 주문 원장, 통화·단위, 체크섬)를 추가한다."""
-    parser.add_argument("--weekly", required=True, type=Path,
+
+def _inputs(parser, weekly_required: bool = True):
+    """입력이 필요한 하위 명령에 공통 인자(주간 패널, 주문 원장, 통화·단위, 체크섬)를 추가한다."""
+    parser.add_argument("--weekly", required=weekly_required, type=Path,
                         help="weekly_panel.parquet, a simulator features/export directory, or a CSV")
     parser.add_argument("--ledger", type=Path, help="raw.sqlite, a dataset directory, or an order CSV/Parquet")
     parser.add_argument("--currency", help="only for inputs without a currency column")
     parser.add_argument("--amount-unit", help="only for inputs without an amount_unit column")
-    parser.add_argument("--skip-checksum", action="store_true", help="do not verify raw.sqlite against its manifest")
+    parser.add_argument("--skip-checksum", action="store_true", help="do not hash raw.sqlite, weekly_panel.parquet and feature_store.parquet "
+                             "against their manifests (provenance is then reported as unverified)")
 
 
 def _options(args) -> dict:
@@ -37,7 +42,7 @@ def _options(args) -> dict:
 
 def build_parser() -> argparse.ArgumentParser:
     """``python -m clv``의 하위 명령 파서를 만든다."""
-    parser =argparse.ArgumentParser(prog="python -m clv", description=__doc__,
+    parser = argparse.ArgumentParser(prog="python -m clv", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("validate", "cutoffs"):
@@ -47,6 +52,9 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--output", type=Path, default=Path("results/clv"))
     train.add_argument("--config", type=Path, help="JSON or YAML settings (a 'clv:' section is allowed)")
     train.add_argument("--cutoff", help="training cutoff t0 (Asia/Seoul Monday), default: most eligible customers")
+    train.add_argument("--overwrite", action="store_true", help="replace a bundle already in --output")
+    train.add_argument("--require-gross-4w", action="store_true",
+                       help="fail (and save nothing) if the 4-week gross model cannot be trained")
     evaluate = commands.add_parser("evaluate")
     _inputs(evaluate)
     evaluate.add_argument("--model-dir", type=Path, default=Path("results/clv"))
@@ -57,8 +65,9 @@ def build_parser() -> argparse.ArgumentParser:
     _inputs(predict)
     predict.add_argument("--model-dir", type=Path, default=Path("results/clv"))
     predict.add_argument("--reference-week", help="prediction cutoff; default: experiment as_of_at or data end")
-    predict.add_argument("--model", choices=("baseline", "bgnbd_gg", "xgboost", "xgboost_two_part"), help="default: registry final model")
+    predict.add_argument("--model", choices=MODELS, help="default: registry final model")
     predict.add_argument("--output", type=Path, default=Path("results/clv_predictions.csv"))
+    predict.add_argument("--customers", type=Path, help="text/CSV file of customer IDs to predict (default: all)")
     run = commands.add_parser("run")
     _inputs(run)
     run.add_argument("--output", type=Path, default=Path("results/clv"))
@@ -66,7 +75,36 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--config", type=Path)
     run.add_argument("--cutoff")
     run.add_argument("--reference-week")
+    run.add_argument("--overwrite", action="store_true", help="replace a bundle already in --output")
+    run.add_argument("--require-gross-4w", action="store_true",
+                     help="fail (and save nothing) if the 4-week gross model cannot be trained")
+    info = commands.add_parser("info")
+    info.add_argument("--model-dir", type=Path, default=Path("results/clv"))
+    info.add_argument("--model", choices=MODELS, help="default: registry final model")
+    strategy = commands.add_parser("strategy")
+    strategy.add_argument("--features", required=True, type=Path,
+                          help="feature_store.parquet or the simulator features directory")
+    _inputs(strategy, weekly_required=False)
+    strategy.add_argument("--model-dir", type=Path, default=Path("results/clv"))
+    strategy.add_argument("--model", choices=MODELS, help="default: registry final model")
+    strategy.add_argument("--output", type=Path, default=Path("results/clv_strategy_predictions.parquet"))
+    strategy.add_argument("--allow-training-customers", action="store_true",
+                          help="development only: accept customers used to fit or select the CLV model")
+    strategy.add_argument("--require-control-only", action="store_true",
+                          help="refuse bundles not trained with population_policy control_no_coupon "
+                               "(use for batches combined with Uplift)")
     return parser
+
+
+def _customer_ids(path: Path | None):
+    """``--customers`` 파일(한 줄에 하나, 또는 ``customer_id`` 열이 있는 CSV)에서 고객 ID를 읽는다."""
+    if path is None:
+        return None
+    import pandas as pd
+
+    if path.suffix == ".csv":
+        return pd.read_csv(path, dtype={"customer_id": str})["customer_id"].tolist()
+    return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def main(argv=None) -> dict:
@@ -76,6 +114,12 @@ def main(argv=None) -> dict:
     from . import pipeline
     from .dataset import find_eligible_cutoffs
 
+    if args.command == "info":
+        from .inference import CLVModel
+
+        summary = CLVModel(args.model_dir, args.model).info()
+        print(json.dumps(jsonable(summary), ensure_ascii=False, indent=2))
+        return summary
     options = _options(args)
     if args.command == "validate":
         # strict=False: 첫 오류에서 멈추지 않고 모든 검증 결과를 모아 보고한다.
@@ -88,24 +132,43 @@ def main(argv=None) -> dict:
         summary = {"cutoffs": table.loc[table["eligible_customers"] > 0].to_dict("records"),
                    "candidate_cutoffs": int(len(table))}
     elif args.command == "train":
-        registry = pipeline.train(args.weekly, args.ledger, args.output, load_config(args.config), args.cutoff, **options)
-        summary = {key: registry[key] for key in ("reference_week", "dataset", "split_counts", "model_status",
-                                                  "final_model", "test_metrics")}
+        registry = pipeline.train(args.weekly, args.ledger, args.output, load_config(args.config), args.cutoff,
+                                  overwrite=args.overwrite, require_gross_4w=args.require_gross_4w, **options)
+        summary = {key: registry[key] for key in ("reference_week", "population", "dataset", "split_counts",
+                                                  "model_status", "final_model", "test_metrics")}
+        summary["gross_4w"] = {key: registry["gross_4w"][key] for key in ("status", "split_counts", "test_metrics")}
     elif args.command == "evaluate":
         report = pipeline.evaluate(args.weekly, args.ledger, args.model_dir, args.cutoff, args.population,
                                    args.output, **options)
         summary = {"reference_week": report["reference_week"], "customers": report["customers"],
                    "models": {name: {key: value[key] for key in ("mae", "rmse")} | {"top20_overlap_rate": value["top"]["overlap_rate"]}
-                              for name, value in report["models"].items()}}
+                              for name, value in report["models"].items()},
+                   "gross_4w": report["gross_4w"]}
     elif args.command == "predict":
-        predictions = pipeline.predict(args.weekly, args.ledger, args.model_dir, args.reference_week, args.model, **options)
+        predictions = pipeline.predict(args.weekly, args.ledger, args.model_dir, args.reference_week, args.model,
+                                       customers=_customer_ids(args.customers), **options)
         path = pipeline.write_predictions(predictions, args.output)
         summary = {"predictions": str(path), "customers": int(len(predictions)),
                    "reference_week": predictions["reference_week"].iloc[0], "model": predictions["model_name"].iloc[0],
-                   "high_value_customers": int(predictions["is_high_value_customer"].sum())}
+                   "model_version": predictions["model_version"].iloc[0],
+                   "high_value_customers": int(predictions["is_high_value_customer"].sum()),
+                   "gross_4w_status": predictions["gross_4w_status"].iloc[0]}
+    elif args.command == "strategy":
+        from .inference import CLVModel
+
+        result = CLVModel(args.model_dir, args.model).predict_for_strategy(
+            args.features, args.weekly, args.ledger, allow_training_customers=args.allow_training_customers,
+            require_control_only=args.require_control_only, **options)
+        path = result.save(args.output)
+        summary = {"predictions": str(path), "metadata": result.metadata, "customers": int(len(result.frame)),
+                   "snapshots": result.producer_metadata["snapshots"],
+                   "training_overlap": result.producer_metadata["training_overlap"],
+                   "gross_4w_status": result.gross_4w_status, "gross_4w_metadata": result.gross_4w_metadata,
+                   "warnings": result.producer_metadata["warnings"]}
     else:
         result = pipeline.run(args.weekly, args.ledger, args.output, args.predictions, load_config(args.config),
-                              args.cutoff, args.reference_week, **options)
+                              args.cutoff, args.reference_week, overwrite=args.overwrite,
+                              require_gross_4w=args.require_gross_4w, **options)
         registry = result.pop("registry")
         summary = {**result, "training_reference_week": registry["reference_week"], "final_model": registry["final_model"],
                    "model_status": registry["model_status"], "test_metrics": registry["test_metrics"]}
