@@ -85,19 +85,29 @@ def _clock_case(monkeypatch):
 
 def test_joint_prequential_excludes_same_clock_end_activity_and_future(monkeypatch):
     data,policies,activity,sm,am=_clock_case(monkeypatch)
+    encoder = {"state_keys": [[0, 0]]}
     offsets=np.array([np.log(4),-np.log(4)])
-    result=joint.prequential_metrics(data,{},policies,np.array([.5,.5]),activity,offsets,sm,am)
+    result=joint.prequential_metrics(data,encoder,policies,np.array([.5,.5]),activity,offsets,sm,am)
     assert result['equal']['action']['predicted_action_share']['view']==pytest.approx(.5)
     assert result['equal']['action']['median_available_action_activity_evidence_before_first_record']==[0,0]
     assert result['after']['action']['predicted_action_share']['view']==pytest.approx(.74)
     assert result['after']['action']['median_available_action_activity_evidence_before_first_record']==[2,1]
     delayed=activity.copy();delayed['target_at']+=pd.Timedelta(hours=1)
-    future=joint.prequential_metrics(data,{},policies,np.array([.5,.5]),delayed,offsets,sm,am)
+    future=joint.prequential_metrics(data,encoder,policies,np.array([.5,.5]),delayed,offsets,sm,am)
     assert future['equal']==result['equal']
     assert future['after']['action']['predicted_action_share']['view']==pytest.approx(.5)
     flip=activity.copy();flip['label']=0
-    changed=joint.prequential_metrics(data,{},policies,np.array([.5,.5]),flip,offsets,sm,am)
+    changed=joint.prequential_metrics(data,encoder,policies,np.array([.5,.5]),flip,offsets,sm,am)
     assert changed['equal']==result['equal']
+
+
+def test_joint_prequential_rejects_unobserved_actions_instead_of_tiny_floor_nll(monkeypatch):
+    data, policies, activity, sm, am = _clock_case(monkeypatch)
+    data["records"].loc[1, "action"] = 2
+    encoder = {"state_keys": [[0, 2]], "available_actions": ["view", "cart", "purchase"]}
+    with pytest.raises(ValueError, match="outside the declared source support"):
+        joint.prequential_metrics(data, encoder, policies, np.array([.5, .5]), activity,
+                                  np.zeros(2), sm, am)
 
 
 def test_joint_activity_artifact_rejects_wrong_base_offsets_and_clock(monkeypatch):
@@ -116,6 +126,24 @@ def test_joint_activity_artifact_rejects_wrong_base_offsets_and_clock(monkeypatc
         with pytest.raises(ValueError):joint.validate_model(invalid,'a'*64)
     for component in (True,-1,4,1.5):
         with pytest.raises(ValueError):joint.return_logit_offset(block,component)
+
+
+def test_joint_activity_uses_declared_retail_cutoff_and_rejects_tianchi_proxy(monkeypatch):
+    monkeypatch.setattr(joint.shopping, "validate_model", lambda model: None)
+    cutoff = "2021-02-01T00:00:00+00:00"
+    block = dict(mixture_weights=[.5, .5], source_domain="electronics", source_cutoff_at=cutoff,
+        return_activity=dict(schema_version=1, type=joint.ACTIVITY_TYPE, horizon_days=30,
+            base_model_sha256="a" * 64, component_logit_offsets=[-.5, .5], cutoff_at=cutoff,
+            fit_label_available_rule="window_end < cutoff", posterior_available_rule="window_end < decision_clock"))
+    joint.validate_model(block, "a" * 64)
+    invalid = deepcopy(block)
+    invalid["return_activity"]["cutoff_at"] = pd.Timestamp(joint.CUTOFF).isoformat()
+    with pytest.raises(ValueError, match="cutoff"):
+        joint.validate_model(invalid)
+    for contract in ({"domain": "tianchi", "clock_resolution": "day"},
+                     {"domain": "electronics", "clock_resolution": "day"}):
+        with pytest.raises(ValueError, match="second-resolution"):
+            joint.fit_joint(None, {"source_contract": contract}, {}, "a" * 64)
 
 
 def test_actual_small_joint_gem_is_monotone_with_control_and_activity_only_users():

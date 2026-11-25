@@ -15,7 +15,7 @@ import pandas as pd
 
 
 from simulate.v4.validation import (
-    _distance, _generated_interactions, _metric_arrays, _source_interactions, _source_sessions, _summary,
+    _distance, _generated_interactions, _metric_arrays, _session_completion, _source_interactions, _source_sessions, _summary,
 )
 from simulate.v4.simulator.engine import EcommerceSimulator
 from simulate.v4.simulator.outcomes import experiment_window_days
@@ -39,10 +39,10 @@ def source_cache(model, path):
     return rows, {**descriptor, "sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest()}
 
 
-def transition_matrix(interactions, sessions, lower, upper):
-    """Item-unit transitions; session start/end are explicit and empty sessions remain."""
-    complete = sessions.loc[sessions.started_at.ge(lower) & sessions.ended_at.lt(upper)]
-    keys = pd.MultiIndex.from_frame(complete[["customer_id", "session_id"]])
+def transition_matrix(interactions, sessions, lower, upper, session_diagnostics=None):
+    """Keep observed prefix transitions; append END only with completion support."""
+    visits, completion = _session_completion(sessions, lower, upper, session_diagnostics)
+    keys = pd.MultiIndex.from_frame(visits[["customer_id", "session_id"]])
     scoped = interactions.loc[interactions.event_at.ge(lower) & interactions.event_at.lt(upper)
                               & interactions.event_type.ne("coupon_usage")].copy()
     scoped = scoped.loc[pd.MultiIndex.from_frame(scoped[["customer_id", "session_id"]]).isin(keys)].reset_index(drop=True)
@@ -56,8 +56,11 @@ def transition_matrix(interactions, sessions, lower, upper):
         ["customer_id", "session_id", "event_at", "event_id", "unit_order"], kind="stable")
     actions = scoped.groupby(["customer_id", "session_id"], sort=False).event_type.agg(list).to_dict()
     edges = []
-    for row in complete.itertuples(index=False):
-        sequence = ["start", *actions.get((row.customer_id, row.session_id), []), "end"]
+    complete_keys = set(map(tuple, visits.loc[visits._complete, ["customer_id", "session_id"]].to_numpy()))
+    for row in visits.itertuples(index=False):
+        sequence = ["start", *actions.get((row.customer_id, row.session_id), [])]
+        if (row.customer_id, row.session_id) in complete_keys:
+            sequence.append("end")
         edges.extend((row.customer_id, before, after) for before, after in zip(sequence, sequence[1:]))
     edge_frame = pd.DataFrame(edges, columns=["customer_id", "from", "to"])
     counts = pd.crosstab(edge_frame["from"], edge_frame["to"]).reindex(index=STATES, columns=STATES, fill_value=0)
@@ -73,9 +76,9 @@ def transition_matrix(interactions, sessions, lower, upper):
                 for before,row in frame.iterrows()}
     return {"states":list(STATES),"counts":{before:{after:int(value) for after,value in row.items()} for before,row in counts.iterrows()},
             "row_probabilities":serial(probabilities),"customer_balanced_row_probabilities":serial(balanced),
-            "complete_sessions":len(complete),"item_units":len(scoped),"edges":len(edges),
-            "empty_sessions":sum((row.customer_id,row.session_id) not in actions for row in complete.itertuples(index=False)),
-            "end_meaning":"generator recorded end; source last-observed-action session end is inferred"}
+            "complete_sessions":len(complete_keys),"item_units":len(scoped),"edges":len(edges),
+            "empty_sessions":sum(key not in actions for key in complete_keys),
+            "session_completion":completion,"end_meaning":completion["basis"]}
 
 
 def transition_distance(source, generated):
@@ -95,11 +98,11 @@ def transition_distance(source, generated):
             "interpretation":"descriptive distance, not a pass threshold"}
 
 
-def scope_metrics(interactions, sessions, ids, groups, lower, upper, as_of):
+def scope_metrics(interactions, sessions, ids, groups, lower, upper, as_of, session_diagnostics=None):
     ids = set(ids)
     events = interactions.loc[interactions.customer_id.isin(ids) & interactions.event_type.ne("coupon_usage")]
     visits = sessions.loc[sessions.customer_id.isin(ids)]
-    arrays,price_weights,summary = _metric_arrays(events,visits,lower,upper)
+    arrays,price_weights,summary = _metric_arrays(events,visits,lower,upper,session_diagnostics)
     inside = visits.loc[visits.started_at.ge(lower) & visits.started_at.lt(upper)]
     array_ids = sorted(ids)
     arrays["sessions_per_selected_customer"] = inside.groupby("customer_id").size().reindex(array_ids,fill_value=0).to_numpy()
@@ -114,30 +117,30 @@ def scope_metrics(interactions, sessions, ids, groups, lower, upper, as_of):
         [groups.get(uid,"unmapped") for uid in array_ids], dtype=object).value_counts().items()}
     for name in ("observed_tenure_days","observed_history_days_at_asof","sessions_per_selected_customer","purchase_sessions_per_selected_customer"):
         summary[name] = _summary(arrays[name])
-    summary["transitions"] = transition_matrix(events,visits,lower,upper)
+    summary["transitions"] = transition_matrix(events,visits,lower,upper,session_diagnostics)
     return arrays,price_weights,summary
 
 
-def compare_scope(source_events,source_sessions,source_ids,source_groups,generated,generated_sessions,generated_ids,generated_groups,lower,upper,as_of):
+def compare_scope(source_events,source_sessions,source_ids,source_groups,generated,generated_sessions,generated_ids,generated_groups,lower,upper,as_of,session_diagnostics=None):
     left,lw,ls = scope_metrics(source_events,source_sessions,source_ids,source_groups,lower,upper,as_of)
-    right,rw,rs = scope_metrics(generated,generated_sessions,generated_ids,generated_groups,lower,upper,as_of)
+    right,rw,rs = scope_metrics(generated,generated_sessions,generated_ids,generated_groups,lower,upper,as_of,session_diagnostics)
     distances = {}
     for name in left:
         unit = "minor_source_unit" if name.endswith("minor") else "seconds" if name.endswith("seconds") else "days" if "days" in name else "count"
         distances[name] = _distance(left[name],right[name],unit,lw if name=="purchased_price_minor" else None,rw if name=="purchased_price_minor" else None)
-    for summary,events,visits,ids,groups in ((ls,source_events,source_sessions,source_ids,source_groups),(rs,generated,generated_sessions,generated_ids,generated_groups)):
-        summary["home_group_strata"] = home_group_strata(events,visits,ids,groups,lower,upper,as_of)
+    for summary,events,visits,ids,groups,diagnostics in ((ls,source_events,source_sessions,source_ids,source_groups,None),(rs,generated,generated_sessions,generated_ids,generated_groups,session_diagnostics)):
+        summary["home_group_strata"] = home_group_strata(events,visits,ids,groups,lower,upper,as_of,diagnostics)
     action_delta = {action:rs["item_proxy_action_share"].get(action,0)-ls["item_proxy_action_share"].get(action,0) for action in ACTIONS}
     return {"source":ls,"generated":rs,"numeric_distances":distances,
             "action_share_difference":action_delta,"action_share_L1":sum(abs(value) for value in action_delta.values()),
             "transition_distance":transition_distance(ls["transitions"],rs["transitions"])}
 
 
-def home_group_strata(events,visits,ids,groups,lower,upper,as_of):
+def home_group_strata(events,visits,ids,groups,lower,upper,as_of,session_diagnostics=None):
     strata = {}
     for group in sorted(set(groups.get(uid,"unmapped") for uid in ids)):
         selected = {uid for uid in ids if groups.get(uid,"unmapped")==group}
-        arrays,weights,part = scope_metrics(events,visits,selected,groups,lower,upper,as_of)
+        arrays,weights,part = scope_metrics(events,visits,selected,groups,lower,upper,as_of,session_diagnostics)
         strata[group] = {"customers":len(selected),
             "action_share":part["item_proxy_action_share"],"transitions":part["transitions"],
             "remove_then_later":part["remove_then_later"],
@@ -159,7 +162,7 @@ def scalar_distances(scope):
 
 def compare_reports(baseline,candidate):
     protocol_keys=("source_cache_fingerprint","customers","seeds","months","clock_start","clock_end","as_of_at",
-                   "source_cache_sha256", "configuration_except_profile_sha256")
+                   "source_cache_sha256", "configuration_except_profile_sha256", "session_completion_definition")
     equal = {key:baseline["protocol"].get(key)==candidate["protocol"].get(key) for key in protocol_keys}
     equal["eligibility_window_days"] = (
         experiment_window_days(baseline["protocol"], "eligibility_window_days")
@@ -221,7 +224,8 @@ def run_benchmark(config,model,source,source_descriptor,customers,seeds):
         for name,start,end,ids in (("matched_five_months_no_new_coupon",lower,upper,controls),
                                    (f"pre_asof_{eligibility_days}d",history_start,asof,active_generated),
                                    ("post_asof_28d_no_new_coupon",asof,asof+pd.Timedelta(days=28),controls)):
-            scopes[name]=compare_scope(source_events,source_sessions,active_source,source_groups,generated,gen_sessions,ids,groups,start,end,asof)
+            scopes[name]=compare_scope(source_events,source_sessions,active_source,source_groups,generated,gen_sessions,ids,groups,start,end,asof,
+                                       result.tables.get("session_diagnostics"))
         donor_ids=result.tables["diagnostics"].source_profile_id.astype(str)
         runs.append({"seed":seed,"seconds":time.perf_counter()-started,"dataset_id":metadata["dataset_id"],
                      "runtime_code_sha256": metadata["runtime_code_sha256"],
@@ -247,6 +251,7 @@ def run_benchmark(config,model,source,source_descriptor,customers,seeds):
             "configuration": config,
             "protocol":{"source_cache_fingerprint":source_descriptor["fingerprint"],
                         "source_cache_sha256": source_descriptor.get("sha256"),
+                        "session_completion_definition": "diagnostic_natural_end_or_source_30min_v1",
                         "configuration_except_profile_sha256": hashlib.sha256(json.dumps(comparable_config, sort_keys=True).encode()).hexdigest(),
                         "customers":customers,"seeds":seeds,"months":5,
                         "clock_start":lower.isoformat(),"clock_end":upper.isoformat(),"as_of_at":asof.isoformat(),
@@ -258,9 +263,10 @@ def run_benchmark(config,model,source,source_descriptor,customers,seeds):
                 "Post-asof comparisons use generated no-new-coupon customers; source promotion exposure is unknown.",
                 "Source first observation is left-censored, not signup; generated signup and empty initial cart are structural.",
                 "Source purchase item rows use a one-unit proxy; generated OrderItems are expanded by quantity, with order headers reported separately.",
-                "Complete-session lengths/transitions omit boundary-crossing sessions; start/end source tokens use inferred sessions.",
+                "Lengths/durations use diagnostic natural END; censored prefixes retain observed transitions without an invented END.",
+                "Source inferred END requires last action +30min strictly before the scope upper bound; legacy timestamp-only END is unverified.",
                 "7d removal followup requires full observation; 30d rates in short scopes can be entirely right-censored.",
-                "Purchase/idle gaps include only completed observed pairs inside each scope; censored intervals are not zero.",
+                "Idle gaps require the previous session's completed END and the next observed START; censored ends are never bridged or zero-filled.",
                 "Source home groups use full observed histories and generated donor home groups are diagnostic strata, not verified innate personas.",
                 "Distances describe fidelity without invented pass thresholds; subgroup sample sizes and composition changes remain visible."]}
 

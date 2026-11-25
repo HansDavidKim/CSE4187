@@ -92,6 +92,11 @@ def load_tables(directory: str | Path = "data/processed") -> dict[str, Any]:
                 frame = pd.read_parquet(sidecar)
                 _validate_sidecar(name, frame, tables, tables["_metadata"])
                 tables[name] = frame
+        diagnostic = database.parent / "session_diagnostics.parquet"
+        if diagnostic.exists():
+            tables["session_diagnostics"] = pd.read_parquet(diagnostic)
+            from simulate.v4.session_observations import session_availability
+            session_availability(tables)
         return tables
     names = ("customers", "events", "sessions", "orders", "treatments", "labels")
     tables = {name: pd.read_parquet(path / f"{name}.parquet") for name in names}
@@ -121,11 +126,13 @@ def load_retention_inputs(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
     """Read snapshot keys, the ordered KIT39 matrix, and mature 28-day no-visit labels."""
     from simulate.v4.features import EXPANDED_FEATURES, EXPANDED_FEATURE_VERSION
+    from simulate.v4.time_spec import WEEKLY_FEATURE_VERSION, is_weekly
 
     path = Path(feature_directory)
     manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
     version = manifest.get("feature_set_version")
-    if (version not in ("kit39-review-cart-v2", EXPANDED_FEATURE_VERSION)
+    supported = (WEEKLY_FEATURE_VERSION,) if is_weekly(manifest) else ("kit39-review-cart-v2", EXPANDED_FEATURE_VERSION)
+    if (version not in supported
             or manifest.get("predictors") != list(EXPANDED_FEATURES)):
         raise ValueError("Retention requires the registered KIT39 predictors in canonical order")
     keys = ["customer_id", "as_of_at", "snapshot_id"]
@@ -238,3 +245,35 @@ def load_uplift_inputs(feature_directory: str | Path) -> tuple[pd.DataFrame, pd.
     for frame in (customers, weekly, cart):
         frame.attrs = {**provenance, "seed": seed}
     return customers, weekly, cart
+
+
+def load_clv_inputs(feature_directory: str | Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
+    """Read thirteen observed weeks and exact52-week control-only CLV labels."""
+    from simulate.v4.time_spec import WEEKLY_TIME_SPEC, is_weekly
+
+    path = Path(feature_directory)
+    manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
+    if not is_weekly(manifest):
+        raise ValueError("weekly CLV inputs require the explicit104week time specification")
+    keys = ["customer_id", "as_of_at", "snapshot_id"]
+    values = ["sessions", "purchases", "net_revenue_minor", "views", "session_seconds"]
+    weekly = _read_materialized_parquet(path, manifest, "clv_weekly_inputs.parquet", [*keys, "reference_week", *values])
+    labels = _read_materialized_parquet(path, manifest, "clv_labels.parquet", [*keys, "future_revenue_12m", "clv_outcome_end_at", "observation_end_at"])
+    if labels.empty or labels[keys].isna().any().any() or labels.duplicated(keys).any():
+        raise ValueError("CLV labels require unique known snapshots")
+    if not labels.clv_outcome_end_at.eq(labels.as_of_at + pd.Timedelta(days=WEEKLY_TIME_SPEC["clv_label_days"])).all():
+        raise ValueError("weekly CLV labels must end exactly52weeks after t0")
+    complete = labels.clv_outcome_end_at.le(labels.observation_end_at) & labels.future_revenue_12m.notna()
+    selected = labels.loc[complete].copy().reset_index(drop=True)
+    if selected.empty:
+        raise ValueError("CLV requires complete control-only52week targets")
+    weekly = weekly.merge(selected[keys], on=keys, how="inner", validate="many_to_one")
+    if weekly.duplicated(["customer_id", "as_of_at", "reference_week"]).any():
+        raise ValueError("CLV inputs require one row per observed week")
+    groups = {key: rows for key, rows in weekly.groupby(["customer_id", "as_of_at"], sort=False)}
+    for point in selected.itertuples(index=False):
+        rows = groups.get((point.customer_id, point.as_of_at), weekly.iloc[:0])
+        expected = pd.date_range(point.as_of_at - pd.Timedelta(days=WEEKLY_TIME_SPEC["clv_input_days"]), point.as_of_at, freq="7D", inclusive="left")
+        if len(rows) != len(expected) or not rows.reference_week.isin(expected).all():
+            raise ValueError("CLV inputs must contain exactly thirteen strict-past weeks")
+    return selected[keys], weekly.sort_values(["customer_id", "reference_week"]).reset_index(drop=True), selected.future_revenue_12m.astype(float)

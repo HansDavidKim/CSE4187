@@ -44,7 +44,8 @@ slicer==0.0.8
 SQLAlchemy==2.1.6
 sympy==1.14.0
 threadpoolctl==3.7.0
-torch==2.15.0
+torch==2.8.0; sys_platform == "darwin"
+torch==2.15.0; sys_platform != "darwin"
 tqdm==4.70.1
 typing_extensions==4.16.0
 tzdata==2026.6

@@ -11,13 +11,14 @@ from tempfile import TemporaryDirectory
 
 from simulate.v4.simulator.population_profiles import aggregate_population
 from simulate.v4.simulator.population_timing import aggregate_review_model, aggregate_visit_timing
+from .source_contract import canonical_available_actions, utc_cutoff
 
 
 def _select(model, keys):
     return {key: model[key] for key in keys.split()}
 
 
-def export_population(models: Path, output: Path, reward_gmm: Path | None = None) -> None:
+def export_population(models: Path, output: Path, reward_gmm: Path | None = None, *, return_state: Path | None = None) -> None:
     """Convert fitted v10 assets into model parameters and aggregate calibration."""
     if output.exists():
         raise FileExistsError(output)
@@ -38,10 +39,36 @@ def export_population(models: Path, output: Path, reward_gmm: Path | None = None
     source_sample = _select(shopping["source"], "files sample_modulus")
     if source_sample != _select(timing["source"], "files sample_modulus"):
         raise ValueError("population export requires shopping and visit timing from the same source sample")
+    if "domain" in shopping["source"]:
+        if shopping["source"]["domain"] != timing["source"].get("domain"):
+            raise ValueError("population export requires the same source domain and UID namespace")
+        source_sample["domain"] = shopping["source"]["domain"]
+    if "prepared_source_cache" in shopping["source"] and "source_contract" not in shopping:
+        raise ValueError("prepared population export requires its explicit source contract")
+    if "source_contract" in shopping:
+        if shopping.get("summary_scope", {}).get("mode") != "train_only":
+            raise ValueError("prepared population export requires train-only runtime summaries")
+        if shopping["source"].get("prepared_source_cache") != timing["source"].get("prepared_source_cache"):
+            raise ValueError("population export requires the same immutable prepared observations")
+        training_at = utc_cutoff(shopping["source_contract"].get("training_cutoff_at", shopping["source"].get("training_cutoff_at")))
+        if (utc_cutoff(shopping["summary_scope"].get("cutoff_at")) != training_at
+                or utc_cutoff(shopping["source"].get("training_cutoff_at")) != training_at):
+            raise ValueError("population runtime summaries differ from the source fitting cutoff")
+        for fitted in (returning, timing):
+            source = fitted.get("source", {})
+            if (source.get("domain") != shopping["source"]["domain"]
+                    or source.get("prepared_source_cache") != shopping["source"].get("prepared_source_cache")
+                    or utc_cutoff(source.get("training_cutoff_at")) != training_at):
+                raise ValueError("population components differ in source, UID namespace or fitting cutoff")
+        if canonical_available_actions(returning.get("available_actions")) != canonical_available_actions(shopping.get("available_actions")):
+            raise ValueError("population shopping and return observation supports differ")
     sample_sha256 = hashlib.sha256(json.dumps(source_sample, sort_keys=True).encode()).hexdigest()
 
     ref = _select(returning, "schema_version model_type cold_start_probability feature_names coef intercept "
                             "scaler_mean scaler_scale feature_min feature_max")
+    for name in ("cold_start_fit", "available_actions", "feature_support"):
+        if name in returning:
+            ref[name] = returning[name]
     # The population run uses the reference mean, without a target intercept shift.
     ref["calibration_reference_probabilities"] = [fmean(returning["calibration_reference_probabilities"])]
     return_bytes = json.dumps(ref, separators=(",", ":"), allow_nan=False).encode()
@@ -50,6 +77,9 @@ def export_population(models: Path, output: Path, reward_gmm: Path | None = None
                      "schema_version type actions discount regularization state_count feature_names "
                      "encoder action_mask transition_csr component_count mixture_weights common_reward "
                      "component_offsets component_policies component_values")
+    for name in ("component_reward_deviations", "persona_labels", "linear_reward", "source_cutoff_at", "source_domain"):
+        if name in shopping["latent_shopping"]:
+            latent[name] = shopping["latent_shopping"][name]
     latent["profile_posteriors"] = {}
     latent["return_activity"] = _select(
         activity,
@@ -59,6 +89,11 @@ def export_population(models: Path, output: Path, reward_gmm: Path | None = None
 
     checkout = _select(shopping, "schema_version currency minor_unit reference_price_minor choice_unit checkout_episode_definition")
     checkout["source"] = {"dataset": shopping["source"]["dataset"], "sample_sha256": sample_sha256}
+    for name in ("source_contract", "summary_scope", "available_actions"):
+        if name in shopping:
+            checkout[name] = shopping[name]
+    if "domain" in shopping["source"]:
+        checkout["source"]["domain"] = shopping["source"]["domain"]
     checkout["population"] = aggregate_population(shopping)
     checkout["latent_shopping"] = latent
     checkout["checkout_kernel"] = _select(shopping["checkout_kernel"], "schema_version type loc scale training_transitions")
@@ -80,14 +115,42 @@ def export_population(models: Path, output: Path, reward_gmm: Path | None = None
     shopping_bytes = json.dumps(checkout, separators=(",", ":"), allow_nan=False).encode()
     if reward_gmm is not None:
         from simulate.v4.irl.reward_gmm import validate_gmm
+        from simulate.v4.irl.choice_gmm import TYPE as CHOICE_GMM_TYPE, validate_choice_gmm
 
         gmm = json.loads(reward_gmm.read_bytes())
-        validate_gmm(gmm, hashlib.sha256(original_shopping_bytes).hexdigest(),
-                     hashlib.sha256(original_return_bytes).hexdigest())
+        validator = validate_choice_gmm if gmm.get("type") == CHOICE_GMM_TYPE else validate_gmm
+        validator(gmm, hashlib.sha256(original_shopping_bytes).hexdigest(),
+                  hashlib.sha256(original_return_bytes).hexdigest())
         projected = _select(gmm, "schema_version type purpose parameter_names component_count mixture_weights means covariances")
+        for name in ("available_actions", "fitted_parameter_names", "component_model_indices", "choice_temperatures", "dispersion_scales",
+                     "shopping_dispersion_scales", "return_dispersion_scales",
+                     "condition_on_profile_components", "persona_labels", "component_fitted_parameter_names",
+                     "backend", "parameter_units", "shopping_dispersion_scales", "return_dispersion_scales"):
+            if name in gmm:
+                projected[name] = gmm[name]
         projected["base_model_sha256"] = hashlib.sha256(shopping_bytes).hexdigest()
         projected["return_model_sha256"] = latent["return_activity"]["base_model_sha256"]
         assets["population_gmm.json"] = projected
+
+    if return_state is not None:
+        from . import return_state as state_model
+
+        dynamic = json.loads(return_state.read_bytes())
+        state_model.validate_model(dynamic)
+        fitted_prior = dynamic.get("fit", {}).get("static_return_prior") or {}
+        if fitted_prior:
+            if reward_gmm is None or fitted_prior.get("population_model_fingerprint") != hashlib.sha256(
+                    json.dumps(gmm, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest():
+                raise ValueError("population return state requires its exact frozen static reward GMM")
+        projected_state = _select(dynamic, "schema_version type rho stationary_std quadrature_order horizon_days")
+        for name in ("private_state", "transition_unit", "initial_distribution", "no_session_transition", "emission",
+                     "rho_identified", "rho_grid_estimated", "fit", "limitations"):
+            if name in dynamic:
+                projected_state[name] = dynamic[name]
+        if reward_gmm is not None:
+            projected_state["runtime_gmm_fingerprint"] = hashlib.sha256(json.dumps(
+                projected, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+        assets["population_return_state.json"] = projected_state
 
     output.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=output.parent) as temporary:
@@ -105,5 +168,6 @@ if __name__ == "__main__":
     parser.add_argument("--models", type=Path, required=True, help="directory containing the fitted v10 models")
     parser.add_argument("--output", type=Path, required=True, help="new directory for population calibration")
     parser.add_argument("--reward-gmm", type=Path, help="fitted reward GMM to project onto the population assets")
+    parser.add_argument("--return-state", type=Path, help="optional private retail return-state sidecar")
     args = parser.parse_args()
-    export_population(args.models, args.output, args.reward_gmm)
+    export_population(args.models, args.output, args.reward_gmm, return_state=args.return_state)

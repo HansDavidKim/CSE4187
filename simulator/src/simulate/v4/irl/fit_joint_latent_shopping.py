@@ -176,6 +176,7 @@ def fit_joint_mixture(panel, matrices, mask, state, activity, control, max_em=8,
     cluster_counts = np.asarray([action_counts[labels == z].sum(axis=0) for z in range(COMPONENTS)])
     odds = np.log(np.maximum(cluster_counts[:, :4], 1e-8)) - np.log(np.maximum(cluster_counts[:, 4:5], 1e-8))
     offsets = odds - odds.mean(axis=0, keepdims=True)
+    offsets[:, ~mask[:, :4].any(axis=0)] = 0.
     weights = np.bincount(labels, minlength=COMPONENTS).astype(float) / len(labels)
     return_offsets = np.zeros(COMPONENTS)
     base = control["base"].copy();normalizer = float(counts.sum() + len(activity))
@@ -252,10 +253,18 @@ def fit_joint_mixture(panel, matrices, mask, state, activity, control, max_em=8,
 def prequential_metrics(data, encoder, policies, weights, activity, return_offsets,
                        shopping_masks, activity_split_masks):
     """Both outcomes become evidence only strictly after their availability clock."""
-    states, fallback = shopping.encode(encoder, data["features"])
+    if encoder.get("lifecycle_memory"):
+        from .source_phases import phase_ids
+        states, fallback = shopping.encode(encoder, data["features"], phase_ids=phase_ids(data["records"]))
+    else:
+        states, fallback = shopping.encode(encoder, data["features"])
     sessions = data["sessions"]
     valid = ~sessions.invalid_total_cart & ~sessions.ambiguous_clock_sessions & ~sessions.is_censored
     indices = shopping.valid_record_indices(data, valid)
+    supported = shopping.action_mask(encoder)
+    targets = data["records"].action.to_numpy(dtype=int)
+    if not supported[states[indices], targets[indices]].all():
+        raise ValueError("prequential action lies outside the declared source support")
     action_selected = {int(i): name for name, mask in shopping_masks.items()
                        for i in shopping.valid_record_indices(data, mask)}
     activity_selected = {int(i): name for name, mask in activity_split_masks.items() for i in activity.index[mask]}
@@ -339,8 +348,12 @@ def validate_model(model, return_model_sha256=None):
         raise ValueError("missing frozen return model SHA256")
     if return_model_sha256 is not None and sha != return_model_sha256:
         raise ValueError("latent activity head requires its exact frozen return model")
-    if head.get("cutoff_at") != pd.Timestamp(CUTOFF).isoformat():
+    declared_cutoff = pd.Timestamp(block.get("source_cutoff_at", CUTOFF))
+    if (pd.isna(declared_cutoff) or declared_cutoff.tzinfo is None
+            or head.get("cutoff_at") != declared_cutoff.isoformat()):
         raise ValueError("incompatible common shopping/activity cutoff")
+    if block.get("source_domain", "cosmetics") not in {"cosmetics", "electronics"}:
+        raise ValueError("incompatible retail source domain")
     if head.get("fit_label_available_rule") != "window_end < cutoff" or head.get("posterior_available_rule") != "window_end < decision_clock":
         raise ValueError("incompatible activity availability clock")
 
@@ -353,17 +366,36 @@ def return_logit_offset(model, component_id):
     return 0. if head is None else float(head["component_logit_offsets"][int(component_id)])
 
 
-def fit_joint(rows, base, return_model, return_model_sha256):
-    cutoff = pd.Timestamp(CUTOFF)
+def fit_joint(rows, base, return_model, return_model_sha256, *,
+              cutoff_at=None, available_actions=None, domain=None, lifecycle_memory=None):
+    contract = base.get("source_contract", {})
+    declared = contract.get("training_cutoff_at", contract.get("outer_cutoff_at"))
+    if cutoff_at is not None and declared is not None and pd.Timestamp(cutoff_at) != pd.Timestamp(declared):
+        raise ValueError("joint cutoff differs from the prepared source contract")
+    cutoff = pd.Timestamp(cutoff_at or declared or CUTOFF)
+    if pd.isna(cutoff) or cutoff.tzinfo is None:
+        raise ValueError("joint cutoff must be a known timezone-aware timestamp")
+    declared_actions = contract.get("observed_actions")
+    if available_actions is not None and declared_actions is not None and set(available_actions) != set(declared_actions):
+        raise ValueError("joint actions differ from the prepared source contract")
+    available_actions = available_actions if available_actions is not None else declared_actions
+    declared_domain = contract.get("domain", base.get("source", {}).get("domain"))
+    if domain is not None and declared_domain is not None and domain != declared_domain:
+        raise ValueError("joint domain differs from the prepared source contract")
+    domain = domain or declared_domain or "cosmetics"
+    if domain not in {"cosmetics", "electronics"} or contract.get("clock_resolution", "second") != "second":
+        raise ValueError("retail joint fitting requires an identified second-resolution source")
     if pd.Timestamp(return_model["validation"]["temporal_cutoff"]) != cutoff:
-        raise ValueError("joint recipe requires the frozen Jan29 return model")
-    data = shopping.build_source(rows, base["observation_end"], int(base.get("seed", 42)))
+        raise ValueError("joint recipe requires the same temporal cutoff as its frozen return model")
+    data = shopping.build_source(rows, base["observation_end"], int(base.get("seed", 42)),
+                                 available_actions=available_actions, lifecycle_memory=lifecycle_memory)
     outer, _, split_audit = shopping.old.split_sessions(data, cutoff, cutoff - pd.DateOffset(months=1), "known-total")
     activity, activity_audit = build_activity_panel(rows, return_model, int(base.get("seed", 42)))
     activity_split = activity_masks(activity, cutoff)
     training_activity = activity.loc[activity_split["train"]].reset_index(drop=True)
     if training_activity.label.nunique() != 2:raise ValueError("joint activity fit needs both outcomes")
-    panel = shopping.select_panel(data, outer["train"]);encoder = shopping.fit_encoder(panel)
+    panel = shopping.select_panel(data, outer["train"])
+    encoder = shopping.fit_encoder(panel, available_actions=available_actions, lifecycle_memory=lifecycle_memory)
     matrices, mask, state, dynamics_audit = shopping.fit_dynamics(encoder, panel)
     print(json.dumps({"stage": "joint_source", "action_records": len(panel["records"]),
         "activity_records": len(training_activity), "states": len(mask)}), flush=True)
@@ -374,14 +406,14 @@ def fit_joint(rows, base, return_model, return_model_sha256):
         mixture["return_offsets"], outer, activity_split)
     control_validation = prequential_metrics(data, encoder, np.asarray([control["statistics"][0][0]]),
         np.ones(1), activity, control["return_offsets"], outer, activity_split)
-    posteriors = {hashlib.sha256(f"cosmetics:{uid}".encode()).hexdigest()[:16]: q.tolist()
+    posteriors = {hashlib.sha256(f"{domain}:{uid}".encode()).hexdigest()[:16]: q.tolist()
                   for uid, q in zip(mixture["users"], mixture["responsibility"])}
     activity_audit["split_counts"] = {name: {"records": int(selected.sum()),
         "users": int(activity.loc[selected, "user_id"].nunique()), "positive": int(activity.loc[selected, "label"].sum()),
         "active30d": int(activity.loc[selected, "active30d"].sum())} for name, selected in activity_split.items()}
     covered = np.logical_or.reduce([m.to_numpy() for m in activity_split.values()])
     activity_audit["purged_records"] = int((~covered).sum())
-    return {"schema_version": 1, "type": TYPE, "actions": list(shopping.ACTIONS),
+    result = {"schema_version": 1, "type": TYPE, "actions": list(shopping.ACTIONS),
         "discount": shopping.DISCOUNT, "regularization": PENALTY, "state_count": len(mask),
         "feature_names": shopping.FEATURE_NAMES, "context_keys": shopping.CONTEXT_KEYS,
         "encoder": encoder, "action_mask": mask.tolist(), "transition_csr": [shopping.pack_matrix(p) for p in matrices],
@@ -389,7 +421,7 @@ def fit_joint(rows, base, return_model, return_model_sha256):
         "common_reward": mixture["base"].tolist(), "component_offsets": mixture["offsets"].tolist(),
         "component_policies": policies.tolist(), "component_values": [s[1].tolist() for s in mixture["statistics"]],
         "profile_posteriors": posteriors,
-        "posterior_bank_scope": "training users only; shopping terminal and activity window_end strictly before Jan29; persistent anonymous customer effect",
+        "posterior_bank_scope": f"training users only; shopping terminal and activity window_end strictly before {cutoff.isoformat()}; persistent anonymous customer effect",
         "return_activity": {"schema_version": 1, "type": ACTIVITY_TYPE, "horizon_days": 30,
             "base_model_sha256": return_model_sha256, "component_logit_offsets": mixture["return_offsets"].tolist(),
             "cutoff_at": cutoff.isoformat(), "fit_label_available_rule": "window_end < cutoff",
@@ -415,12 +447,16 @@ def fit_joint(rows, base, return_model, return_model_sha256):
             "https://www.cs.cmu.edu/~bziebart/publications/maximum-causal-entropy.pdf",
             "https://eml.berkeley.edu/books/choice2nd/Ch06_p134-150.pdf"],
         "limitations": ["Activity head is a supervised observational random effect, not identified long-horizon return reward or causal customer type.",
-            "Frozen base GLM was trained under its original Jan29 inclusive-outcome boundary; new activity offsets and personal posteriors use the stricter end<Jan29 boundary.",
-            "Jan29 encoder/dynamics/reward/personal bank are refitted; old Feb1 K34 panel likelihood numbers are not directly comparable.",
+            "Frozen base GLM retains its recorded outcome boundary; activity offsets and personal posteriors use strict window_end<cutoff.",
+            "Encoder/dynamics/reward/personal bank are fitted at their recorded source cutoff; likelihoods from different splits are not directly comparable.",
             "Source action likelihood conditions on observed contexts and schedules; session-count and visit-gap banks are not jointly refitted.",
             "Shared partial-observation transition kernel excludes unidentified unmatched-SKU remove pairs; runtime physical cart dynamics may differ.",
             "Entry/cohort age and conditional timing transport can still alter generated state occupation; no manual activity multiplier is fitted.",
-            "Anonymous mixture components are not validated psychological personas; no real-customer experiment or person-level Cosmetics/review source link identifies joint review-shopping reward coefficients."]}
+            "Anonymous mixture components are not validated psychological personas; no real-customer experiment or person-level shopping/review source link identifies joint review-shopping reward coefficients."]}
+    if contract or cutoff != pd.Timestamp(CUTOFF) or domain != "cosmetics":
+        result["source_cutoff_at"] = cutoff.isoformat()
+        result["source_domain"] = domain
+    return result
 
 
 def main():
@@ -428,6 +464,10 @@ def main():
     parser.add_argument("--base", type=Path, default=Path("data/models/shopping_profiles_aligned_v6.json"))
     parser.add_argument("--return-model", type=Path, default=Path("data/models/return_model.json"))
     parser.add_argument("--source-cache", type=Path, default=Path("artifacts/v4/source_sample.parquet"))
+    parser.add_argument("--cutoff-at")
+    parser.add_argument("--domain", choices=("cosmetics", "electronics"))
+    parser.add_argument("--available-actions", nargs="+", choices=shopping.ACTIONS[:-1])
+    parser.add_argument("--lifecycle-memory", choices=("first_two_observed_sessions",))
     parser.add_argument("--output", type=Path, default=Path("data/models/shopping_joint_latent_irl_candidate.json"))
     parser.add_argument("--report", type=Path, default=Path("docs/audit/simulator/joint_latent_shopping_training.json"))
     args = parser.parse_args()
@@ -440,7 +480,9 @@ def main():
         raise ValueError("shopping and return base must use the identical observed source sample")
     from simulate.v4.irl.fit_donor_prior import load_prior_source
     rows, source = load_prior_source(base, args.source_cache)
-    block = fit_joint(rows, base, return_model, shopping.digest(args.return_model))
+    block = fit_joint(rows, base, return_model, shopping.digest(args.return_model),
+                      cutoff_at=args.cutoff_at, domain=args.domain, available_actions=args.available_actions,
+                      lifecycle_memory=args.lifecycle_memory)
     block["provenance"] = {"base_path": str(args.base), "base_sha256": shopping.digest(args.base),
         "return_base_path": str(args.return_model), "return_base_sha256": shopping.digest(args.return_model),
         "source_cache": source, "source_cache_sha256": shopping.digest(args.source_cache) if args.source_cache.is_file() else None,

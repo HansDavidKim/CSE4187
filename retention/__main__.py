@@ -1,12 +1,14 @@
 """CLI for validation, training, inference, independent evaluation and experiments."""
 import argparse
+import sys
 from .pipeline import train, infer, read_config, write_json, local_output
 from .data import load_canonical
 from .fixture import generate
-from .simulator_input import training_inputs
+from .simulator_input import training_inputs, simulator_imports
 
 
-def main():
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     p = commands.add_parser("train"); p.add_argument("--config", required=True); p.add_argument("--output")
@@ -26,10 +28,16 @@ def main():
     p.add_argument("--config", required=True)
     p.add_argument("--output", required=True)
     p.add_argument("--customers", type=int, default=20000)
-    p.add_argument("--months", type=int, default=24)
+    clock = p.add_mutually_exclusive_group()
+    clock.add_argument("--months", type=int, help="explicit legacy calendar-month generation")
+    clock.add_argument("--weeks", type=int, choices=(104,), help="52 past +52 future weeks (default)")
     p.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44])
     p.add_argument("--integrate", action="store_true")
-    args = parser.parse_args()
+    if argv[:1] == ["experiment"]:
+        simulator_imports()
+        from simulate.v4.simulator.coupon_assignment import add_coupon_assignment_arguments, coupon_assignment_from_args
+        add_coupon_assignment_arguments(p)
+    args = parser.parse_args(argv)
     if args.command == "train":
         config = read_config(args.config)
         if args.output:
@@ -52,7 +60,8 @@ def main():
         print(f"Evaluation status {result['label_status']}; ML AUC target {result['test_auc_target_met']}")
     elif args.command == "experiment":
         from .experiments import run_experiment
-        print(run_experiment(read_config(args.config), args.output, args.customers, args.months, args.seeds, args.integrate))
+        print(run_experiment(read_config(args.config), args.output, args.customers, args.months, args.seeds, args.integrate,
+                             weeks=args.weeks, coupon_assignment=coupon_assignment_from_args(args)))
     else:
         result = infer(args.bundle, args.input, args.as_of, args.output)
         print(f"Wrote {len(result)} prediction/status rows")

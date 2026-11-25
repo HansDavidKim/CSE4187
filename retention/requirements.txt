@@ -7,7 +7,9 @@ scikit-learn>=1.5,<2
 lightgbm>=4.5,<5
 catboost>=1.2,<2
 xgboost>=2,<4
-torch>=2.4,<3
+# Verified alongside the tree-model OpenMP runtimes on macOS.
+torch==2.8.0; sys_platform == "darwin"
+torch>=2.4,<3; sys_platform != "darwin"
 optuna>=4,<5
 shap>=0.46,<1
 matplotlib>=3.9,<4

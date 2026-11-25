@@ -11,6 +11,8 @@ import pandas as pd
 
 from .behavior_features import BEHAVIOR_FEATURES, BEHAVIOR_FEATURE_VERSION, build_behavior_features
 from .data.loader import _outcome_days, load_tables
+from .time_spec import WEEKLY_FEATURE_VERSION, feature_window_days, is_weekly
+from .session_observations import session_availability
 
 EVENTS = ("view", "cart", "remove_from_cart", "purchase")
 KIT_FEATURES = (
@@ -43,6 +45,7 @@ def _prepared(tables):
     for name, columns in fields.items():
         for col in columns:
             result[name][col] = _utc(result[name][col])
+    result["sessions"] = session_availability(tables)
     purchase = result["events"].loc[result["events"].event_type.eq("purchase"), ["event_id", "customer_id", "session_id", "event_at"]]
     result["orders"] = result["orders"].merge(purchase, left_on="purchase_event_id", right_on="event_id", validate="one_to_one")
     return result
@@ -129,7 +132,7 @@ def build_features(tables: dict[str, Any], as_of_at=None) -> pd.DataFrame:
     rows = []
     for t0, snapshots in labels.groupby("as_of_at", sort=True):
         snapshot_ids = snapshots.set_index("customer_id")["snapshot_id"].dropna().to_dict() if "snapshot_id" in snapshots else {}
-        t30, t60, t90 = (t0 - pd.Timedelta(days=n) for n in (30, 60, 90))
+        t30, t60, t90 = (t0 - pd.Timedelta(days=n) for n in feature_window_days(metadata))
         ev = raw["events"].loc[raw["events"].event_at.lt(t0) & raw["events"].event_type.isin(EVENTS)].sort_values(["event_at", "event_id"])
         ss = raw["sessions"].loc[raw["sessions"].started_at.lt(t0)]
         od = raw["orders"].loc[raw["orders"].event_at.lt(t0)]
@@ -143,7 +146,7 @@ def build_features(tables: dict[str, Any], as_of_at=None) -> pd.DataFrame:
             o30, prior = uod.loc[uod.event_at.ge(t30)], uod.loc[uod.event_at.ge(t60) & uod.event_at.lt(t30)]
             item30 = pd.concat([ig[k] for k in o30.order_id], ignore_index=True) if len(o30) else raw["order_items"].iloc[:0]
             itemprior = pd.concat([ig[k] for k in prior.order_id], ignore_index=True) if len(prior) else raw["order_items"].iloc[:0]
-            completed = uss.loc[uss.ended_at.lt(t0)]
+            completed = uss.loc[uss.completion_available_at.lt(t0)]
             complete = completed.loc[completed.started_at.ge(t30)].sort_values("ended_at")
             r["visit_recency_days"] = (t0 - uss.started_at.max()).total_seconds() / 86400 if len(uss) else np.nan
             r["purchase_recency_days"] = (t0 - uod.event_at.max()).total_seconds() / 86400 if len(uod) else np.nan
@@ -229,7 +232,7 @@ def build_features(tables: dict[str, Any], as_of_at=None) -> pd.DataFrame:
             r["source_model_sha256"] = metadata.get("model_sha256", "UNSPECIFIED")
             r["feature_set_version"] = "kit32-v1"
             r["behavior_feature_set_version"] = BEHAVIOR_FEATURE_VERSION
-            r["expanded_feature_set_version"] = EXPANDED_FEATURE_VERSION
+            r["expanded_feature_set_version"] = WEEKLY_FEATURE_VERSION if is_weekly(metadata) else EXPANDED_FEATURE_VERSION
             r["intervention_policy_id"] = metadata.get("generation_policy_id", metadata.get("policy_id", "one_coupon_valid30d_no_further_send"))
 
             signup = customers.loc[uid].signed_up_at

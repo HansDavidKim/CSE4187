@@ -181,3 +181,20 @@ def test_reward_gmm_rejects_singular_covariance(gaussian_fixture, tmp_path):
     config['source_simulation']['reward_gmm_model_path'] = str(path)
     with pytest.raises(ValueError, match='positive definite'):
         EcommerceSimulator(config).generate(months=3, customers=_customers())
+
+
+def test_profile_conditioned_gmm_reads_source_persona_posterior_without_population_fields(gaussian_fixture,tmp_path):
+    config,gaussian,_ = gaussian_fixture
+    actor_path = Path(config['source_simulation']['model_path'])
+    model = json.loads(actor_path.read_text())
+    assert all('component_probabilities' not in profile for profile in model['profiles'])
+    model['latent_shopping']['profile_posteriors'] = {p['profile_id']:[0.,0.,0.,1.] for p in model['profiles']}
+    actor_path.write_text(json.dumps(model))
+    block = dict(gaussian,type='source_persona_joint_reward_gmm',component_model_indices=[0,1,2,3],
+        persona_labels=['0','1','2','3'],condition_on_profile_components=True,
+        base_model_sha256=hashlib.sha256(actor_path.read_bytes()).hexdigest(),
+        covariances=np.tile(.001*np.eye(5),(4,1,1)).tolist(),dispersion_scales=[0.]*4)
+    path=tmp_path/'conditioned_gmm.json';path.write_text(json.dumps(block))
+    config['source_simulation']['reward_gmm_model_path']=str(path)
+    result=EcommerceSimulator(config).generate(months=3,seed=17,customers=_customers())
+    assert result.tables['diagnostics'].latent_reward_component.eq(3).all()

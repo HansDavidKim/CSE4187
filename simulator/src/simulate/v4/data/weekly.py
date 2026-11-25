@@ -55,7 +55,7 @@ def _orders(tables):
     return tables["orders"].merge(purchases, left_on="purchase_event_id", right_on="event_id", validate="one_to_one")
 
 
-def _assignment_rows(tables):
+def _assignment_rows(tables,metadata):
     frame = tables["treatments"].copy()
     required = {"customer_id", "as_of_at", "assigned_at", "treatment", "assignment_probability"}
     if not required <= set(frame):
@@ -66,9 +66,8 @@ def _assignment_rows(tables):
         raise ValueError("assignment log must retain every customer, including unsent/unredeemed customers")
     if not frame.treatment.isin([0, 1]).all():
         raise ValueError("treatment must be fixed zero/one")
-    probability = pd.to_numeric(frame.assignment_probability, errors="raise")
-    if not probability.eq(0.5).all():
-        raise ValueError("the declared fixed 1:1 experiment requires recorded probability 0.5")
+    from ..simulator.coupon_assignment import validate_coupon_assignments
+    validate_coupon_assignments(frame,metadata)
     frame["as_of_at"] = _times(frame.as_of_at)
     frame["assigned_at"] = _times(frame.assigned_at)
     return frame
@@ -82,7 +81,7 @@ def build_experiment_log(tables, metadata) -> pd.DataFrame:
         raise ValueError("metadata.min_customer_history_days must be a nonnegative integer")
     eligibility_days = experiment_window_days(metadata, "eligibility_window_days")
     coupon_days = experiment_window_days(metadata, "coupon_validity_days")
-    frame = _assignment_rows(tables)
+    frame = _assignment_rows(tables,metadata)
     labels = tables["labels"]
     if labels.duplicated(["customer_id", "as_of_at"]).any():
         raise ValueError("duplicate experiment labels")

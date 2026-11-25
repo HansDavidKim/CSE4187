@@ -1,6 +1,8 @@
 import numpy as np
+import pickle
+import pytest
 
-from models.agents import AGENTS, LinUCB
+from models.agents import AGENTS, LinUCB, LinTS
 from scripts.run_agent_benchmark import episode, load_environment
 
 
@@ -41,5 +43,34 @@ def test_linucb_rank_one_inverse_matches_direct_openblas_solution():
         action = int(rng.integers(2))
         agent.update(state, action, rng.normal(), state, False)
     for action in range(2):
-        expected = np.linalg.solve(agent.a[action], np.eye(19))
+        expected = np.linalg.solve(agent.a[action], np.eye(agent.a.shape[-1]))
         np.testing.assert_allclose(agent.a_inverse[action], expected, atol=1e-10)
+
+
+@pytest.mark.parametrize("agent_class", [LinUCB, LinTS])
+def test_linear_policies_learn_action_intercepts_from_zero_39_feature_states(agent_class):
+    state = np.zeros(39)
+    agent = agent_class(39, seed=42)
+    assert agent.input_dimension == 39 and agent.b.shape == (2, 40)
+    for index in range(100):
+        action = index % 2
+        agent.update(state, action, 1000 * action, state, True)
+    assert agent.act(state, training=False) == 1
+    assert np.isfinite(agent.a_inverse).all()
+
+
+@pytest.mark.parametrize("agent_class", [LinUCB, LinTS])
+def test_linear_policies_load_old_bias_free_checkpoints_without_changing_dimensions(agent_class):
+    legacy = agent_class(39, seed=42)
+    del legacy.input_dimension
+    legacy.a = np.repeat(np.eye(39)[None], 2, axis=0)
+    legacy.a_inverse = legacy.a.copy()
+    legacy.b = np.zeros((2, 39))
+    legacy.b[1, 0] = 2.
+    restored = pickle.loads(pickle.dumps(legacy))
+    state = np.zeros(39)
+    state[0] = 1
+    assert restored.act(state, training=False) == 1
+    restored.update(state, 1, 1000, state, True)
+    assert restored.b.shape == (2, 39)
+    np.testing.assert_allclose(restored.a_inverse[1], np.linalg.inv(restored.a[1]))

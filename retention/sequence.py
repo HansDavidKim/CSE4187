@@ -44,7 +44,7 @@ class SequenceModel:
 
     def fit(self, sequences, y, validation=None, epochs=12, patience=3):
         random.seed(self.seed); np.random.seed(self.seed); torch.manual_seed(self.seed)
-        torch.set_num_threads(2)
+        torch.set_num_threads(min(2, torch.get_num_threads()))
         self.scaler = StandardScaler().fit(np.concatenate(sequences))
         transformed = [self.scaler.transform(s).astype(np.float32) for s in sequences]
         self.model = RecurrentEncoder(self.hidden, self.kind)

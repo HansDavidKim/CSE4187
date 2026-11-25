@@ -1,5 +1,6 @@
 """Executable-contract documentation and training-only feature quality summaries."""
 from pathlib import Path
+import re
 
 import numpy as np
 import pandas as pd
@@ -75,18 +76,25 @@ for name, (base, meaning) in CHANGES.items():
         "unknown or nonpositive previous value", f"Relative change in {meaning.lower()}")
 
 
-def write_dictionary(columns, out):
+def write_dictionary(columns, out, *, time_windows_days=None):
     """Write a complete formula/window/missingness/business mapping."""
+    windows = time_windows_days or {}
+    recent, gap = windows.get("recent_days", 30), windows.get("gap_days", 90)
     lines = ["# Retention feature dictionary", "", "All inputs are strictly before the timezone-aware cutoff.",
              "Known empty count/sum windows are zero. Unknown windows and undefined denominators are null.",
              "Money remains in source minor units. Time features use days or the units named in each formula.",
              "Train-only quantile clipping precedes median imputation and missing indicators.", "",
              "| Feature | Formula | Window | Null condition | Meaning |",
              "| --- | --- | --- | --- | --- |"]
+    if (recent, gap) != (30, 90):
+        lines[2:2] = [f"Weekly inputs use {recent}-day recent/change windows and {gap}-day gap windows. "
+                       "The registered _30d/_90d column names remain compatibility aliases."]
     for name in columns:
         if name not in DEFINITIONS:
             raise ValueError(f"Missing feature definition: {name}")
-        lines.append("| `" + name + "` | " + " | ".join(DEFINITIONS[name]) + " |")
+        values = [re.sub(r"(?<!\w)90d\b", f"{gap}d", re.sub(r"(?<!\w)30d\b", f"{recent}d", value))
+                  .replace("times 30 /", f"times {recent} /") for value in DEFINITIONS[name]]
+        lines.append("| `" + name + "` | " + " | ".join(values) + " |")
     (Path(out) / "feature_dictionary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

@@ -65,6 +65,12 @@ def aware_utc(value):
     return point.tz_convert("UTC")
 
 
+def _feature_contract(metadata):
+    _, _, _, legacy, _ = simulator_imports()
+    from simulate.v4.time_spec import WEEKLY_FEATURE_VERSION, feature_window_days, is_weekly
+    return (WEEKLY_FEATURE_VERSION if is_weekly(metadata) else legacy), feature_window_days(metadata)
+
+
 def read_raw(path):
     _, _, _, _, load_raw = simulator_imports()
     path = Path(path)
@@ -126,11 +132,12 @@ def read_training_raw(path, point):
     """Project records needed beyond the already materialized official KIT39."""
     if not _projectable(path):
         return read_raw(path)
-    lower = (point-pd.Timedelta(days=30)).isoformat(timespec="nanoseconds")
     recent = (point-pd.Timedelta(days=DAYS)).isoformat(timespec="nanoseconds")
     cutoff = point.isoformat(timespec="nanoseconds")
     end = (point+pd.Timedelta(days=DAYS)).isoformat(timespec="nanoseconds")
     with _verified_database(path) as (connection, metadata):
+        _, (recent_days, _, _) = _feature_contract(metadata)
+        lower = (point-pd.Timedelta(days=recent_days)).isoformat(timespec="nanoseconds")
         tables = {
             "customers": pd.read_sql_query("SELECT customer_id, signed_up_at FROM customers", connection),
             "sessions": pd.read_sql_query("SELECT customer_id, started_at FROM sessions WHERE started_at >= ? AND started_at < ?", connection, params=(recent, end)),
@@ -174,8 +181,9 @@ def read_prediction_raw(path, point):
 def read_history_features(path, point):
     """Aggregate observed prefixes without exposing generator parameters or assignments."""
     cutoff = point.isoformat(timespec="nanoseconds")
-    low90 = (point-pd.Timedelta(days=90)).isoformat(timespec="nanoseconds")
     with _verified_database(path) as (connection, metadata):
+        _, (recent_days, _, gap_days) = _feature_contract(metadata)
+        low90 = (point-pd.Timedelta(days=gap_days)).isoformat(timespec="nanoseconds")
         customers = pd.read_sql_query("SELECT customer_id, signed_up_at FROM customers", connection).set_index("customer_id")
         sessions = pd.read_sql_query(
             "SELECT customer_id, COUNT(*) AS history_session_count, COUNT(DISTINCT substr(started_at,1,10)) AS history_active_days, SUM(started_at >= ?) AS session_count_90d FROM sessions WHERE started_at < ? GROUP BY customer_id",
@@ -192,8 +200,8 @@ def read_history_features(path, point):
     signed = pd.to_datetime(result.signed_up_at, utc=True)
     observed = aware_utc(metadata["observation_start_at"])
     age = (point-signed.clip(lower=observed)).dt.total_seconds()/86400
-    result["history_session_rate_30d"] = result.history_session_count*30/age.where(age.gt(0))
-    covered90 = observed <= signed.where(signed.ge(point-pd.Timedelta(days=90)), point-pd.Timedelta(days=90))
+    result["history_session_rate_30d"] = result.history_session_count*recent_days/age.where(age.gt(0))
+    covered90 = observed <= signed.where(signed.ge(point-pd.Timedelta(days=gap_days)), point-pd.Timedelta(days=gap_days))
     result["session_count_90d"] = result.session_count_90d.where(covered90)
     for kind, column in (("view", "views"), ("cart", "carts"), ("remove", "removes"), ("purchase", "purchases")):
         result[f"history_{kind}_share"] = (actions[column]/actions.actions.where(actions.actions.gt(0))).reindex(result.index)
@@ -203,7 +211,8 @@ def read_history_features(path, point):
 def enrich(tables, meta, x, config):
     """Join only strict-past behavior to the shared predictor matrix."""
     events = tables["events"]
-    earliest, latest = meta.as_of_at.min() - pd.Timedelta(days=30), meta.as_of_at.max()
+    _, (recent_days, _, _) = _feature_contract(tables["_metadata"])
+    earliest, latest = meta.as_of_at.min() - pd.Timedelta(days=recent_days), meta.as_of_at.max()
     behavior = events.loc[events.event_type.isin(ACTIONS) & events.customer_id.isin(meta.customer_id)
                           & events.event_at.ge(earliest) & events.event_at.lt(latest),
                           ["customer_id", "session_id", "event_at", "event_type"]]
@@ -217,7 +226,7 @@ def enrich(tables, meta, x, config):
     for row in meta.itertuples(index=False):
         point, user = row.as_of_at, row.customer_id
         ev = event_groups.get(user, behavior.iloc[:0])
-        recent = ev.loc[ev.event_at.lt(point) & ev.event_at.ge(point - pd.Timedelta(days=30))]
+        recent = ev.loc[ev.event_at.lt(point) & ev.event_at.ge(point - pd.Timedelta(days=recent_days))]
         cut = 0
         if config.get("_include_sequences", True):
             seq, cut = sequences(recent, point, config.get("max_length", 128))
@@ -237,7 +246,7 @@ def enrich(tables, meta, x, config):
                 break
             run += 1
         history_known = signup.loc[user] >= observed_from
-        window_known = observed_from <= max(signup.loc[user], point - pd.Timedelta(days=30))
+        window_known = observed_from <= max(signup.loc[user], point - pd.Timedelta(days=recent_days))
         additions.append({
             "journey_stage": stage if history_known else np.nan,
             "stage_tenure_days": (point - transition).total_seconds() / 86400 if history_known else np.nan,
@@ -266,6 +275,7 @@ def training_inputs(config):
     meta, x, y = load_features(config["feature_dir"])
     features_loaded = time.perf_counter()
     tables, metadata = read_training_raw(config["input_dir"], aware_utc(meta.as_of_at.iloc[0]))
+    current_version, _ = _feature_contract(metadata)
     raw_loaded = time.perf_counter()
     for key in ("dataset_id", "raw_database_sha256", "currency", "amount_unit"):
         if not meta[key].eq(str(metadata[key])).all():
@@ -313,7 +323,7 @@ def training_inputs(config):
                   "observation_start_at": metadata["observation_start_at"], "observation_end_at": metadata["observation_end_at"]}
     validation.update({key: metadata.get(key) for key in (
         "seed", "as_of_at", "definition_id", "outcome_window_days", "eligibility_window_days",
-        "policy_id", "retention_mode", "configured_target_churn_rate", "model_sha256")})
+        "policy_id", "retention_mode", "configured_target_churn_rate", "model_sha256", "time_spec", "time_windows_days")})
     validation["stage_seconds"] = {"official_features": features_loaded-started,
                                     "verified_raw_projection": raw_loaded-features_loaded,
                                     "contracts_extra_features_sequences": time.perf_counter()-raw_loaded}
@@ -326,6 +336,7 @@ def prediction_inputs(path, as_of, config, profile=None):
     _, build_features, columns, version, _ = simulator_imports()
     point = aware_utc(as_of)
     tables, metadata = read_prediction_raw(path, point)
+    version, _ = _feature_contract(metadata)
     raw_loaded = time.perf_counter()
     profile["verified_raw_prefix_seconds"] = raw_loaded-started
     customers = tables["customers"]

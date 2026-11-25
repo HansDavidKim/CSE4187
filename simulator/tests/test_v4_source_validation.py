@@ -426,6 +426,24 @@ def test_directory_and_cli_report_exact_checks_and_descriptive_holdouts(director
     assert json.loads(output.read_text())["exact_checks_passed"]
 
 
+def test_directory_distribution_uses_session_termination_sidecar_and_retains_event_counts(directory):
+    dataset, model = directory
+    legacy = audit.validate_directory(dataset, model)["distribution_comparison"]["generated_scopes"]["all_observed"]["summary"]
+    tables, _ = audit.load_raw_dataset(dataset / "raw.sqlite")
+    diagnostics = tables["sessions"][["customer_id", "session_id"]].copy()
+    diagnostics["termination_reason"] = "causal_policy_end"
+    diagnostics["truncated_session"] = False
+    diagnostics.loc[diagnostics.session_id.eq("h1"), ["termination_reason", "truncated_session"]] = ["scheduled_next_start", True]
+    diagnostics.to_parquet(dataset / "session_diagnostics.parquet", index=False)
+    report = audit.validate_directory(dataset, model)
+    measured = report["distribution_comparison"]["generated_scopes"]["all_observed"]["summary"]
+    assert report["exact_checks_passed"]
+    assert measured["complete_sessions"] == legacy["complete_sessions"] - 1
+    assert measured["item_proxy_weight"] == legacy["item_proxy_weight"]
+    assert measured["canonical_business_event_counts"] == legacy["canonical_business_event_counts"]
+    assert measured["session_completion"]["basis"] == "generation_termination_reason_and_truncation"
+
+
 @pytest.mark.parametrize("case", ["changed", "missing"])
 def test_directory_validation_checks_all_declared_sidecars(directory, case):
     dataset, model = directory

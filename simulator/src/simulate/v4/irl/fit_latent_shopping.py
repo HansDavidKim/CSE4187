@@ -25,6 +25,8 @@ from sklearn.tree import DecisionTreeClassifier
 
 from simulate.v4.irl import fit_causal_shopping as old
 from simulate.v4.irl.shopping_history import ShoppingHistory, SHOPPING_HISTORY_FEATURES
+from simulate.v4.irl.source_contract import canonical_available_actions, source_profile_id, utc_cutoff
+from simulate.v4.irl import source_phases
 
 
 ACTIONS = old.ACTIONS
@@ -48,7 +50,8 @@ def cart_bucket(quantity):
     return 0 if quantity == 0 else 1 if quantity == 1 else 2 if quantity <= 4 else 3
 
 
-def context_vector(context):
+def context_vector(context, *, available_actions=None):
+    available = canonical_available_actions(available_actions)
     core = old.context_vector(context)
     run = float(context.get("previous_action_run_length", 0))
     progress = float(context.get("session_decision_count", 0))
@@ -58,7 +61,8 @@ def context_vector(context):
     quantity = float(context.get("cart_total_quantity", 0))
     history = []
     for index, name in enumerate(SHOPPING_HISTORY_FEATURES):
-        value = context.get(name)
+        value = (None if index < 2 and ("cart", "remove")[index] not in available
+                 else context.get(name))
         missing = value is None or pd.isna(value)
         if missing:
             history.extend([0.0, 0.0])
@@ -70,8 +74,12 @@ def context_vector(context):
     return np.concatenate([core, [np.log1p(run)], np.eye(10)[bucket], np.eye(4)[cart_bucket(quantity)], history])
 
 
-def build_source(rows, observation_end, seed=42):
+def build_source(rows, observation_end, seed=42, *, available_actions=None, lifecycle_memory=None):
     """Augment the immutable legacy row replay with conservative completed history."""
+    available = canonical_available_actions(available_actions)
+    memory = source_phases.validate_lifecycle_memory(lifecycle_memory)
+    if not rows.action.isin(available).all():
+        raise ValueError("source contains an action outside its declared observation support")
     data = old.build_demonstrations(rows, observation_end, seed)
     source = rows.sort_values(["user_id", "at", "source_event_id"], kind="stable")
     vectors, usable, units = [], [], []
@@ -102,7 +110,7 @@ def build_source(rows, observation_end, seed=42):
                     "purchase_count": np.expm1(x[6]), "session_decision_count": step,
                     "prior_gap_seconds": np.expm1(x[8]), "purchase_in_current_session": bool(x[9]),
                     "previous_action_run_length": run, **history.snapshot(at)}
-                vectors.append(context_vector(context))
+                vectors.append(context_vector(context, available_actions=available))
                 matched = event.action != "remove" or cart[event.product_id] > 0
                 usable.append(matched)
                 units.append(stop - index if event.action == "purchase" else 1)
@@ -130,7 +138,7 @@ def build_source(rows, observation_end, seed=42):
                 "purchase_count": np.expm1(x[6]), "session_decision_count": step,
                 "prior_gap_seconds": np.expm1(x[8]), "purchase_in_current_session": bool(x[9]),
                 "previous_action_run_length": run, **history.snapshot(at)}
-            vectors.append(context_vector(context));usable.append(False);units.append(0)
+            vectors.append(context_vector(context, available_actions=available));usable.append(False);units.append(0)
             history.end_session(sid, at, completed=at + pd.Timedelta(minutes=30) <= end)
             cursor += 1
     assert cursor == len(data["records"])
@@ -139,6 +147,8 @@ def build_source(rows, observation_end, seed=42):
     data["records"]["purchase_item_units"] = units
     data["audit"].update(audit)
     data["audit"]["completed_history_available_rule"] = "last_action_at+30m strictly before decision clock; unsupported fitting sessions remain observed history"
+    if memory is not None:
+        source_phases.attach_session_numbers(data, rows)
     return data
 
 
@@ -169,38 +179,82 @@ def _tree_apply(tree, features):
     return nodes
 
 
-def fit_encoder(panel, max_leaves=64, minimum_leaf=32):
-    x, y = panel["features"], panel["records"].action.to_numpy()
+def project_features(features, available_actions=None):
+    available = canonical_available_actions(available_actions)
+    x = np.asarray(features)
+    if available == tuple(ACTIONS[:-1]):
+        return x
+    x = x.copy()
+    for index, action in enumerate(("cart", "remove")):
+        if action not in available:
+            for part in ("value", "observed"):
+                x[..., FEATURE_NAMES.index(f"history_{index}_{part}")] = 0.
+    return x
+
+
+def fit_encoder(panel, max_leaves=64, minimum_leaf=32, *, available_actions=None, lifecycle_memory=None):
+    available = canonical_available_actions(available_actions)
+    memory = source_phases.validate_lifecycle_memory(lifecycle_memory)
+    x, y = project_features(panel["features"], available), panel["records"].action.to_numpy()
+    if not np.isin(y, [ACTIONS.index(a) for a in (*available, "end")]).all():
+        raise ValueError("encoder demonstrations contain an unsupported action")
     estimator = DecisionTreeClassifier(max_leaf_nodes=max_leaves, min_samples_leaf=minimum_leaf, random_state=42)
     estimator.fit(x, y)
     tree = {"left": estimator.tree_.children_left.tolist(), "right": estimator.tree_.children_right.tolist(),
             "feature": estimator.tree_.feature.tolist(), "threshold": estimator.tree_.threshold.tolist()}
     leaves = _tree_apply(tree, x)
     keys = np.column_stack([leaves, _hard_group(x)])
+    if memory is not None:
+        phases = source_phases.phase_ids(panel["records"])
+        if set(phases) != {0, 1}:
+            raise ValueError("private NEW/HOME encoding requires observed support for both phases")
+        keys = np.column_stack([keys, phases])
     unique, inverse = np.unique(keys, axis=0, return_inverse=True)
     means = np.asarray([x[inverse == i].mean(axis=0) for i in range(len(unique))])
     scale = x.std(axis=0);scale[scale < 1e-12] = 1
-    return {"schema_version": 1, "feature_names": FEATURE_NAMES, "tree": tree, "state_keys": unique.tolist(),
+    result = {"schema_version": 1, "feature_names": FEATURE_NAMES, "tree": tree, "state_keys": unique.tolist(),
         "context_means": means.tolist(), "feature_scale": scale.tolist(), "max_tree_leaves": max_leaves,
         "minimum_leaf_records": minimum_leaf, "hard_group": "cart quantity 0/1/2-4/5+ crossed with START/nonSTART",
         "progress_buckets": [0, 1, 2, 3, 4, 5, "6-10", "11-20", "21-50", ">50"],
         "training_only": True, "maximum_states": max_leaves * 8}
+    if available != tuple(ACTIONS[:-1]):
+        result["available_actions"] = list(available)
+    if memory is not None:
+        result["lifecycle_memory"] = memory
+        result["maximum_states"] *= 2
+    return result
 
 
-def encode(encoder, features):
-    x = np.asarray(features)
+def encode(encoder, features, *, phase_ids=None):
+    x = project_features(features, encoder.get("available_actions"))
     leaves = _tree_apply(encoder["tree"], x)
     groups = _hard_group(x)
+    memory = source_phases.validate_lifecycle_memory(encoder.get("lifecycle_memory"))
+    phases = None
+    if memory is not None:
+        phases = np.asarray(phase_ids)
+        if phases.shape != (len(x),) or phases.dtype.kind not in "iu" or not np.isin(phases, [0, 1]).all():
+            raise ValueError("private phase encoder requires aligned NEW/HOME phase_ids")
     keys = np.asarray(encoder["state_keys"]);mapping = {tuple(k): i for i, k in enumerate(keys)}
     means, scale = np.asarray(encoder["context_means"]), np.asarray(encoder["feature_scale"])
     state, fallback = np.empty(len(x), dtype=int), np.zeros(len(x), dtype=bool)
-    for i, key in enumerate(zip(leaves, groups)):
+    observed_keys = zip(leaves, groups) if phases is None else zip(leaves, groups, phases)
+    for i, key in enumerate(observed_keys):
         found = mapping.get(key)
         if found is None:
             fallback[i] = True
             candidates = np.flatnonzero(keys[:, 1] == key[1])
+            if phases is not None:
+                candidates = candidates[keys[candidates, 2] == key[2]]
+                if not len(candidates):
+                    # Unseen quantity buckets may share feasibility, never lifecycle or START/empty-cart status.
+                    candidates = np.flatnonzero((keys[:, 2] == key[2])
+                        & (keys[:, 1] % 2 == key[1] % 2)
+                        & ((keys[:, 1] // 2 > 0) == (key[1] // 2 > 0)))
+                    expected = action_mask({**encoder, "state_keys": [list(key)]})[0]
+                    candidates = candidates[np.all(action_mask(encoder)[candidates] == expected, axis=1)]
             if not len(candidates):
-                raise ValueError("no observed source state supports this cart/START group")
+                raise ValueError("no observed source state supports this cart/START group in the requested phase")
             found = int(candidates[np.argmin(((means[candidates] - x[i]) / scale) ** 2 @ np.ones(x.shape[1]))])
         state[i] = found
     return state, fallback
@@ -211,29 +265,46 @@ def action_mask(encoder):
     mask = np.ones((len(groups), 5), dtype=bool)
     mask[groups // 2 == 0, 2] = False
     mask[groups % 2 == 1, 4] = False
+    available = canonical_available_actions(encoder.get("available_actions"))
+    for action in ACTIONS[:-1]:
+        if action not in available:
+            mask[:, ACTIONS.index(action)] = False
     return mask
 
 
 def fit_dynamics(encoder, panel):
-    state, fallback = encode(encoder, panel["features"])
+    memory = source_phases.validate_lifecycle_memory(encoder.get("lifecycle_memory"))
+    phase_ids = source_phases.phase_ids(panel["records"]) if memory is not None else None
+    if memory is not None and ((phase_ids[1:] != phase_ids[:-1]) & ~np.asarray(panel["starts"])[1:]).any():
+        raise ValueError("within-session dynamics cannot cross private lifecycle phases")
+    state, fallback = (encode(encoder, panel["features"]) if memory is None else
+                       encode(encoder, panel["features"], phase_ids=phase_ids))
     assert not fallback.any()
     y = panel["records"].action.to_numpy();n = len(encoder["state_keys"])
     mask = action_mask(encoder)
     if not mask[state, y].all():
         raise ValueError("unsupported demonstration action")
     matrices, audit = [], {}
+    available = canonical_available_actions(encoder.get("available_actions"))
     groups = np.asarray(encoder["state_keys"])[:, 1]
+    state_phases = np.asarray(encoder["state_keys"])[:, 2] if memory is not None else None
     for a in range(5):
-        if a == 4:
+        if a == 4 or ACTIONS[a] not in available:
             matrices.append(sparse.csr_matrix((n, n)));continue
         indices = np.flatnonzero((y == a) & panel["dynamics_usable"])
         if any(i + 1 >= len(y) or panel["starts"][i + 1] for i in indices):
             raise ValueError("missing actual next state")
+        if memory is not None and (phase_ids[indices] != phase_ids[indices + 1]).any():
+            raise ValueError("within-session dynamics cannot cross private lifecycle phases")
         counts = sparse.coo_matrix((np.ones(len(indices)), (state[indices], state[indices + 1])), shape=(n, n)).tocsr()
         pooled = np.asarray(counts.sum(axis=0)).ravel()
         if not pooled.sum():
             raise ValueError(f"source has no identified transitions for {ACTIONS[a]}")
         pools = {g: np.asarray(counts[groups == g].sum(axis=0)).ravel() for g in np.unique(groups)}
+        if memory is not None:
+            phase_pools = {phase: np.asarray(counts[state_phases == phase].sum(axis=0)).ravel() for phase in (0, 1)}
+            pools = {(phase, group): np.asarray(counts[(state_phases == phase) & (groups == group)].sum(axis=0)).ravel()
+                     for phase in (0, 1) for group in np.unique(groups)}
         rows = []
         scopes = Counter()
         for s in range(n):
@@ -243,9 +314,12 @@ def fit_dynamics(encoder, panel):
             if row.sum():
                 rows.append(row / row.sum());scopes["state_action"] += 1
             else:
-                values = pools[groups[s]]
+                values = pools[groups[s]] if memory is None else pools[(state_phases[s], groups[s])]
                 scope = "hard_group_action"
-                if not values.sum():values, scope = pooled, "pooled_identified_action"
+                if not values.sum():
+                    values, scope = (pooled if memory is None else phase_pools[state_phases[s]]), "pooled_identified_action"
+                if not values.sum():
+                    raise ValueError(f"source has no within-phase identified transitions for {ACTIONS[a]}")
                 rows.append(sparse.csr_matrix(values / values.sum()));scopes[scope] += 1
         matrices.append(sparse.vstack(rows, format="csr"))
         audit[ACTIONS[a]] = {"action_records": int((y == a).sum()), "identified_transition_pairs": len(indices),
@@ -367,6 +441,7 @@ def fit_mixture(panel, matrices, mask, state, penalty, control):
     cluster_counts = np.asarray([action_counts[labels == z].sum(axis=0) for z in range(2)])
     log_odds = np.log(np.maximum(cluster_counts[:, :4], 1e-8)) - np.log(np.maximum(cluster_counts[:, 4:5], 1e-8))
     delta = (log_odds[1] - log_odds[0]) / 2
+    delta[~mask[:, :4].any(axis=0)] = 0.
     weights = np.bincount(labels, minlength=2).astype(float) / len(labels)
     base = control["base"].copy()
     normalizer = float(counts.sum());trace = []
@@ -463,6 +538,7 @@ def fit_style_family(panel, matrices, mask, state, penalty, control, components)
     cluster_counts = np.asarray([action_counts[labels == z].sum(axis=0) for z in range(components)])
     odds = np.log(np.maximum(cluster_counts[:, :4], 1e-8)) - np.log(np.maximum(cluster_counts[:, 4:5], 1e-8))
     offsets = odds - odds.mean(axis=0, keepdims=True)
+    offsets[:, ~mask[:, :4].any(axis=0)] = 0.
     weights = np.bincount(labels, minlength=components).astype(float) / len(labels)
     base = control["base"].copy();normalizer = float(counts.sum());trace = [];previous = None
     for iteration in range(8):
@@ -517,7 +593,9 @@ def valid_record_indices(data, sessions):
 def prequential_metrics(data, encoder, component_policies, weights, masks):
     """Posterior evidence arrives strictly after each label's target_at, including delayed END."""
     import heapq
-    all_states, fallback = encode(encoder, data["features"])
+    phases = source_phases.phase_ids(data["records"]) if encoder.get("lifecycle_memory") is not None else None
+    all_states, fallback = (encode(encoder, data["features"]) if phases is None else
+                            encode(encoder, data["features"], phase_ids=phases))
     y = data["records"].action.to_numpy()
     selected = {}
     for name, mask in masks.items():
@@ -525,6 +603,8 @@ def prequential_metrics(data, encoder, component_policies, weights, masks):
     s = data["sessions"]
     valid = ~s.invalid_total_cart & ~s.ambiguous_clock_sessions & ~s.is_censored
     indices = valid_record_indices(data, valid)
+    if not action_mask(encoder)[all_states[indices], y[indices]].all():
+        raise ValueError("prequential evidence contains an unsupported action")
     summaries = {name: {"loss": [], "user": [], "actual": [], "predicted": [], "fallback": 0,
                         "evidence_before_first_scored_record": []} for name in masks}
     policies = np.asarray(component_policies)
@@ -568,16 +648,35 @@ def unpack_matrices(block):
     return [sparse.csr_matrix((x["data"], x["indices"], x["indptr"]), shape=tuple(x["shape"])) for x in block["transition_csr"]]
 
 
-def fit_latent(rows, base, component_candidates=(2,)):
+def fit_latent(rows, base, component_candidates=(2,), *, available_actions=None,
+               cutoff_at=None, inner_cutoff_at=None, domain=None, lifecycle_memory=None):
+    contract = base.get("source_contract", {})
+    declared = contract.get("observed_actions", base.get("available_actions"))
+    available = canonical_available_actions(available_actions if available_actions is not None else declared)
+    if declared is not None and available != canonical_available_actions(declared):
+        raise ValueError("latent actions differ from the prepared source contract")
+    outer = contract.get("outer_cutoff_at", base["validation"]["cutoff_at_utc"])
+    cutoff = utc_cutoff(cutoff_at or outer)
+    inner = contract.get("inner_cutoff_at", cutoff - pd.DateOffset(months=1))
+    inner_cutoff = utc_cutoff(inner_cutoff_at or inner)
+    if (cutoff != utc_cutoff(outer) or inner_cutoff != utc_cutoff(inner)
+            or not inner_cutoff < cutoff < pd.Timestamp(base["observation_end"])):
+        raise ValueError("latent cutoffs differ from the prepared source contract")
+    declared_domain = contract.get("domain", base.get("source", {}).get("domain", "cosmetics"))
+    if domain is not None and domain != declared_domain:
+        raise ValueError("latent domain differs from the prepared source contract")
+    domain = domain or declared_domain
+    if domain not in {"cosmetics", "electronics"} or contract.get("clock_resolution", "second") != "second":
+        raise ValueError("retail latent fitting requires second-resolution observations")
     component_candidates = list(component_candidates)
     if not component_candidates or component_candidates != sorted(set(component_candidates)) or any(k not in (2, 3, 4) for k in component_candidates):
         raise ValueError("component candidates must be unique increasing values from 2,3,4")
     penalties = PENALTIES if component_candidates == [2] else (1e-5,)
-    cutoff = pd.Timestamp(base["validation"]["cutoff_at_utc"]);inner_cutoff = cutoff - pd.DateOffset(months=1)
-    data = build_source(rows, base["observation_end"], int(base.get("seed", 42)))
+    data = build_source(rows, base["observation_end"], int(base.get("seed", 42)), available_actions=available,
+                        lifecycle_memory=lifecycle_memory)
     outer, inner, split_audit = old.split_sessions(data, cutoff, inner_cutoff, "known-total")
     inner_panel = select_panel(data, inner["train"])
-    inner_encoder = fit_encoder(inner_panel)
+    inner_encoder = fit_encoder(inner_panel, available_actions=available, lifecycle_memory=lifecycle_memory)
     matrices, mask, state, dynamics_audit = fit_dynamics(inner_encoder, inner_panel)
     trials = []
     for penalty in penalties:
@@ -594,7 +693,7 @@ def fit_latent(rows, base, component_candidates=(2,)):
             print(json.dumps({"stage": "inner_done", "regularization": penalty, "components": components, "score": score, "mixture_weights": mixture["weights"].tolist()}), flush=True)
     chosen = min(trials, key=lambda x: x["pooled_inner_prequential_nll"])
     penalty = chosen["regularization"]
-    panel = select_panel(data, outer["train"]);encoder = fit_encoder(panel)
+    panel = select_panel(data, outer["train"]);encoder = fit_encoder(panel, available_actions=available, lifecycle_memory=lifecycle_memory)
     matrices, mask, state, dynamics_audit = fit_dynamics(encoder, panel)
     control = fit_control(panel, matrices, mask, state, penalty)
     components = chosen["component_count"]
@@ -604,7 +703,7 @@ def fit_latent(rows, base, component_candidates=(2,)):
     policies = np.asarray([s[0] for s in mixture["statistics"]])
     validation = prequential_metrics(data, encoder, policies, mixture["weights"], outer)
     control_validation = prequential_metrics(data, encoder, control["probability"][None, :, :], np.ones(1), outer)
-    posteriors = {hashlib.sha256(f"cosmetics:{uid}".encode()).hexdigest()[:16]: q.tolist()
+    posteriors = {source_profile_id(domain, str(uid)): q.tolist()
                   for uid, q in zip(mixture["users"], mixture["responsibility"])}
     return {"schema_version": 1, "type": TYPE, "actions": list(ACTIONS), "discount": DISCOUNT,
         "regularization": penalty, "state_count": len(mask), "feature_names": FEATURE_NAMES,
@@ -680,14 +779,20 @@ def validate_model(model):
     if b.get("schema_version") != 1 or b.get("type") != TYPE or b.get("actions") != list(ACTIONS) or b.get("feature_names") != FEATURE_NAMES:
         raise ValueError("incompatible latent shopping model")
     n = b["state_count"]
-    if not isinstance(n, int) or not 0 < n <= 512 or len(b["encoder"]["state_keys"]) != n or b["discount"] != DISCOUNT:
+    memory = source_phases.validate_lifecycle_memory(b["encoder"].get("lifecycle_memory"))
+    if not isinstance(n, int) or not 0 < n <= (1024 if memory is not None else 512) or len(b["encoder"]["state_keys"]) != n or b["discount"] != DISCOUNT:
         raise ValueError("invalid latent state count/discount")
     if not np.isfinite(b["regularization"]) or b["regularization"] <= 0:
         raise ValueError("invalid latent reward regularization")
     encoder = b["encoder"];keys = np.asarray(encoder["state_keys"])
+    available = canonical_available_actions(encoder.get("available_actions"))
+    if "available_actions" in encoder and encoder["available_actions"] != list(available):
+        raise ValueError("latent observation support must use canonical action order")
     means = np.asarray(encoder["context_means"]);scale = np.asarray(encoder["feature_scale"])
-    if encoder.get("feature_names") != FEATURE_NAMES or keys.shape != (n, 2) or len({tuple(k) for k in keys}) != n or (keys[:, 1] < 0).any() or (keys[:, 1] > 7).any():
+    if encoder.get("feature_names") != FEATURE_NAMES or keys.shape != (n, 3 if memory is not None else 2) or len({tuple(k) for k in keys}) != n or (keys[:, 1] < 0).any() or (keys[:, 1] > 7).any():
         raise ValueError("invalid observed state encoder")
+    if memory is not None and (keys.dtype.kind not in "iu" or set(keys[:, 2]) != {0, 1}):
+        raise ValueError("private lifecycle state keys must contain both NEW/HOME phases")
     if means.shape != (n, len(FEATURE_NAMES)) or scale.shape != (len(FEATURE_NAMES),) or not np.isfinite(means).all() or not np.isfinite(scale).all() or (scale <= 0).any():
         raise ValueError("invalid observed context statistics")
     tree = encoder["tree"];node_count = len(tree["left"])
@@ -703,6 +808,10 @@ def validate_model(model):
         expected = mask[:, a].astype(float) if a != 4 else np.zeros(n)
         if p.shape != (n, n) or not np.isfinite(p.data).all() or (p.data < 0).any() or not np.allclose(np.asarray(p.sum(axis=1)).ravel(), expected):
             raise ValueError("invalid source transition matrix")
+        if memory is not None:
+            coo = p.tocoo()
+            if ((keys[coo.row, 2] != keys[coo.col, 2]) & (coo.data != 0)).any():
+                raise ValueError("within-session transitions cross private lifecycle phases")
     weights = np.asarray(b["mixture_weights"]);base = np.asarray(b["common_reward"]);offsets = np.asarray(b["component_offsets"])
     components = len(weights)
     policies = np.asarray(b["component_policies"])
@@ -710,14 +819,30 @@ def validate_model(model):
         raise ValueError("invalid mixture array shape")
     if not all(np.isfinite(x).all() for x in [weights, base, offsets, policies]) or (weights < 0).any() or not np.isclose(weights.sum(), 1) or not np.allclose(offsets.sum(axis=0), 0) or (policies < 0).any() or not np.allclose(policies.sum(axis=2), 1) or policies[:, ~mask].any():
         raise ValueError("invalid learned mixture weights/gauge")
+    deviations = None
+    if "component_reward_deviations" in b:
+        deviations = np.asarray(b["component_reward_deviations"])
+        if deviations.shape != (components, n, 4) or not np.isfinite(deviations).all():
+            raise ValueError("invalid component reward deviations")
+    unsupported = [ACTIONS.index(a) for a in ACTIONS[:-1] if a not in available]
+    if unsupported and (base[:, unsupported].any() or offsets[:, unsupported].any()):
+        raise ValueError("unobserved reward coordinates must remain unused reference values")
+    if unsupported and deviations is not None and deviations[:, :, unsupported].any():
+        raise ValueError("unobserved component reward deviations must remain unused reference values")
     for z in range(components):
-        probability, value, residual = soft_policy(np.column_stack([base + offsets[z], np.zeros(n)]), matrices, mask)
+        reward = base + offsets[z]
+        if deviations is not None:
+            reward = reward + deviations[z]
+        probability, value, residual = soft_policy(np.column_stack([reward, np.zeros(n)]), matrices, mask)
         if not np.allclose(probability, policies[z], atol=1e-8, rtol=1e-8) or not np.allclose(value, b["component_values"][z], atol=1e-8, rtol=1e-8):
             raise ValueError("saved latent policy does not reproduce its reward and dynamics")
     for q in b["profile_posteriors"].values():
         if len(q) != components or not np.isfinite(q).all() or min(q) < 0 or not np.isclose(sum(q), 1):
             raise ValueError("invalid source-prefix posterior")
     _validate_trait_bank(b)
+    if b.get("linear_reward") is not None:
+        from .linear_actor import validate_linear_actor
+        validate_linear_actor(b)
 
 
 def policy(model, context, component_id, probabilities=None):
@@ -732,20 +857,27 @@ def policy(model, context, component_id, probabilities=None):
         cache = (b, {tuple(k): i for i, k in enumerate(keys)}, keys,
             np.asarray(encoder["context_means"]), np.asarray(encoder["feature_scale"]),
             np.asarray(b["component_policies"]),
-            tuple(np.asarray(tree[name]) for name in ("left", "right", "feature", "threshold")))
+            tuple(np.asarray(tree[name]) for name in ("left", "right", "feature", "threshold")),
+            np.asarray(b["action_mask"], dtype=bool))
         if len(_RUNTIME) >= 4:_RUNTIME.clear()
         _RUNTIME[id(b)] = cache
-    _, mapping, keys, means, scale, component_policies, tree = cache
-    x = context_vector(context);xf = x.astype(np.float32);left, right, feature, threshold = tree
+    _, mapping, keys, means, scale, component_policies, tree, mask = cache
+    x = context_vector(context, available_actions=b["encoder"].get("available_actions"));xf = x.astype(np.float32);left, right, feature, threshold = tree
     node = 0
     while left[node] >= 0:node = left[node] if xf[feature[node]] <= threshold[node] else right[node]
     group = cart_bucket(context.get("cart_total_quantity", 0)) * 2 + int(context.get("session_decision_count", 0) == 0)
-    state = mapping.get((int(node), group))
+    memory = source_phases.validate_lifecycle_memory(b["encoder"].get("lifecycle_memory"))
+    phase = source_phases.phase_from_session_number(context.get(source_phases.SESSION_NUMBER)) if memory is not None else None
+    key = (int(node), group) if memory is None else (int(node), group, phase)
+    state = mapping.get(key)
     if state is None:
         candidates = np.flatnonzero(keys[:, 1] == group)
-        if not len(candidates):raise ValueError("no source state supports runtime cart/START group")
+        if memory is not None:
+            candidates = candidates[keys[candidates, 2] == phase]
+        if not len(candidates):raise ValueError("no source state supports runtime cart/START group in the requested phase")
         state = int(candidates[np.argmin(np.square((means[candidates] - x) / scale).sum(axis=1))])
     values = (component_policies[int(component_id), state] if probabilities is None else probabilities[state]).copy()
+    values[~mask[state]] = 0.
     if context.get("session_decision_count", 0) == 0:values[4] = 0
     if context.get("cart_total_quantity", 0) == 0:values[2] = 0
     values /= values.sum()
@@ -767,6 +899,11 @@ def main():
     parser.add_argument("--output", type=Path, default=Path("data/models/shopping_latent_irl_candidate.json"))
     parser.add_argument("--report", type=Path, default=Path("docs/audit/simulator/latent_shopping_training.json"))
     parser.add_argument("--component-candidates", type=int, nargs="+", choices=(2, 3, 4), default=[2])
+    parser.add_argument("--available-actions", nargs="+", choices=ACTIONS[:-1])
+    parser.add_argument("--cutoff-at")
+    parser.add_argument("--inner-cutoff-at")
+    parser.add_argument("--domain", choices=("cosmetics", "electronics"))
+    parser.add_argument("--lifecycle-memory", choices=(source_phases.LIFECYCLE_MEMORY,))
     args = parser.parse_args()
     if args.output.resolve() == args.report.resolve():raise ValueError("model and report paths must differ")
     for p in (args.output, args.report):
@@ -775,7 +912,9 @@ def main():
     if "causal_shopping" in base or "latent_shopping" in base:raise ValueError("latent IRL needs the original observed shopping base, not another actor")
     from simulate.v4.irl.fit_donor_prior import load_prior_source
     rows, source = load_prior_source(base, args.source_cache)
-    block = fit_latent(rows, base, args.component_candidates)
+    block = fit_latent(rows, base, args.component_candidates, available_actions=args.available_actions,
+                       cutoff_at=args.cutoff_at, inner_cutoff_at=args.inner_cutoff_at, domain=args.domain,
+                       lifecycle_memory=args.lifecycle_memory)
     block["provenance"] = {"base_path": str(args.base), "base_sha256": digest(args.base), "source_cache": source,
         "source_cache_sha256": digest(args.source_cache) if args.source_cache.is_file() else None,
         "fitter_sha256": digest(__file__), "history_helper_sha256": digest(Path(__file__).with_name("shopping_history.py"))}

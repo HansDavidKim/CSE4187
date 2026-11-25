@@ -114,3 +114,88 @@ def test_centered_style_family_gradient_matches_marginal_finite_difference(compo
     target=components-1
     block={'mixture_weights':[float(i==target) for i in range(components)],'profile_posteriors':{}}
     assert sample_component(block,'unseen',np.random.default_rng(1))==(target,'population_prior')
+
+
+def electronics_panel():
+    rows = pd.DataFrame([dict(user_id="100", session=sid, action=action, product_id="A",
+        at=pd.Timestamp("2020-01-01", tz="UTC") + pd.Timedelta(days=sid, minutes=step),
+        source_event_id=f"{sid}:{step}", price_minor=100)
+        for sid in range(1, 4) for step, action in enumerate(("view", "cart", "purchase"))])
+    available = ["view", "cart", "purchase"]
+    data = build_source(rows, "2020-02-01T00:00:00Z", available_actions=available)
+    from simulate.v4.irl import fit_latent_shopping as shopping
+    panel = shopping.select_panel(data, ~data["sessions"].is_censored)
+    encoder = fit_encoder(panel, minimum_leaf=1, available_actions=available)
+    return rows, data, panel, encoder
+
+
+def test_electronics_support_has_zero_remove_dynamics_and_unavailable_history():
+    from simulate.v4.irl import fit_latent_shopping as shopping
+    _, data, panel, encoder = electronics_panel()
+    matrices, mask, _state, _audit = shopping.fit_dynamics(encoder, panel)
+    assert not mask[:, 2].any() and matrices[2].nnz == 0
+    assert len(shopping.FEATURE_NAMES) == 40
+    assert not data["features"][:, shopping.FEATURE_NAMES.index("history_1_observed")].any()
+    nuisance = panel["features"].copy()
+    nuisance[:, shopping.FEATURE_NAMES.index("history_1_value")] = np.nan
+    nuisance[:, shopping.FEATURE_NAMES.index("history_1_observed")] = 1
+    candidate = fit_encoder({**panel, "features": nuisance}, minimum_leaf=1,
+                            available_actions=["view", "cart", "purchase"])
+    assert encoder == candidate
+    np.testing.assert_array_equal(encode(encoder, nuisance)[0], encode(encoder, panel["features"])[0])
+
+
+def test_declared_support_is_not_inferred_from_absent_finite_sample_actions():
+    from simulate.v4.irl import fit_latent_shopping as shopping
+    rows, data, panel, encoder = electronics_panel()
+    contradictory = rows.copy()
+    contradictory.loc[0, "action"] = "remove"
+    with pytest.raises(ValueError, match="observation support"):
+        build_source(contradictory, "2020-02-01T00:00:00Z", available_actions=["view", "cart", "purchase"])
+    invalid = {**panel, "records": panel["records"].copy()}
+    invalid["records"].loc[invalid["records"].index[1], "action"] = 2
+    with pytest.raises(ValueError, match="unsupported"):
+        shopping.fit_dynamics(encoder, invalid)
+    legacy = fit_encoder(panel, minimum_leaf=1)
+    assert legacy == fit_encoder(panel, minimum_leaf=1, available_actions=shopping.ACTIONS[:-1])
+    with pytest.raises(ValueError, match="no identified transitions for remove"):
+        shopping.fit_dynamics(legacy, panel)
+    changed = {**data, "records": data["records"].copy()}
+    changed["records"].loc[1, "action"] = 2
+    mask = shopping.action_mask(encoder)
+    probabilities = np.broadcast_to(mask / mask.sum(axis=1, keepdims=True), (2, *mask.shape))
+    with pytest.raises(ValueError, match="unsupported"):
+        prequential_metrics(changed, encoder, probabilities, np.array([.5, .5]),
+                            {"all": ~data["sessions"].is_censored})
+
+
+def test_electronics_model_roundtrip_validator_and_external_runtime_probabilities():
+    import json
+    from simulate.v4.irl import fit_latent_shopping as shopping
+    _, _, panel, encoder = electronics_panel()
+    matrices, mask, _state, _audit = shopping.fit_dynamics(encoder, panel)
+    n = len(mask)
+    base = np.zeros((n, 4))
+    probability, value, _ = shopping.soft_policy(shopping._reward(base), matrices, mask)
+    block = dict(schema_version=1, type=shopping.TYPE, actions=list(shopping.ACTIONS),
+        feature_names=shopping.FEATURE_NAMES, state_count=n, discount=shopping.DISCOUNT,
+        regularization=.01, encoder=encoder, transition_csr=[shopping.pack_matrix(p) for p in matrices],
+        action_mask=mask.tolist(), mixture_weights=[.5, .5], component_count=2,
+        common_reward=base.tolist(), component_offsets=np.zeros((2, 4)).tolist(),
+        component_policies=[probability.tolist()] * 2, component_values=[value.tolist()] * 2,
+        profile_posteriors={})
+    block = json.loads(json.dumps(block))
+    shopping.validate_model(block)
+    context = dict(previous_action="start", session_decision_count=0, previous_action_run_length=0,
+                   cart_total_quantity=0, **{SHOPPING_HISTORY_FEATURES[1]: float("nan")})
+    actual = shopping.policy(block, context, None, np.ones((n, 5)))
+    assert actual["remove"] == actual["end"] == 0 and sum(actual.values()) == pytest.approx(1)
+    broken = deepcopy(block)
+    broken["action_mask"][0][2] = True
+    with pytest.raises(ValueError, match="action support"):
+        shopping.validate_model(broken)
+    broken = deepcopy(block)
+    broken["component_offsets"][0][2] = .1
+    broken["component_offsets"][1][2] = -.1
+    with pytest.raises(ValueError, match="unobserved reward"):
+        shopping.validate_model(broken)

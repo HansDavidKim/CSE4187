@@ -38,7 +38,7 @@ Python 3.10 이상에서 저장소의 `simulator/` 디렉터리 기준으로 실
 cd simulator
 python -m pip install -r requirements.txt
 ecommerce-sim v4 generate --config src/simulate/v4/config/population.yaml --mode small \
-  --n-customers 500 --months 6 --seed 42 --output artifacts/small
+  --n-customers 500 --weeks 104 --seed 42 --output artifacts/small
 ecommerce-sim v4 validate --data artifacts/small/raw.sqlite
 ecommerce-sim v4 features --data artifacts/small --output artifacts/features
 ```
@@ -123,17 +123,19 @@ Bellman 잔차가 기준을 충족하면 정책을 사용하고, 계산이 수�
 
 기본 실험의 적격성은 배정 직전 28일 방문 여부이며, 쿠폰은 배정 때 한 번 발송해
 28일 동안 유효하다. 미래 28일 미방문은 기본 이탈 정답이고, 28일 미구매 정답은
-실험 출력에서 별도로 제공한다. KIT의 `_30d` 피처와 원천 방문 모형의 30일 학습 창은
-별도로 사용한다. 과거 30일 적격성·쿠폰 산출물은 해당 manifest 기준으로 읽는다.
-쿠폰은 고객별 1:1 고정 배정하며 실제 발송과 사용을 구분한다. 별점은
+실험 출력에서 별도로 제공한다. 주간 자료의 KIT `_30d`·`_90d` 열 이름은 호환용이며
+실제 집계 창은28/56/91일이다. 원천 방문 모형의30일 학습 창은 별도다.
+과거30일 적격성·쿠폰 산출물은 해당 manifest 기준으로 읽는다.
+기본 auto는 고객별 1:1 고정 무작위 배정이며 실제 발송과 사용을 구분한다. 별점은
 실제 구매한 상품별 최대 한 번이다. 금액은 원자료의 통화·단위를 유지한다.
 잠재 성향과 미래 정답은 예측 피처에 포함하지 않는다.
 
 ### 쿠폰 배정 전 최소 고객 이력
 
 두 YAML의 `source_simulation.min_customer_history_days`로 쿠폰 배정 전 최소 이력
-일수를 지정한다. 기본값 `0`은 제한 없음이며, `30`이면 첫 쇼핑 행동 기록부터 배정
-시각까지 30일 이상 지난 고객만 선정한다. 가입일이나 행동한 날짜 수가 아닌 경과
+일수를 지정한다. 주간104주 생성에서는 최소91일을 적용하고 더 큰 설정값은 그대로 쓴다.
+명시적 `--months` 호환 경로에서 `0`은 제한 없음이며, `30`이면 첫 쇼핑 행동 기록부터 배정
+시각까지30일 이상 지난 고객만 선정한다. 가입일이나 행동한 날짜 수가 아닌 경과
 기간이며, 정확히 설정 일수에 도달한 고객도 포함한다. 기존 `eligibility_window_days`의
 최근 방문 조건과 함께 처치·대조 1:1 배정 전에 적용한다.
 
@@ -230,6 +232,63 @@ Retention과 Uplift 로더는 피처 디렉터리의 manifest 체크섬으로 �
 `weekly_panel.session_seconds`는 관측을 마친 뒤의 주간 합계다. 배정 시점에
 열려 있던 세션이 있다면 종료 확인 여부가 과거 주간값에 영향을 줄 수 있다.
 검증한 v5 1,000명 자료에서 배정 시점을 가로지르는 세션은 0건이었다.
+
+## 보정한 원천 모형의 주간 실행
+
+기본 `population.yaml`은 Git에 포함된 집계 설정만으로 실행된다. 별도로 학습한
+Cosmetics/Electronics 모형과 Tianchi 일별 모형은 로컬 학습 파일과 보정된 설정을
+준비해 다음 API로 내보낸다. 이 원천별 학습 파일과 연구 결과는 Git에 포함하지 않는다.
+Tianchi는 날짜별 클릭/구매를 유지하며 미관측 주문·금액을 만들지 않는다.
+
+```bash
+cfg=/path/to/calibrated/config.json
+PYTHONPATH=src:. python scripts/export_main_campaign_dataset.py \
+  --config "$cfg" --domain cosmetics --customers 128 --seed 42 --output artifacts/campaign
+```
+
+`--domain`은 `cosmetics`, `electronics`, `tianchi` 중 하나다. 104주 내보내기는
+해당 환경의 쿠폰 보정 완료를 요구한다. RL 실행기는
+`scripts/run_main_world_benchmark.py`이며, source·coupon·104주 근거와 정확한
+입력 SHA를 묶은 manifest 없이는 학습하지 않는다. `--plan`은 학습하지 않는다.
+인자와 동결 조건은 각 스크립트의 `--help`에서 확인할 수 있다.
+
+정책 비용 민감도 실험에는 `--conversion-value 1000 --coupon-cost 500`처럼
+구매 가치와 단위 비용을 명시한다. S는 발송, D는 사용에 비용을 적용하며
+학습 보상·평가 점수·통제군 요약에 같은 계수를 사용한다. 기본값은1000/100이다.
+이 계수는 모의 사업 가치이며 쿠폰 할인율·반응 모형·원천의 현금 기록을 바꾸지 않는다.
+계수가 다른 정책은 별도 출력 경로와 동결 manifest에서 새로 학습한다.
+
+### 데이터 생성 시 쿠폰 발송 모드
+
+`v4 generate`와 `scripts/export_main_campaign_dataset.py`는 같은 세 모드를 지원한다.
+`auto`(기본값)는 기존 seed·1:1 무작위 배정을 유지한다. `none`은 전원 미발송,
+`assign`은 명시 고객 ID 또는 무작위 고객 수·비율로 고객 단위 고정 배정을 한다.
+배정된 고객에게 t0에 한 번 보내며 이후 재발송하지 않는다. 주간 RL 정책의
+매주 의사결정과는 별도다. 최소 이력13주, 적격성4주, 유효기간4주를 적용한다.
+
+```bash
+PYTHONPATH=src python -m cli v4 generate --config src/simulate/v4/config/population.yaml --n-customers 128 --weeks 104 --seed 42 --coupon-mode none --output artifacts/population_none
+PYTHONPATH=src python -m cli v4 generate --config src/simulate/v4/config/population.yaml --n-customers 128 --weeks 104 --seed 42 --coupon-mode assign --coupon-ratio .25 --coupon-assignment-seed 7 --output artifacts/population_quarter
+PYTHONPATH=src python -m cli v4 generate --config src/simulate/v4/config/population.yaml --n-customers 128 --weeks 104 --seed 42 --coupon-mode assign --coupon-customer-ids U0000002 U0000005 --output artifacts/population_selected
+```
+
+`--coupon-count`는 비율 대신 인원을 지정한다. ID·인원·비율은 하나만 사용한다.
+비율은 `floor(고객 수×비율)`명을 복원 없이 뽑고 실제 배정확률 k/n을 기록한다.
+지정 ID는 정확히 일치해야 하며 중복·없는 ID·잘못된 비율은 거절한다.
+campaign의 ID는 `env.customer_id_for_seed(_seed(seed, domain, index))` 형식이며,
+같은 seed의 기존 export에서 고객 ID를 골라 다시 지정할 수 있다.
+고객 선택은 행동 생성 RNG를 소모하지 않는 별도 seed를 사용한다.
+배정과 실행은 `treatments.parquet`·manifest에 기록하며39개 예측 특징에는 넣지 않는다.
+config에서는 `source_simulation.coupon_assignment: {mode: assign, ratio: 0.25, seed: 7}`로 지정한다.
+
+기본 생성 기간은 정확히104주(과거52주+미래52주)다. 과거 config의 시간대 없는
+`start_at`은 이 주간 모드에서 서울 시각으로 명시적으로 해석한다. 새 config에는
+월요일 자정의 `+09:00` 시각을 권장한다. `--months`를 명시한 기존 월간 실험은
+이전 관측 달력과30/60/90일 특징을 유지하는 호환 경로다. 주간 CLV는
+과거13주 입력과 미래52주(364일)의 쿠폰 할인 후 실결제액을 사용한다.
+`future_revenue_12m`은 이52주 정답의 기존 필드명이다. 전원 발송 자료에는
+미발송 CLV 학습 정답이 없으므로 loader가 명확히 거절한다. Tianchi의 금액은
+미관측으로 남기며 별도 구매일수 proxy를 화폐 CLV로 바꾸지 않는다.
 
 ## 검증
 

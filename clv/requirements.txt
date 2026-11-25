@@ -3,7 +3,7 @@ numpy>=1.24
 pandas>=2.0,<3        # simulator v4 code fails under pandas 3 copy-on-write (fit_shopping); keep 2.x for shared envs
 pyarrow>=10           # weekly_panel.parquet
 scipy>=1.7.3          # BG/NBD + Gamma-Gamma likelihood
-xgboost>=2.0          # or xgboost-cpu; without it the XGBoost model is skipped and recorded as such
+xgboost>=3.4.1        # shipped bundle training version; older runtimes can silently misread monetary predictions
 PyYAML>=6             # only for YAML settings files
 # test / optional
 pytest>=7

@@ -348,7 +348,7 @@ def _train(config):
             "five_tuning_folds": len(folds) == 5,
             "shared_ml_dl_test": all(len(p) == len(test_idx) for p in test_predictions.values())}
         write_json(out / "requirements_report.json", {"checks": requirement_checks, "all_met": all(requirement_checks.values())})
-    dictionary(x.columns, out, simulator)
+    dictionary(x.columns, out, simulator, input_validation.get("time_windows_days"))
     versions = {p: importlib.metadata.version(p) for p in ("numpy", "pandas", "scipy", "duckdb", "scikit-learn", "lightgbm", "catboost", "xgboost", "torch", "optuna", "shap")}
     write_json(out / "run_manifest.json", {"python": sys.executable, "platform": platform.platform(), "versions": versions,
         "seconds": time.monotonic() - started, "input_seconds": input_seconds,
@@ -434,6 +434,16 @@ def infer(bundle_path, input_dir, as_of, output_dir=None):
             result.loc[result.as_of_at.eq(aware_utc(reference_point)), "snapshot_scope"] = "training_experiment_time"
     result["predicted_churn"] = result.predicted_churn.astype("Int64")
     result.attrs["runtime_profile"] = profile
+    if simulator:
+        result.attrs["prediction_metadata"] = {
+            "model_version": result["model_version"].iloc[0] if len(result) else bundle.get("model_version", Path(bundle_path).parent.name),
+            "target_definition_id": DEFINITION, "horizon_value": 4, "horizon_unit": "weeks",
+            "value_semantics": "probability"}
+        result.attrs["producer_metadata"] = {
+            "component": "retention", "policy_condition": config.get("policy_condition", "observed_experiment_mix"),
+            "status_counts": result.status.value_counts().to_dict(), "excluded_rows": int(len(excluded)),
+            "time_spec": bundle.get("training_provenance", {}).get("time_spec"),
+            "time_windows_days": bundle.get("training_provenance", {}).get("time_windows_days")}
     if output_dir is not None:
         out = local_output(output_dir)
         result.to_parquet(out / "predictions.parquet", index=False)
@@ -441,9 +451,9 @@ def infer(bundle_path, input_dir, as_of, output_dir=None):
     return result
 
 
-def dictionary(columns, out, simulator=False):
+def dictionary(columns, out, simulator=False, time_windows_days=None):
     if simulator:
-        write_dictionary(columns, out)
+        write_dictionary(columns, out, time_windows_days=time_windows_days)
         return
     lines = ["# Retention feature dictionary", "", "Computed strictly before as_of. UTC time; default level window 30 days, change windows two adjacent 14-day periods.",
              "Null: insufficient/unknown history or undefined denominator; counts: zero for known no activity. Median imputation and indicators fit inside training only.", "", "| Feature | Definition |", "| --- | --- |"]

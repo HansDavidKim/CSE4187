@@ -1,5 +1,6 @@
 """Public Retention prediction and independent-run evaluation APIs."""
 from pathlib import Path
+from dataclasses import dataclass
 import json
 import time
 
@@ -13,12 +14,35 @@ from .monitoring import compare
 from .pipeline import infer, local_output, score, write_json, process_memory
 from .pipeline import train as train_retention
 from .simulator_input import (training_inputs, prediction_inputs, read_training_raw, aware_utc,
-                              CONTROL_POLICY, DAYS, DEFINITION)
+                              CONTROL_POLICY, DAYS, DEFINITION, KEYS)
 
 
 def predict_retention(bundle_path, input_dir, as_of, output_dir=None):
     """Return customer probabilities and exclusion statuses without requiring a file output."""
     return infer(bundle_path, input_dir, as_of, output_dir)
+
+
+@dataclass(frozen=True)
+class StrategyPredictions:
+    """Same snapshot and declaration fields as the CLV strategy handoff."""
+    frame: pd.DataFrame
+    metadata: dict
+    producer_metadata: dict
+
+
+def predict_for_strategy(bundle_path, input_dir, as_of):
+    """Expose the 4-week churn probability without changing the legacy prediction API."""
+    predictions = infer(bundle_path, input_dir, as_of)
+    if "prediction_metadata" not in predictions.attrs:
+        raise ValueError("Strategy handoff requires the simulator 28-day no-visit contract")
+    frame = predictions[["dataset_id", *KEYS, "raw_database_sha256", "currency", "amount_unit",
+                         "expanded_feature_set_version", "churn_probability", "status"]].copy()
+    frame = frame.rename(columns={"churn_probability": "churn_prob"})
+    frame["reference_week"] = frame["as_of_at"]
+    frame["input_cutoff_at"] = frame["as_of_at"]
+    frame["prediction_end_at"] = frame["as_of_at"] + pd.Timedelta(days=DAYS)
+    return StrategyPredictions(frame, predictions.attrs["prediction_metadata"],
+                               predictions.attrs["producer_metadata"])
 
 
 def _evaluation_inputs(bundle, input_dir, feature_dir, as_of):

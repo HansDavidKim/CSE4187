@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from simulate.v4.configuration import DEFAULT_CONFIG, load_config
+from simulate.v4.simulator.coupon_assignment import add_coupon_assignment_arguments, coupon_assignment_from_args
 
 
 def add_parser(subparsers):
@@ -17,11 +18,14 @@ def add_parser(subparsers):
     generate.add_argument("--output", type=Path, required=True, help="new or empty dataset directory")
     generate.add_argument("--mode", choices=("small", "full"), default="small")
     generate.add_argument("--n-customers", type=int)
-    generate.add_argument("--months", type=int)
+    calendar = generate.add_mutually_exclusive_group()
+    calendar.add_argument("--weeks", type=int, choices=(104,), help="52 past +52 future weeks (default)")
+    calendar.add_argument("--months", type=int, help="explicit legacy calendar export")
     generate.add_argument("--seed", type=int, default=42)
     generate.add_argument("--customers", type=Path, help="canonical customer CSV or Parquet")
     generate.add_argument("--products", type=Path, help="canonical fixed-price catalog CSV or Parquet")
     generate.add_argument("--fit-missing", action="store_true", help="fit missing components from configured real sources")
+    add_coupon_assignment_arguments(generate)
     features = commands.add_parser("features", help="materialize KIT39 and available weekly/experiment tables")
     features.add_argument("--data", type=Path, required=True, help="dataset directory or raw.sqlite")
     features.add_argument("--output", type=Path, required=True, help="new or empty output directory")
@@ -40,6 +44,7 @@ def run(args):
         from simulate.v4.data.make_dataset import ensure_source_models
         from simulate.v4.simulator import EcommerceSimulator
 
+        assignment = coupon_assignment_from_args(args)
         simulator = EcommerceSimulator(load_config(args.config, args.assets_root))
         if args.output.exists() and (not args.output.is_dir() or any(args.output.iterdir())):
             raise FileExistsError(f"dataset output must be new or empty: {args.output}")
@@ -55,7 +60,8 @@ def run(args):
                                         + "\n".join(missing))
         ensure_source_models(simulator)
         result = simulator.generate(mode=args.mode, n_customers=args.n_customers, months=args.months,
-                                    seed=args.seed, customers=args.customers, products=args.products)
+                                    seed=args.seed, customers=args.customers, products=args.products,
+                                    weeks=getattr(args,"weeks",None), coupon_assignment=assignment)
         result.save(args.output)
         summary = {"dataset": str(args.output), "customers": len(result.tables["customers"]),
                    "events": len(result.tables["events"]), "dataset_id": result.metadata["dataset_id"]}
