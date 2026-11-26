@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from simulate.v4.features import EXPANDED_FEATURES
+from simulate.v4.session_observations import completion_exclusions
 from simulate.v4.time_spec import feature_window_days
 
 DAY = 86_400_000_000_000
@@ -74,7 +75,8 @@ def observed_snapshot(tables, as_of_at, customer_id=None, product_prices=None, *
                 for row in records("sessions") if row["customer_id"] == customer_id
                 and _time(row["started_at"]) < clock]
     starts = sorted(began for _, began, _ in sessions)
-    diagnostics = tables.get("session_diagnostics")
+    excluded = completion_exclusions(metadata)
+    diagnostics = tables.get("session_diagnostics") if excluded is None else None
     by_session = None
     if diagnostics is not None:
         diagnostics = diagnostics.to_dict("records") if isinstance(diagnostics, pd.DataFrame) else diagnostics
@@ -89,7 +91,9 @@ def observed_snapshot(tables, as_of_at, customer_id=None, product_prices=None, *
             by_session[key] = row
     completed = []
     for row, began, ended in sessions:
-        if by_session is None:
+        if excluded is not None:
+            available = ended + 30 * 60 * 1_000_000_000 if ended is not None and row["session_id"] not in excluded else None
+        elif by_session is None:
             available = _time(row.get("completion_available_at", row.get("ended_at")))
         else:
             diagnostic = by_session.get((customer_id, row["session_id"]))

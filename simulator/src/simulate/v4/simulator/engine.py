@@ -38,6 +38,32 @@ class SimulationResult:
     elapsed_seconds: float = 0.0
     metadata: dict[str, Any] | None = None
 
+    def __post_init__(self):
+        from ..session_observations import completion_digest, completion_exclusions, session_availability
+        metadata = dict(self.metadata or {})
+        completion_exclusions(metadata, self.tables["sessions"].session_id)
+        if "session_diagnostics" not in self.tables:
+            return
+        sessions = session_availability({"sessions": self.tables["sessions"],
+            "session_diagnostics": self.tables["session_diagnostics"]})
+        contract = {"clock": "ended_at_plus_30min_v1",
+            "censored_session_ids": sorted(sessions.loc[sessions.completion_available_at.isna(), "session_id"].tolist())}
+        if "session_completion" in metadata:
+            if metadata["session_completion"] != contract:
+                raise ValueError("public session completion disagrees with recorded availability")
+            return
+        previous_id = metadata.get("dataset_id")
+        if not isinstance(previous_id, str) or not previous_id:
+            raise ValueError("metadata.dataset_id must be explicit")
+        metadata.update(session_completion=contract, dataset_id=previous_id + "-completion-" + completion_digest(contract))
+        tables = dict(self.tables)
+        for name, frame in tables.items():
+            if "dataset_id" in frame:
+                if not frame.dataset_id.eq(previous_id).all():
+                    raise ValueError(f"{name} sidecar dataset identity differs")
+                tables[name] = frame.assign(dataset_id=metadata["dataset_id"])
+        self.metadata, self.tables = metadata, tables
+
     def save(self, directory: str | Path) -> None:
         """Publish a complete dataset without replacing a previous run."""
         output = Path(directory)
@@ -46,10 +72,11 @@ class SimulationResult:
         output.parent.mkdir(parents=True, exist_ok=True)
         temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}-", dir=output.parent))
         try:
-            save_raw_dataset(temporary / "raw.sqlite", {key: self.tables[key] for key in RAW_COLUMNS}, self.metadata or {})
+            metadata = dict(self.metadata or {})
+            save_raw_dataset(temporary / "raw.sqlite", {key: self.tables[key] for key in RAW_COLUMNS}, metadata)
             for name, frame in self.tables.items():
                 frame.to_parquet(temporary / f"{name}.parquet", index=False)
-            manifest = dict(self.metadata or {})
+            manifest = dict(metadata)
             manifest["sidecar_sha256"] = {name: hashlib.sha256((temporary / f"{name}.parquet").read_bytes()).hexdigest()
                                           for name in self.tables if name not in RAW_COLUMNS}
             (temporary / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2, allow_nan=False))
@@ -129,6 +156,7 @@ class EcommerceSimulator:
         started = time.perf_counter()
         simulator_sha = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
         runtime_paths = {"engine": Path(__file__),
+                         "session_observations": Path(__file__).parents[1] / "session_observations.py",
                          **{name: Path(__file__).with_name(f"{name}.py")
                             for name in ("lifecycle", "item_choice", "outcomes", "raw_store", "coupon_response", "coupon_assignment")},
                          **{name: Path(__file__).parents[1] / "irl" / f"{name}.py"
@@ -253,6 +281,11 @@ class EcommerceSimulator:
                 raise ValueError("population group probabilities must match the fitted reward components")
             model["home_groups"], draw_profile = population_profiles.prepare_population(population, product_rows, population_rng)
         checkout_kernel = model.get("checkout_kernel")
+        checkout_spending = population.get("checkout_spending") if population is not None else None
+        if checkout_spending is not None:
+            from ..irl import fit_checkout_spending
+            fit_checkout_spending.validate_spending_model(checkout_spending)
+            runtime_hashes["fit_checkout_spending"] = hashlib.sha256(Path(fit_checkout_spending.__file__).read_bytes()).hexdigest()
         if checkout_kernel is not None:
             if not checkout_episodes:
                 raise ValueError("checkout transition kernels require checkout episodes")
@@ -569,7 +602,7 @@ class EcommerceSimulator:
                     if len(probabilities):
                         probabilities /= probabilities.sum()
                     checkout_banks[cache_key] = (baskets, probabilities)
-                    if checkout_kernel is not None:
+                    if checkout_kernel is not None or checkout_spending is not None:
                         units = np.asarray([sum(basket.values()) for basket in baskets], dtype=int)
                         means = np.asarray([sum(products_by_id[pid]["unit_price_minor"] * quantity
                                                 for pid, quantity in basket.items()) / sum(basket.values())
@@ -577,6 +610,15 @@ class EcommerceSimulator:
                         checkout_support[cache_key] = (np.asarray(weights, dtype=int), units, means)
                 baskets, probabilities = checkout_banks[cache_key]
                 if baskets:
+                    if checkout_spending is not None:
+                        _, units, means = checkout_support[cache_key]
+                        personal_weights = state.setdefault("checkout_spending_weights", {})
+                        if cache_key not in personal_weights:
+                            personal_weights[cache_key] = fit_checkout_spending.spending_pool_weights(checkout_spending,
+                                probabilities, units, means, profile["checkout_spending_preference"])
+                        weighted = personal_weights[cache_key]
+                        checkout_scopes[f"{scope}_persistent_spending_pool"] += 1
+                        return baskets[int(rng.choice(len(baskets), p=weighted))].copy()
                     if checkout_kernel is not None:
                         frequencies, units, means = checkout_support[cache_key]
                         if scope == "profile":
@@ -1205,6 +1247,8 @@ class EcommerceSimulator:
             unit_tag += "-joint-timing"
         if population is not None:
             unit_tag += "-population"
+        if checkout_spending is not None:
+            unit_tag += "-persistent-spending"
         if gmm_return_only:
             unit_tag += "-gmm-return"
         elif choice_gmm_path:
@@ -1213,7 +1257,7 @@ class EcommerceSimulator:
             unit_tag += "-gmm"
         elif continuous_shopping:
             unit_tag += "-gaussian"
-        version = 13 if choice_gmm_path else 12 if gmm_path and continuous_shopping else 11 if continuous_shopping else 10 if latent_return_offset is not None else 9 if latent_block is not None else 8 if causal_policy is not None else 7 if "review" in event_models else 6 if donor_prior is not None or checkout_kernel is not None or retention_mode == "source" else 5
+        version = 14 if checkout_spending is not None else 13 if choice_gmm_path else 12 if gmm_path and continuous_shopping else 11 if continuous_shopping else 10 if latent_return_offset is not None else 9 if latent_block is not None else 8 if causal_policy is not None else 7 if "review" in event_models else 6 if donor_prior is not None or checkout_kernel is not None or retention_mode == "source" else 5
         metadata = {"schema_version": 7, "raw_schema_version": 5 if "review" in event_models else 4,
             "dataset_id": f"cosmetics-source-v{version}-six-event-{unit_tag}-{mode}-{'104w' if weekly else str(months)+'m'}-seed{seed}",
             "seed": seed, "months": months, "clv_label_days": WEEKLY_TIME_SPEC["clv_label_days"],
@@ -1328,7 +1372,11 @@ class EcommerceSimulator:
             } if purchase_response is not None else None),
             "shopping_choice_unit": model.get("choice_unit", "source_item_interaction"),
             "checkout_template_scope_counts": dict(checkout_scopes),
-            "checkout_generation": ({"type": checkout_kernel["type"], "loc": checkout_kernel["loc"],
+            "checkout_generation": ({"type": checkout_spending["type"], "schema_version": checkout_spending["schema_version"],
+                "fit": checkout_spending["fit"], "preference_clock": "one private draw per synthetic customer, fixed across all purchases",
+                "pool": "source-supported joint size/price frequencies times conditional/marginal Gaussian density ratio",
+                "replaces": "last-price transition kernel; no independent size draw", "causal_effect_identified": False}
+                if checkout_spending is not None else {"type": checkout_kernel["type"], "loc": checkout_kernel["loc"],
                 "scale": checkout_kernel["scale"], "training_transitions": checkout_kernel["training_transitions"],
                 "profile_bank": ("synthetic checkout templates" if population is not None
                                  else "observed template frequencies without replacement; source pool after exhaustion"),

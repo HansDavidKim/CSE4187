@@ -71,13 +71,25 @@ ecommerce-sim v4 features --data artifacts/small --output artifacts/features
 기존 학습 파일로 집계 모델을 다시 만들 때는 다음 명령을 사용한다.
 
 ```bash
+PYTHONPATH=src python -m simulate.v4.irl.fit_checkout_spending \
+  --source-model /path/to/assets/data/models/shopping_joint_latent_source_traits.json \
+  --source-cache artifacts/source_sample.parquet --output artifacts/checkout_spending.json
 PYTHONPATH=src python -m simulate.v4.irl.export_population \
   --models /path/to/assets/data/models --reward-gmm /path/to/fitted-gmm.json \
+  --checkout-spending artifacts/checkout_spending.json \
   --output artifacts/population/data/models
 ```
 
 이 파일들을 사용하려면 `generate --config src/simulate/v4/config/population.yaml`에
 `--assets-root artifacts/population/data/models`를 추가한다.
+
+현재 집계 설정(`source-shopping-v14`)은 구매 수량과 평균 단가의 개인 성향을 고객마다
+한 번 뽑아 유지한다. 같은 성향 안에서도 원천 집계에 있는 장바구니를 변동하며 뽑는다.
+학습 고객의 기준시각 이전 구매만으로 고객 간·고객 내 공분산을 분리하고, 공용
+장바구니 빈도에 조건부/주변 밀도 비율을 적용한다. 기존 직전 단가 커널은 함께 적용하지
+않는다. 원천의 5개월 기록은 104주 동안 같은 성향이 유지된다는 가정을 검증하지 않는다.
+이 구매 성향과 행동·방문 성향의 상관관계는 별도로 추정하지 않았다.
+기존 생성 데이터와 CLV/Uplift 학습 결과는 자동으로 바뀌지 않으므로 새 데이터로 재학습한다.
 
 ### 원천 고객별 프로필 기반 실행
 
@@ -120,6 +132,10 @@ Bellman 잔차가 기준을 충족하면 정책을 사용하고, 계산이 수�
 분리한다. 피처 이름과 순서는 [features.py](src/simulate/v4/features.py)의
 `EXPANDED_FEATURES`와 파생 DB의 `feature_registry`를 따른다.
 조회 예시는 [query_v4.sql](scripts/query_v4.sql)에 있다.
+새 산출물은 `raw.manifest.json`의 `session_completion`에 종료 기록+30분의 완료 확인
+규칙과 중단 세션 ID를 보관한다. 이 선언의 해시를 데이터셋 ID에 묶어, 비공개 진단
+파일 없이도 학습·추론의 완료 세션 기준을 재현한다. 선언이 없는 기존 산출물은
+기존 진단 파일 또는 기록된 종료시각의 판정 방식을 유지한다.
 
 기본 실험의 적격성은 배정 직전 28일 방문 여부이며, 쿠폰은 배정 때 한 번 발송해
 28일 동안 유효하다. 미래 28일 미방문은 기본 이탈 정답이고, 28일 미구매 정답은

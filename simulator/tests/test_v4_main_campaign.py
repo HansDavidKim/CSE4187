@@ -196,6 +196,28 @@ def test_eta_zero_reproduces_base_stream_and_only_natural_completions_advance(fa
         hashlib.sha256(json.dumps(['source-event-stream-v1',13,f'{zero.uid}:0','return_state']).encode()).digest()[:8],'big')).bit_generator.state
 
 
+@pytest.mark.parametrize("choice", [False, True])
+def test_return_state_requires_its_frozen_static_gmm(factory, choice):
+    original = factory(gmm={}, choice=choice)
+    fingerprint = hashlib.sha256(json.dumps(original.gmm,
+        sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    eta = make_model(.8, .2)
+    eta["fit"] = {"static_return_prior": {"population_model_fingerprint": fingerprint}}
+    with pytest.raises(ValueError, match="requires its persistent reward GMM"):
+        factory(eta=eta)
+    mismatch = copy.deepcopy(eta)
+    mismatch["runtime_gmm_fingerprint"] = "0" * 64
+    with pytest.raises(ValueError, match="exact frozen static reward GMM"):
+        factory(gmm={}, choice=choice, eta=mismatch)
+    bound = factory(gmm={}, choice=choice, eta=eta)
+    bound.reset(13)
+    assert bound.state["return_state"].model == eta
+    # Aggregate exports bind the runtime GMM while retaining the source-fit fingerprint.
+    eta["fit"]["static_return_prior"]["population_model_fingerprint"] = "1" * 64
+    eta["runtime_gmm_fingerprint"] = fingerprint
+    factory(gmm={}, choice=choice, eta=eta).reset(13)
+
+
 def test_no_coupon_defaults_and_domain_mismatch_fail_explicitly(factory):
     env=factory(horizon_days=7);env.reset(14)
     with pytest.raises(ValueError,match='response_sampler'):env.advance(1)

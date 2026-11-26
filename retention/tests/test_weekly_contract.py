@@ -97,7 +97,7 @@ def test_peer_strategy_integration_rejects_legacy_calendar_before_generation(tmp
         run_experiment({}, tmp_path, months=24, integrate=True)
 
 
-@pytest.mark.parametrize("mismatch", ["none", "uplift_raw", "clv_raw"])
+@pytest.mark.parametrize("mismatch", ["none", "uplift_raw", "clv_raw", "valid"])
 def test_cached_peer_cannot_bypass_the_official_model_contract(tmp_path, monkeypatch, mismatch):
     from retention import experiments
     from uplift import api as uplift_api
@@ -117,10 +117,37 @@ def test_cached_peer_cannot_bypass_the_official_model_contract(tmp_path, monkeyp
     monkeypatch.setattr(BaseUpliftLearner, "load", lambda path: cached)
     def verify(model, path, *, allow_training_customers=False):
         assert model is cached and path == "features" and allow_training_customers
-        raise ValueError("Model input contract differs from the weekly KIT36")
+        if mismatch != "valid":
+            raise ValueError("Model input contract differs from the weekly KIT36")
     monkeypatch.setattr(uplift_api, "predict_for_strategy", verify)
+    if mismatch == "valid":
+        before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+        result = experiments.train_peer_models("features", "raw", tmp_path)
+        assert result["uplift"] is cached and result["clv_dir"] == tmp_path / "clv"
+        assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+        return
     with pytest.raises(ValueError, match="input contract differs" if mismatch == "none" else "raw dataset changed"):
         experiments.train_peer_models("features", "raw", tmp_path)
+
+
+@pytest.mark.parametrize("cache", ["different_dataset", "partial"])
+def test_peer_training_preserves_an_existing_nonreusable_output(tmp_path, monkeypatch, cache):
+    from retention import experiments
+    from uplift.common import simulator as uplift_input
+    data = pd.DataFrame({"treatment": [0, 1], "y": [0, 1], "raw_database_sha256": ["b"*64]*2})
+    data.attrs = {"dataset_id": "new", "assignment_probability": .5}
+    monkeypatch.setattr(uplift_input, "load_feature_dataset", lambda path, ledger: data)
+    monkeypatch.setattr(experiments, "local_output", lambda path: tmp_path)
+    monkeypatch.setattr(experiments, "train_test_split", lambda *args, **kwargs: pytest.fail("Existing models must be preserved before fitting"))
+    (tmp_path / "tlearner.pkl").write_bytes(b"existing-model")
+    (tmp_path / "uplift_selection.json").write_text(json.dumps({"winner": "tlearner", "dataset_id": "old"}))
+    if cache == "different_dataset":
+        (tmp_path / "clv").mkdir()
+        (tmp_path / "clv/registry.json").write_text(json.dumps({"provenance": {"dataset_id": "old"}}))
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    with pytest.raises(ValueError, match="Existing peer output cannot be reused"):
+        experiments.train_peer_models("features", "raw", tmp_path)
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
 
 
 def test_weekly_sequences_exclude_the_legacy_day29_event():
@@ -238,4 +265,26 @@ def test_small_weekly_generation_reuses_only_the_same_coupon_design(tmp_path, mo
     with pytest.raises(ValueError, match="coupon assignment"):
         experiments.generate_dataset(output, customers=8, seed=17,
                                      coupon_assignment={"mode": "assign", "count": 1})
+    from simulate.v4.simulator import engine
+    original_config = engine.load_config
+    original_bytes = Path.read_bytes
+    for fault in ("configuration", "model", "runtime"):
+        with monkeypatch.context() as patch:
+            if fault == "configuration":
+                def changed_config(source):
+                    config = original_config(source)
+                    config["source_simulation"]["coupon_send_cost_minor"] += 1
+                    return config
+                patch.setattr(engine, "load_config", changed_config)
+            else:
+                changed_path = Path(metadata["model_path"] if fault == "model" else engine.__file__)
+                patch.setattr(Path, "read_bytes", lambda file: original_bytes(file) + (b"\n" if file == changed_path else b""))
+            with pytest.raises(ValueError, match="generator inputs changed"):
+                experiments.generate_dataset(output, customers=8, seed=17, coupon_assignment={"mode": "none"})
+    manifest_path = output / "dataset/raw.manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["metadata"]["simulator_code_sha256"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="generator inputs changed"):
+        experiments.generate_dataset(output, customers=8, seed=17, coupon_assignment={"mode": "none"})
     assert hashlib.sha256(path.read_bytes()).hexdigest() == before

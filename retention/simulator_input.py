@@ -118,6 +118,8 @@ def _verified_database(path):
         names = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if names != {"customers", "products", "sessions", "events", "orders", "order_items", "coupons"}:
             raise ValueError("Raw database requires the seven canonical business tables")
+        from simulate.v4.session_observations import completion_exclusions
+        completion_exclusions(metadata, (row[0] for row in connection.execute("SELECT session_id FROM sessions")))
         yield connection, metadata
 
 

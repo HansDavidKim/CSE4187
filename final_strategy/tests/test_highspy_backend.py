@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -22,6 +23,12 @@ from final_strategy.what_if import export_what_if
 from final_strategy.validation import InputValidationError
 
 REAL = os.name == "nt" and importlib.util.find_spec("highspy") is not None
+
+
+@pytest.fixture(autouse=True)
+def supported_backend_platform(monkeypatch):
+    # Mock worker contracts run on every host; native Windows tests keep the real os module.
+    monkeypatch.setattr(hybrid, "os", SimpleNamespace(name="nt"))
 
 
 def request():
@@ -68,6 +75,15 @@ def test_missing_dependency_preserves_c1(monkeypatch):
     r=execute()
     assert chosen(r,"hybrid")=={"00000","00001"}
     assert r.metadata["hybrid"]["backend"]["status"]=="backend_not_installed"
+    assert not r.metadata["hybrid"]["backend"]["child_created"]
+
+
+def test_unsupported_platform_preserves_c1(monkeypatch):
+    monkeypatch.setattr(hybrid, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(process, "run_worker", lambda *a: pytest.fail("unsupported worker launched"))
+    r = execute()
+    assert chosen(r, "hybrid") == {"00000", "00001"}
+    assert r.metadata["hybrid"]["backend"]["status"] == "unsupported_platform"
     assert not r.metadata["hybrid"]["backend"]["child_created"]
 
 

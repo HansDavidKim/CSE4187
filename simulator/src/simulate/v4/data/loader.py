@@ -93,7 +93,7 @@ def load_tables(directory: str | Path = "data/processed") -> dict[str, Any]:
                 _validate_sidecar(name, frame, tables, tables["_metadata"])
                 tables[name] = frame
         diagnostic = database.parent / "session_diagnostics.parquet"
-        if diagnostic.exists():
+        if "session_completion" not in metadata and diagnostic.exists():
             tables["session_diagnostics"] = pd.read_parquet(diagnostic)
             from simulate.v4.session_observations import session_availability
             session_availability(tables)

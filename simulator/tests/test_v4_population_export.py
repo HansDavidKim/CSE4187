@@ -1,5 +1,6 @@
 import hashlib
 import json
+import copy
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,7 @@ def test_population_export_preserves_optional_cold_start_fit_and_return_binding(
 
 
 def _check_population_export(tmp_path,monkeypatch,with_cold_start_audit,with_observation_support,
-                             prepared_bundle,with_compiled_metadata,*,choice=False):
+                             prepared_bundle,with_compiled_metadata,*,choice=False,spending_binding=None):
     config = Path(exporting.__file__).parents[1] / "config"
     shopping = json.loads((config / "population_shopping.json").read_text())
     returning = json.loads((config / "population_return.json").read_text())
@@ -55,8 +56,21 @@ def _check_population_export(tmp_path,monkeypatch,with_cold_start_audit,with_obs
     return_path = models / "return_model.json"
     return_path.write_text(json.dumps(returning))
     shopping["source"], shopping["profiles"] = source, []
+    if spending_binding:
+        shopping["validation"], shopping["seed"] = {"cutoff_at_utc": "2020-02-01T00:00:00Z"}, 42
     shopping["latent_shopping"]["return_activity"]["base_model_sha256"] = hashlib.sha256(return_path.read_bytes()).hexdigest()
     (models / "shopping_joint_latent_source_traits.json").write_text(json.dumps(shopping))
+    spending_path = None
+    if spending_binding:
+        spending_path = models / "checkout_spending.json"
+        spending = copy.deepcopy(shopping["population"]["checkout_spending"])
+        spending["source"] = {"model_sha256": "wrong" if spending_binding == "wrong" else hashlib.sha256(
+            (models / "shopping_joint_latent_source_traits.json").read_bytes()).hexdigest()}
+        if spending_binding == "wrong_cutoff":
+            spending["fit"]["cutoff_at"] = "2020-03-01T00:00:00Z"
+        if spending_binding == "wrong_seed":
+            spending["fit"]["seed"] = 43
+        spending_path.write_text(json.dumps(spending))
     reward_path = state_path = None
     if with_compiled_metadata:
         count = shopping["latent_shopping"]["component_count"]
@@ -102,16 +116,23 @@ def _check_population_export(tmp_path,monkeypatch,with_cold_start_audit,with_obs
     monkeypatch.setattr(exporting, "aggregate_review_model", lambda model: {})
 
     output = tmp_path / "population"
+    if spending_binding in {"wrong", "wrong_cutoff", "wrong_seed"}:
+        with pytest.raises(ValueError, match="exact source shopping model|training cutoff and seed"):
+            exporting.export_population(models, output, reward_path, return_state=state_path, checkout_spending=spending_path)
+        assert not output.exists()
+        return
     if prepared_bundle == "wrong_return_cutoff":
         with pytest.raises(ValueError, match="fitting cutoff"):
             exporting.export_population(models, output, reward_path, return_state=state_path)
         assert not output.exists()
         return
-    exporting.export_population(models, output, reward_path, return_state=state_path)
+    exporting.export_population(models, output, reward_path, return_state=state_path, checkout_spending=spending_path)
 
     exported = json.loads((output / "population_return.json").read_text())
     assert exported == {name: value for name, value in returning.items() if name != "source"}
     bound = json.loads((output / "population_shopping.json").read_text())
+    if spending_binding:
+        assert bound["population"]["checkout_spending"] == {key: value for key, value in spending.items() if key != "source"}
     if with_compiled_metadata:
         for name, value in optional_actor.items():
             assert bound["latent_shopping"][name] == value
@@ -140,3 +161,8 @@ def _check_population_export(tmp_path,monkeypatch,with_cold_start_audit,with_obs
 @pytest.mark.parametrize('with_observation_support',[False,True])
 def test_choice_gmm_export_preserves_separate_units_personas_and_exact_binding(tmp_path,monkeypatch,with_observation_support):
     _check_population_export(tmp_path,monkeypatch,False,with_observation_support,'aligned',True,choice=True)
+
+
+@pytest.mark.parametrize('spending_binding', ['correct', 'wrong', 'wrong_cutoff', 'wrong_seed'])
+def test_checkout_spending_export_binds_exact_source_model(tmp_path, monkeypatch, spending_binding):
+    _check_population_export(tmp_path,monkeypatch,False,False,None,True,spending_binding=spending_binding)
