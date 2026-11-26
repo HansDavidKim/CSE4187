@@ -236,6 +236,14 @@ class MainCampaignEnv:
         self.choice_space = bool(self.settings.get("choice_gmm_model_path")) or self.fixed_irl_critic
         self.purchase_shift_name = "purchase_choice_logit_shift" if self.choice_space else "purchase_reward_shift"
         self.gmm = read("choice_gmm_model_path" if self.settings.get("choice_gmm_model_path") else "reward_gmm_model_path", False)
+        if self.return_state_model is not None:
+            prior = self.return_state_model.get("fit", {}).get("static_return_prior")
+            if prior is not None and self.gmm is None:
+                raise ValueError("action-only static-prior return state requires its persistent reward GMM")
+            binding = self.return_state_model.get("runtime_gmm_fingerprint", (prior or {}).get("population_model_fingerprint"))
+            if binding is not None and binding != hashlib.sha256(json.dumps(
+                    self.gmm, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest():
+                raise ValueError("private return state requires its exact frozen static reward GMM")
         self.gmm_factors = self.solve_policy = self.draw_return_offset = None
         self._sample_continuous = reward_gmm.sample_reward
         self.return_only = self.settings.get("reward_gmm_return_only", False)
@@ -414,6 +422,7 @@ class MainCampaignEnv:
             "shopping_offset_units": "choice_logit_shift" if self.choice_space else "MDP_reward_shift",
             "choice_model": "fixed_irl_critic" if self.fixed_irl_critic else "choice_gmm" if self.choice_space else "reward",
             "profile_generation": "synthetic_population" if self.population is not None else "source_profiles",
+            "checkout_spending_type": (self.population.get("checkout_spending") or {}).get("type") if self.population else None,
             "source_observation_mode": self.source_observation_mode,
             "calibration_component_conditioning": None if self.component_conditioning is None else self.component_conditioning.tolist()}
         self.state = {"cart": Counter(), "purchased_products": Counter(), "purchased_categories": Counter(),
@@ -635,6 +644,15 @@ class MainCampaignEnv:
             baskets,counts,units,means=self._basket_banks[cache_key]
             if not baskets: continue
             weights=counts/counts.sum()
+            spending = self.population.get("checkout_spending") if self.population is not None else None
+            if spending is not None:
+                from ..irl.fit_checkout_spending import spending_pool_weights
+                personal_weights = self.state.setdefault("checkout_spending_weights", {})
+                if cache_key not in personal_weights:
+                    personal_weights[cache_key] = spending_pool_weights(spending, weights, units, means,
+                        self.profile["checkout_spending_preference"])
+                p = personal_weights[cache_key]
+                return baskets[int(self.rng.choice(len(baskets), p=p))].copy()
             if self.model.get("checkout_kernel"):
                 if scope=="profile":
                     remaining=self.state["checkout_remaining"].setdefault(cache_key,counts.copy())

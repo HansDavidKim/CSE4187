@@ -122,6 +122,10 @@ def prepare_population(population, products, rng, *, catalog_index=None):
     """Reuse the engine's checkout and item samplers with generated supports."""
     if population.get("schema_version") != 1 or not products or not population.get("home_groups"):
         raise ValueError("population needs an active catalog and calibrated home groups")
+    spending = population.get("checkout_spending")
+    if spending is not None:
+        from ..irl.fit_checkout_spending import validate_spending_model
+        validate_spending_model(spending)
     product_prices, ids, bounds = (compile_population_catalog(products)
         if catalog_index is None else catalog_index)
 
@@ -184,10 +188,14 @@ def prepare_population(population, products, rng, *, catalog_index=None):
             weights = [head, *[(1 - head) / (len(favorites) - 1)] * (len(favorites) - 1)]
         else:
             weights = [1] * len(favorites)
-        return {"profile_id": f"SYN{candidate_index:09d}", "home_group": name, "preferred_price_minor": price,
+        profile = {"profile_id": f"SYN{candidate_index:09d}", "home_group": name, "preferred_price_minor": price,
                 "visit_probability_30d": group["visit_probability_30d"], "product_weights": dict(zip(favorites, weights)),
                 "checkout_preference_share": group["checkout_preference_share"],
                 "component_probabilities": components}
+        if spending is not None:
+            profile["checkout_spending_preference"] = rng.multivariate_normal(
+                spending["mean"], spending["between_covariance"], check_valid="raise").tolist()
+        return profile
 
     return groups, draw_profile
 

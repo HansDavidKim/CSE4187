@@ -2,6 +2,8 @@
 import time
 import json
 import joblib
+import hashlib
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -17,7 +19,7 @@ def generate_dataset(output, customers=20000, months=None, seed=42, start_at=Non
     """Generate a target-20% scenario using a resolved in-memory simulator config."""
     simulator_imports()
     from simulate.v4.configuration import POPULATION_CONFIG
-    from simulate.v4.simulator.engine import EcommerceSimulator
+    from simulate.v4.simulator import engine
     from simulate.v4.storage import materialize_features
     from simulate.v4.simulator.coupon_assignment import resolve_coupon_assignment, assign_coupons
     from simulate.v4.time_spec import is_weekly
@@ -29,7 +31,7 @@ def generate_dataset(output, customers=20000, months=None, seed=42, start_at=Non
     out = local_output(output)
     duration = f"{weeks} weeks" if weeks is not None else f"{months} legacy calendar months"
     print(f"Generating {customers} customers, {duration}, seed {seed}", flush=True)
-    config = EcommerceSimulator(POPULATION_CONFIG).config
+    config = engine.EcommerceSimulator(POPULATION_CONFIG).config
     config["source_simulation"]["retention_mode"] = "target"
     config["churn"]["target_rate"] = .2
     if start_at is not None:
@@ -50,6 +52,25 @@ def generate_dataset(output, customers=20000, months=None, seed=42, start_at=Non
                 or metadata.get("configured_target_churn_rate") != .2
                 or pd.Timestamp(metadata["start_at"]) != expected_start):
             raise ValueError("Existing experiment data differs from the requested generation settings")
+        settings = config["source_simulation"]
+        bindings = [(engine.__file__, metadata.get("simulator_code_sha256")),
+                    (settings["model_path"], metadata.get("model_sha256")),
+                    (settings["return_model_path"], metadata.get("return_model_sha256")),
+                    (settings["coupon_response_model_path"], metadata.get("coupon_model_sha256")),
+                    (settings["visit_timing_model_path"], (metadata.get("visit_timing") or {}).get("model_sha256")),
+                    (settings["reward_gmm_model_path"], (metadata.get("reward_gmm") or {}).get("model_sha256")),
+                    (settings["review_model_path"], metadata.get("event_models", {}).get("review", {}).get("model_sha256")),
+                    (config["toy"]["message_model_path"], metadata.get("marketing_proxy_sha256"))]
+        runtime_root = Path(engine.__file__).parents[1]
+        runtime = metadata.get("runtime_code_sha256", {})
+        for name, digest in runtime.items():
+            path = next((runtime_root / domain / f"{name}.py" for domain in ("simulator", "irl", "")
+                         if (runtime_root / domain / f"{name}.py").is_file()), None)
+            bindings.append((path, digest))
+        if (metadata.get("configuration_sha256") != hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
+                or not runtime or any(path is None or not Path(path).is_file()
+                    or hashlib.sha256(Path(path).read_bytes()).hexdigest() != digest for path, digest in bindings)):
+            raise ValueError("Existing experiment generator inputs changed; choose a new experiment output")
         treatments = pd.read_parquet(out / "dataset" / "treatments.parquet")
         actions, probabilities, design = assign_coupons(treatments.customer_id, assignment, seed=seed,
                                                       legacy=treatments.treatment.to_numpy())
@@ -62,8 +83,8 @@ def generate_dataset(output, customers=20000, months=None, seed=42, start_at=Non
         print("Reusing immutable dataset", metadata["dataset_id"], flush=True)
         return out
     started = time.monotonic()
-    result = EcommerceSimulator(config).generate(n_customers=customers, months=months, weeks=weeks, seed=seed,
-                                               coupon_assignment=assignment)
+    result = engine.EcommerceSimulator(config).generate(n_customers=customers, months=months, weeks=weeks, seed=seed,
+                                                      coupon_assignment=assignment)
     result.save(out / "dataset")
     generated_at = time.monotonic()
     materialize_features(out / "dataset", out / "features")
@@ -125,6 +146,8 @@ def train_peer_models(feature_dir, raw_dir, output):
             predict_for_strategy(cached, feature_dir, allow_training_customers=True)
             return {"uplift": cached,
                     "clv_dir": out / "clv", "clv_registry": registry}
+    if any(out.iterdir()):
+        raise ValueError("Existing peer output cannot be reused for this dataset; choose a new experiment output")
     fit, selection = train_test_split(data, test_size=.3, stratify=data[schema.TREATMENT], random_state=0)
     models, scores = {}, {}
     for name, cls in (("tlearner", TLearner), ("xlearner", XLearner), ("hlearner", HLearner)):

@@ -59,6 +59,29 @@ def test_28day_view_preserves_raw_policy_and_30day_and_clv_targets():
     assert info["policy_id"] == "coupon_once_30d" and info["observed_churn_rate"] == .5
 
 
+@pytest.mark.parametrize("already_redefined", [False, True])
+def test_outcome_views_preserve_public_completion_identity_without_repeated_suffixes(already_redefined):
+    from simulate.v4.session_observations import completion_digest, completion_exclusions
+    from simulate.v4.simulator.engine import SimulationResult
+    tables, metadata, model = outcome_fixture()
+    contract = {"clock": "ended_at_plus_30min_v1", "censored_session_ids": ["A-past"]}
+    suffix = "-completion-" + completion_digest(contract)
+    metadata["session_completion"] = contract
+    if already_redefined:
+        metadata["parent_dataset_id"] = metadata["dataset_id"]
+        metadata["dataset_id"] += "-30d"
+    metadata["dataset_id"] += suffix
+    original = copy.deepcopy(metadata)
+    view, info = redefine_outcomes(tables, metadata, shopping_model=model)
+    assert info["dataset_id"] == "original30-28d" + suffix
+    assert completion_exclusions(info, tables["sessions"].session_id) == {"A-past"}
+    assert SimulationResult(view, metadata=info).metadata["dataset_id"] == info["dataset_id"]
+    repeated, repeated_info = redefine_outcomes(view, info, shopping_model=model)
+    assert repeated_info["dataset_id"] == info["dataset_id"]
+    assert repeated_info["dataset_id"].count("-completion-") == 1
+    assert metadata == original
+
+
 def test_analytic_28_probability_uses_exact_gap_tail_and_preserves_p30():
     tables, metadata, model = outcome_fixture()
     view, info = redefine_outcomes(tables, metadata, shopping_model=model)

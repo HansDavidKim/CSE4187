@@ -18,7 +18,8 @@ def _select(model, keys):
     return {key: model[key] for key in keys.split()}
 
 
-def export_population(models: Path, output: Path, reward_gmm: Path | None = None, *, return_state: Path | None = None) -> None:
+def export_population(models: Path, output: Path, reward_gmm: Path | None = None, *,
+                      return_state: Path | None = None, checkout_spending: Path | None = None) -> None:
     """Convert fitted v10 assets into model parameters and aggregate calibration."""
     if output.exists():
         raise FileExistsError(output)
@@ -95,6 +96,18 @@ def export_population(models: Path, output: Path, reward_gmm: Path | None = None
     if "domain" in shopping["source"]:
         checkout["source"]["domain"] = shopping["source"]["domain"]
     checkout["population"] = aggregate_population(shopping)
+    if checkout_spending is not None:
+        from .fit_checkout_spending import validate_spending_model
+        spending = json.loads(checkout_spending.read_bytes())
+        validate_spending_model(spending)
+        if spending.get("source", {}).get("model_sha256") != hashlib.sha256(original_shopping_bytes).hexdigest():
+            raise ValueError("population checkout spending must bind its exact source shopping model")
+        cutoff = shopping.get("source_contract", {}).get("training_cutoff_at",
+            shopping.get("source", {}).get("training_cutoff_at", shopping.get("validation", {}).get("cutoff_at_utc")))
+        fit = spending.get("fit", {})
+        if utc_cutoff(fit.get("cutoff_at")) != utc_cutoff(cutoff) or fit.get("seed") != shopping.get("seed"):
+            raise ValueError("population checkout spending must share the source training cutoff and seed")
+        checkout["population"]["checkout_spending"] = {key: value for key, value in spending.items() if key != "source"}
     checkout["latent_shopping"] = latent
     checkout["checkout_kernel"] = _select(shopping["checkout_kernel"], "schema_version type loc scale training_transitions")
     coupon_response = _select(coupon, "schema_version type discount_rate window_days inactivity_days")
@@ -169,5 +182,7 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, required=True, help="new directory for population calibration")
     parser.add_argument("--reward-gmm", type=Path, help="fitted reward GMM to project onto the population assets")
     parser.add_argument("--return-state", type=Path, help="optional private retail return-state sidecar")
+    parser.add_argument("--checkout-spending", type=Path, help="fitted persistent checkout size/price preferences")
     args = parser.parse_args()
-    export_population(args.models, args.output, args.reward_gmm, return_state=args.return_state)
+    export_population(args.models, args.output, args.reward_gmm, return_state=args.return_state,
+                      checkout_spending=args.checkout_spending)

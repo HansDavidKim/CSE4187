@@ -96,9 +96,14 @@ def redefine_outcomes(tables, metadata, outcome_days=28, shopping_model=None, vi
     result = {**tables, "labels": labels}
     new_metadata = copy.deepcopy(metadata)
     parent = metadata.get("parent_dataset_id", metadata["dataset_id"])
+    suffix = ""
+    if metadata.get("session_completion") is not None:
+        from ..session_observations import completion_digest, completion_exclusions
+        completion_exclusions(metadata, tables["sessions"].session_id)
+        suffix = "-completion-" + completion_digest(metadata["session_completion"])
     generation_definition = metadata.get("generation_definition_id", metadata.get("definition_id"))
     new_metadata.update({
-        "dataset_id": f"{parent}-{int(outcome_days)}d", "parent_dataset_id": parent,
+        "dataset_id": f"{parent.removesuffix(suffix)}-{int(outcome_days)}d{suffix}", "parent_dataset_id": parent,
         "generation_definition_id": generation_definition,
         "generation_policy_id": metadata.get("generation_policy_id", metadata.get("policy_id")),
         "generation_target_churn_rate": metadata.get("generation_target_churn_rate", metadata.get("target_churn_rate")),

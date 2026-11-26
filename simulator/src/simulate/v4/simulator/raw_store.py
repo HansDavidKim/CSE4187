@@ -254,6 +254,8 @@ def _validate(tables: dict[str, pd.DataFrame], metadata: dict) -> None:
     if not isinstance(metadata, dict):
         raise ValueError("metadata must be a dictionary")
     version = _schema_version(metadata.get("raw_schema_version", 1))
+    from ..session_observations import completion_exclusions
+    completion_exclusions(metadata, tables["sessions"].session_id)
     for key in ("dataset_id", "currency"):
         if not isinstance(metadata.get(key), str) or not metadata[key].strip():
             raise ValueError(f"metadata.{key} must be explicit")

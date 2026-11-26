@@ -34,8 +34,8 @@ def paired_retention_rollouts(diagnostics: pd.DataFrame, metadata: dict,
         raise ValueError("metadata must be a dictionary")
     if (isinstance(metadata.get("schema_version"), bool) or
             not isinstance(metadata.get("schema_version"), numbers.Integral) or metadata["schema_version"] != 7 or
-            metadata.get("simulator_version") not in {f"source-shopping-v{version}" for version in range(2, 13)}):
-        raise ValueError("paired equation evaluation requires schema 7 and source-shopping-v2 through v12")
+            metadata.get("simulator_version") not in {f"source-shopping-v{version}" for version in (*range(2, 13), 14)}):
+        raise ValueError("paired equation evaluation requires schema 7 and source-shopping-v2 through v12 or v14")
     eligibility_days = experiment_window_days(metadata, "eligibility_window_days")
     experiment_window_days(metadata, "coupon_validity_days")
     horizons = {f"future_no_session_{days}d_active{eligibility_days}d": days for days in (28, GENERATION_WINDOW_DAYS)}

@@ -39,13 +39,17 @@ def test_compiled_catalog_keeps_all_draws_and_reuses_only_deterministic_bounds(f
     assert cloned.home_groups is not env.home_groups
 
 
-def test_population_catalog_profile_stream_copy_reset_and_timing_key(factory,monkeypatch):
+@pytest.mark.parametrize('spending', [None, 'omitted'])
+def test_population_catalog_profile_stream_copy_reset_and_timing_key(factory,monkeypatch,spending):
     monkeypatch.setattr(population_timing,'materialize_visit_timing',lambda value,source:value)
     calls=[]
     def offsets(model,key,entry,prior,rng):
         calls.append((key,entry));return [86400.,8*86400.,15*86400.,22*86400.],'fixture'
     monkeypatch.setattr(main,'sample_session_offsets',offsets)
-    env=factory(edit=population_edit,horizon_days=14)
+    def edit(model):
+        population_edit(model)
+        if spending is None:model['population']['checkout_spending'] = None
+    env=factory(edit=edit,horizon_days=14)
     products=copy.deepcopy(env.product_rows)
     env.reset(7);profile=copy.deepcopy(env.profile);groups=copy.deepcopy(env.home_groups)
     assert calls and all(key=='buyer' for key,_ in calls)
@@ -62,6 +66,26 @@ def test_population_catalog_profile_stream_copy_reset_and_timing_key(factory,mon
     left.advance(0,7);right.advance(0,7)
     pd.testing.assert_frame_equal(left.tables['events'],right.tables['events'])
     assert left.rng.bit_generator.state==right.rng.bit_generator.state
+
+
+def test_population_spending_preference_survives_purchases_and_clone(factory, monkeypatch):
+    from simulate.v4.irl.fit_checkout_spending import TYPE
+    monkeypatch.setattr(population_timing, 'materialize_visit_timing', lambda value, source: value)
+    def edit(model):
+        population_edit(model)
+        model['population']['checkout_spending'] = {'schema_version': 1, 'type': TYPE,
+            'mean': [0., 6.], 'between_covariance': [[.5, 0.], [0., .5]],
+            'within_covariance': [[1., 0.], [0., 1.]]}
+    env = factory(edit=edit, horizon_days=14)
+    env.reset(7)
+    preference = env.profile['checkout_spending_preference'].copy()
+    cloned = copy.deepcopy(env)
+    assert [env._basket() for _ in range(10)] == [cloned._basket() for _ in range(10)]
+    assert env.profile['checkout_spending_preference'] == preference
+    tables = env.tables
+    assert all('checkout_spending_preference' not in tables[name].columns for name in main.RAW_COLUMNS)
+    env.reset(7)
+    assert env.profile['checkout_spending_preference'] == preference
 
 
 def test_fixed_critic_keeps_default_policy_and_only_shifts_purchase_odds(factory):
