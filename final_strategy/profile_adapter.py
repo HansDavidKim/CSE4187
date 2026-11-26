@@ -6,12 +6,12 @@ import numpy as np
 import pandas as pd
 
 from .profile_contract import PolicyCandidate, SegmentationConfig, _duration, _json_value
-from .validation import require
+from .weekly_validation import require
 
 
 def profile_gate(frame, profile):
     require(isinstance(profile, PolicyCandidate), "profile requires a team PolicyCandidate declaration")
-    require(profile.segmentation == SegmentationConfig(), "human profiles require the common development segmentation")
+    require(asdict(profile.segmentation) == asdict(SegmentationConfig()), "human profiles require the common development segmentation")
     require(all(_duration(rule.send_delay, "send_delay") == pd.Timedelta(0) for rule in profile.policies),
             "the single-t0 pipeline does not support delayed profile sends")
     known = frame[["churn_prob", "uplift_score", "clv"]].notna().all(axis=1)

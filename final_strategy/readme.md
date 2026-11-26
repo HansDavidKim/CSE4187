@@ -1,209 +1,442 @@
-# 모델 예측을 연결하는 쿠폰 전략 출력
+# KIT Final Strategy
 
-이 모듈은 기존 Retention·CLV와 외부 Uplift 예측을 같은 고객·같은 기준일에 맞춰 연결한다.
-새 예측 모델이나 생성기의 잠재 반응 유형을 만들지 않는다. 필수 Churn/Uplift/CLV batch 자체가
-없으면 입력 오류로 거절한다. batch가 제공한 미관측·산출 불가 값은 0으로 채우지 않고
-`availability.csv`에 이유를 남기며 해당 고객에게는 발송하지 않는다.
+## 1. 개요
 
-## 입력과 시간 계약
+`final_strategy`는 시뮬레이터 Feature Store와 Churn·Uplift·CLV 예측을 검증하고, 고객 분류 → 리텐션 후보·예상 비용 → 예산 배분 → 예산별 What-if를 수행한다. 모델 학습, 실제 쿠폰 발송, A/B 실험, 실제 ROI 계산은 이 모듈의 실행 범위에 포함하지 않는다.
 
-`load_feature_store(features_dir)`는 기존 체크섬·원장과 공통 `time_spec`의 4/8/13주 정의를 검증한다.
-달력월·30/60/90일 자료를 이 주간 계약으로 조용히 해석하지 않는다. `PredictionBatch`는 frame,
-`PredictionMetadata`와 선택적인 `producer_metadata`를 받는다. 모델 frame은 대상 고객을
-정확히 한 번씩 덮어야 하며 `(dataset_id, customer_id, as_of_at)`과 원장 체크섬·통화·단위를
-바꿀 수 없다. 서울 월요일 00:00 기준이며 `input_cutoff_at == as_of_at`이다.
+현재 공개 코드에는 입력 검증, 두 Prediction Adapter, Segmentation, Retention Strategy, Greedy·MILP·Hybrid, 품질 인증, What-if 및 관련 테스트가 포함된다. 실제 학습 번들 세 개를 연결한 추론과 운영 데이터 전체 흐름은 아직 검증되지 않았다.
 
-| 역할 | 허용 열 | 정답 의미·예측 종료 |
-|---|---|---|
-| churn | `churn_prob` 또는 `churn_probability` | 미래 4주 무방문 확률, `t0 + 4주` |
-| uplift | `p0/p1` 또는 `purchase_probability_no_coupon/coupon` | 미발송/발송 시 4주 내 구매 확률, `t0 + 4주` |
-| clv | `clv` 또는 `predicted_clv_12m` | 미래 52주 할인 후 실결제액, `t0 + 52주` |
-| gross_4w | `predicted_gross_4w_if_purchase` | 4주 내 구매 조건부 할인 전 총매출, `t0 + 4주` |
+| 단계 | 공개 진입점 | 주요 반환값 |
+| --- | --- | --- |
+| 입력 | [inputs.py](inputs.py)의 `load_feature_store()`, `integrate_inputs()` | 검증된 DataFrame, `IntegratedInputs` |
+| 입력 검증 | [validation.py](validation.py)의 `validate_feature_frame()`, `validate_prediction_frame()` | 정규화된 복사본; 위반 시 `InputValidationError` |
+| 고객 분류 | [segmentation.py](segmentation.py)의 `segment_customers()` | `SegmentationResult` |
+| 예측 변환 | [retention_prediction_adapter.py](retention_prediction_adapter.py), [uplift_prediction_adapter.py](uplift_prediction_adapter.py) | 예측 batch·대상 Feature·제외 감사·생산자 메타데이터 |
+| 정책·비용 | [retention_strategy.py](retention_strategy.py)의 `build_retention_strategy()` | `RetentionResult` |
+| 예산 배분 | [budget.py](budget.py)의 `optimize_budget()` | `BudgetComparison` |
+| 품질 인증 | [budget_quality.py](budget_quality.py), [budget_quality_integration.py](budget_quality_integration.py) | 정확한 L/U 및 인증 결과 |
+| 예산 시나리오 | [what_if.py](what_if.py)의 `run_what_if()` | `WhatIfResult` |
 
-`uplift_score`는 항상 `p1 - p0`이다. Retention의 이탈 확률을 구매 `p0/p1`로 바꾸지 않는다.
-52주 CLV를 4주 매출 대신 쓰지 않는다. CLV·Retention이 제공하는 전략 handoff를 그대로
-`PredictionBatch(frame, metadata, producer_metadata)`로 감쌀 수 있다. 모델 버전·대상 정의·기간을
-각 batch에 선언한다. 관측 104주는 과거 52주·미래 52주, 최소 이력 13주, 적격·쿠폰 유효·Uplift
-결과는 4주이며 CLV 입력은 기준일 직전 13주다. 관측 누락을 0매출로 해석하지 않는다.
-CLV의 `policy_condition`이 선언되어 있으면 `control_no_coupon`만 허용한다. 오래된 5항목
-handoff에 그 선언이 없으면 호환은 유지하되 무발송 조건이 검증되었다고 주장하지 않는다.
+## 2. 입력 데이터 계약
 
-## 10개 고객 출력과 6개 업무 세그먼트
+### Feature Store
 
-`customers.csv`의 열은 다음 10개로 고정한다. 출처 키와 상태는 별도 파일에 보존한다.
+현재 시뮬레이터 계약은 KIT39 `kit39-review-cart-v3`, 행동 Feature `behavior_review_cart_v3`이다. Python 패키지 경로는 계속 `simulate.v4`를 사용한다. [시뮬레이터 registry](../simulator/src/simulate/v4/features.py)의 `EXPANDED_FEATURES` 39개와 [storage](../simulator/src/simulate/v4/storage.py)의 `FEATURE_KEYS` 12개를 재사용하며, 여기에서 원시 데이터의 Feature를 다시 계산하지 않는다.
 
-`customer_id, churn_prob, p0, p1, uplift_score, clv, segment, priority_score, send, expected_net_value`
+12개 식별·출처 컬럼은 다음과 같다.
 
-main에는 전략 실행 코드가 없고 `docs/request.md`의 6개 분류 예시만 있다. 따라서 이 구현은
-아래 완전한 업무 규칙을 명시하며, 경계와 발송 허용 그룹은 `DecisionConfig`로 반드시 입력한다.
-데이터에 6개 유형이 모두 나타나도록 강제하지 않는다. Tianchi의 6개 행동 페르소나와도 다르다.
-
-| segment | 규칙 |
-|---|---|
-| newly_observed | 관측 이력이 `new_history_days`보다 짧음. 실제 가입일·잠재 lifecycle을 추측하지 않음 |
-| high_value_persuadable | 신규가 아니며 양의 구매 Uplift·설정한 이탈 위험 이상·고가치 |
-| low_value_persuadable | 위 조건의 저가치 |
-| high_value_sure_thing | 신규가 아니며 구매 Uplift가 0 근처·미발송 구매 확률 높음·고가치 |
-| high_value_no_action | 나머지 고가치 고객 |
-| low_value_no_action | 나머지 저가치 고객 |
-
-Uplift 4유형은 양의 효과 Persuadables, 음의 효과 Sleeping Dogs, 0 근처에서 높은/낮은 `p0`를
-Sure Things/Lost Causes로 구별한다. 이탈 위험은 별도의 업무 대상 필터로만 사용한다.
-Sleeping Dogs는 다른 분류·예산과 관계없이 발송하지 않는다. 이 네 유형은 모델 예측에 대한
-업무적 분류이며 개인의 반사실적 반응 유형을 식별했다는 뜻이 아니다.
-
-## 비용·우선순위·예산
-
-통화와 최소 금액 단위는 명시적으로 일치시킨다. `SOURCE_UNSPECIFIED/0.01`을 KRW로
-바꾸지 않는다. 할인 기대비용은 발송비와 별개인 **발송 1회당 무조건부 기대 할인액**이다.
-설정의 `expected_discount_per_send`로 시나리오 가정을 주거나, 같은 고객·기준일·4주 종료의
-`expected_discount_if_sent` 예측표를 준다. 소매 쿠폰은 최고 단가 품목 1개에 10%를 적용하므로,
-4주 총매출의 10%를 할인비로 임의 대입하지 않는다.
-
-```
-expected_incremental_revenue = (p1 - p0) * predicted_gross_4w_if_purchase
-expected_coupon_cost = send_cost + expected_discount_if_sent
-expected_net_value = expected_incremental_revenue - expected_coupon_cost
-priority_score = max(p1 - p0, 0) * clv
-ROI = (선택 고객의 예상 증분 매출 - 예상 쿠폰 비용) / 예상 쿠폰 비용
+```text
+customer_id, as_of_at, snapshot_id, reference_week, dataset_id,
+currency, amount_unit, raw_database_sha256, source_model_sha256,
+feature_set_version, behavior_feature_set_version, expanded_feature_set_version
 ```
 
-위 매출식은 쿠폰 유무의 구매 조건부 총매출이 같다는 계획 가정이다. 관측된 실제 이익이나
-확인된 쿠폰 인과효과가 아니다. `expected_net_value`는 **발송한다면**의 값이며, 합계는 `send=1`
-고객만 더한다. 발송 허용 그룹 중 양의 순가치 고객을 우선순위 순서로 예산 내 선택하는 그리디
-근사다. 전역 최적해를 주장하지 않는다. 50%·100%·200% 예산에서도 같은 고정 예측을 사용한다.
-비용 0의 ROI는 무한대로 만들지 않고 unavailable이다. 현금이 미관측인 Tianchi의 금전 ROI도
-unavailable이며 구매일수 proxy를 돈으로 바꾸지 않는다.
+- `feature_set_version`은 기본 Feature 집합의 `kit32-v1`, 전체 39개 버전은 `expanded_feature_set_version`으로 구분한다. Feature 이름과 발행 순서는 registry를 기준으로 한다.
+- `customer_id`는 문자열이다. `001`, `NA`를 숫자나 결측으로 바꾸지 않는다. CSV를 별도로 읽는 소비자는 문자열 dtype과 NA 파싱을 명시해야 한다.
+- 결합 키는 `(dataset_id, customer_id, as_of_at)`이다. 시간대가 있는 기준 시각을 UTC로 정규화한다. `reference_week`는 Asia/Seoul 기준 해당 주 월요일의 날짜 문자열이다. 같은 주의 다른 기준 시각을 하나의 snapshot으로 합치지 않는다.
+- `snapshot_id`는 불투명한 식별자다. 문자열 내부를 해석하거나 새로 구성하지 않고 모델과 Feature의 값을 대조한다. 데이터셋·출처 SHA·통화·단위의 혼합과 중복 키를 거절한다.
+- `load_feature_store(path)`는 `feature_store.parquet` 또는 그 디렉터리를 받는다. 함께 발행된 manifest의 버전·컬럼·고객 수·snapshot·출처 정보와 Parquet SHA256을 검사한다. 이 검사는 원시 SQLite를 다시 열어 그 파일의 SHA를 재계산하는 작업과는 다르다.
+- `validate_feature_frame(frame)`은 메모리의 컬럼·버전·값·시점·출처 계약을 검사한다. 정상적인 Feature NULL을 유지한다. 파일 manifest 검증을 대신하지 않는다.
+- 미래 정답·실험 배정·사후 결과·잠재 반응 유형은 입력 Feature가 아니다. 허용 컬럼만 사용하며 `evaluation_only` 입력을 거절한다. 생산자가 Feature를 실제로 과거 정보만으로 만들었는지까지 소비자 검증만으로 증명하지는 못한다.
 
-## 실제 전략 평가와 그래프
+### 모델별 예측
 
-실제 `strategy_group`과 4주 관측 결과를 `strategy_evaluation`에 넣으면 군별 고객 수·전환율·이탈률·
-고객당 순매출·비용·ROI·A 대비 차이를 반환한다. 통계 추론에는 아래 선언을 검증해야 한다.
+`PredictionMetadata(model_version, target_definition_id, horizon_value, horizon_unit, value_semantics)`는 내부 소비 계약이다. `PredictionBatch(frame, metadata)`의 frame에는 `CONTEXT_COLUMNS` 8개, `input_cutoff_at`, `prediction_end_at`, 해당 모델의 값 컬럼이 필요하다.
 
-- 무작위 군 배정, 모델·전략 사전 동결 시각, 독립 평가용 cohort
-- 모델 개발 고객 `(dataset_id, customer_id)` 목록과 평가 고객의 비중첩
-- 배정 시각과 같은 t0, 완전히 관측한 동일 4주 결과
-- 사전에 정한 A 기준 군·비교 군 목록·주 지표
+| 모델 key | 값 컬럼 | 의미·값 검증 | 현재 Adapter/CLV 계약 |
+| --- | --- | --- | --- |
+| `churn` | `churn_probability` | 유한한 [0, 1], `probability` | Retention Adapter: 향후 28일 무세션 확률 |
+| `uplift` | `uplift_score` | 유한한 [-1, 1], `probability_difference` | Uplift Adapter: 향후 28일 구매 발생의 p1 − p0 |
+| `clv` | `predicted_clv_12m` | 유한한 금액, 권장 `nonnegative_amount` | 반드시 `52, "weeks"`, 종료는 기준 시각 + 364일 |
 
-평가 metadata에는 `strategy_randomized_assignment=true`로 고객 단위 전략군의 무작위 배정을
-별도로 선언하고 `strategy_groups`와 `primary_metric`도 명시한다. 쿠폰 자체가 무작위 배정되었다는
-선언만으로 사후 선택한 전략군을 RCT로 취급하지 않는다. 목록이나 주 지표 선언이 빠져도
-추론을 제공하지 않는다. 기준 군은 A로 고정한다.
+`predicted_clv_12m`이라는 기존 컬럼명은 호환성을 위해 유지하지만 실제 기간은 **52주(364일)**다. 달력 12개월이나 단위가 days인 364일 선언을 같은 계약으로 허용하지 않으며 값을 비례 환산하지 않는다. CLV의 `amount` 선언은 입력 단계에서 음수를 표현할 수 있지만, Segmentation은 음수 CLV를 거절한다.
 
-이 조건을 만족하지 않으면 관측 요약만 제공하고 인과 ROI·차이의 신뢰구간·p값을 만들지 않는다.
-이항 지표는 큰 표본에서 기존 ITT의 두 비율 Z 검정을 사용하고 작은 기대빈도는 Fisher 정확 검정으로
-처리한다. 95% 차이 구간은 Wilson 구간의 Newcombe 결합, 금액 지표는 Welch 구간·검정이다.
-미리 선언한 모든 비-A 군의 주 지표 비교를 한 family로 두고 Holm 보정한다. 관측치가 없는 군도
-비교 family에서 빼서 보정을 완화하지 않는다. ROI는 A와의 평균 `(gross-discount-send)` 차이를
-평균 `(discount+send)` 비용 차이로 나누며 양의 증분 비용이 없으면 계산하지 않는다.
-실제 금액 입력은 할인 전 `gross_revenue_minor`, 할인액 `discount_minor`, 발송비
-`send_cost_minor`를 별도로 요구한다. main과 동일하게 `paid_revenue_minor`/`paid_minor`/
-`net_revenue_minor`를 함께 주면 `gross-discount`, `net_after_marketing_minor`를 주면
-`gross-discount-send`와 일치해야 한다. 전략 요약의 `net_revenue_per_customer`는 마케팅비까지
-차감한 고객당 순가치다.
-실결제액·순매출을 gross로 alias하지 않는다. 예를 들어 A의 gross 80·비용 0과 B의 gross 100·
-paid 90·할인 10·발송비 1이면 증분 gross 20, 비용 11, 증분 순가치 9, ROI는 `9/11`이다.
+`input_cutoff_at <= as_of_at`이어야 하고, `prediction_end_at`은 명시한 기간과 일치해야 한다. cutoff는 추론 입력의 관측 상한이며 학습 시점을 뜻하지 않는다. 세 모델의 목표와 기간은 각각 보존한다. Uplift와 Churn을 같은 결과 변수로 취급하지 않는다.
 
-Qini는 독립 평가의 실제 4주 구매·무작위 배정·알려진 propensity의 IPW 누적 구매 증가로 그린다.
-모델별 곡선과 `fraction * 전체 IPW 효과`의 Random targeting 기준선을 함께 준다. 이것은 RL의
-무작위 발송 정책과 다른 평가 기준선이다. 동점 score block 말미만 곡선에 넣으며 수치 동점은
-소수 12자리로 구별한다. 상수 점수 모델의 Qini 면적은 0이며 입력 행 순서로 성능을 만들지 않는다.
+`currency`, `amount_unit`을 Feature·예측·비용·예산 사이에 보존한다. 원천 minor 단위의 수치에 단위를 다시 곱하거나 금액을 자동 환산하지 않는다. 예를 들어 `amount_unit="0.01"`인 자료의 비용 100은 그 자료의 금액 단위 100개다. `SOURCE_UNSPECIFIED`를 KRW 등 특정 통화로 해석하지 않는다.
 
-`write_outputs`는 아래 6개 그래프를 PNG/PDF 및 CSV 데이터로 함께 저장한다. 필요한 실제 자료가
-없으면 수치 0의 가짜 곡선 대신 unavailable 이유를 표시한다.
+`integrate_inputs(features, predictions)`는 `churn`, `uplift`, `clv`의 `PredictionBatch`를 모두 요구한다. 각 batch는 같은 고객·시각 모집단을 정확히 덮어야 한다. 누락 예측을 0으로 채우거나 고객 교집합을 조용히 취하지 않는다. 반환 `IntegratedInputs`에는 `data`, 모델별 `prediction_metadata`, `prediction_context`가 들어간다.
 
-1. 이탈 위험 분포
-2. Uplift 4유형 산점도(x=p0, y=p1-p0)
-3. 6개 업무 세그먼트(x=Uplift, y=52주 CLV, 색=이탈 위험)
-4. 모델별 Qini·Random targeting 기준선
-5. 예산 50%·100%·200% ROI
-6. 실제 전략군별 주 지표와 95% 구간
+## 3. Segmentation
 
-## 실행
+`segment_customers(inputs, config=None, eligibility=None)`는 검증된 `IntegratedInputs`를 다시 검사한다. `SegmentationConfig()`의 개발용 기본값은 Churn 0.5, Uplift 0.0, CLV 상위 비율 0.2다. 검증된 사업 정책을 뜻하지 않는다.
 
-### 팀 브랜치의 human profile 연결
+| 축 | 분류 |
+| --- | --- |
+| Churn | 임계값 이상 `high`, 미만 `low` |
+| Uplift | 음수 `negative`, 0 이상 임계값 이하 `neutral_low`, 임계값 초과 `positive` |
+| CLV | 상위 `high_value`, 나머지 `standard_value` |
 
-`origin/feat/final_strategy`의 `11a1fcd`가 정의한
-`strategy_profiles.build_strategy_profiles`와 선언 dataclass·구성 지문을 재사용한다.
-`profiles.policies`에는 P0/H0/H1/H2/H3/H4-R/H4-V가 들어가며 P0와 H0는 행동 지문이 같다.
-임계값·버전·출처는 호출자가 명시해야 한다. 검증된 효과나 자동 발송 권한을 뜻하지 않는다.
+각 `(dataset_id, as_of_at)`의 분석 적격 고객은 2×3×2 = 12개 segment에 중복 없이 속한다. CLV 상위 고객 수는 `ceil(N * high_clv_fraction)`이며 CLV 내림차순, 고객 ID 문자열 오름차순으로 결정한다. 작은 모집단에서는 실제 비율이 정확히 20%가 아닐 수 있다.
 
-| profile | 엄격한 구매 Uplift 진입 기준 |
-|---|---|
-| P0, H0 | 0 초과 |
-| H1 | 공통 기준 초과 |
-| H2 | 고위험은 `risk_high`, 저위험은 `risk_low` 초과 |
-| H3 | 고가치는 `high_value`, 나머지는 `standard_value` 초과 |
-| H4-R | 고위험/고가치, 고위험/일반, 저위험/고가치, 저위험/일반에 a/b/c/d |
-| H4-V | 같은 순서에 a/c/b/d |
+`priority_score = uplift_score * predicted_clv_12m`이다. 점수 내림차순과 고객 ID 오름차순으로 고객별 순차 순위를 정한다. 음수·0 점수도 분류 결과에 남는다. 서로 다른 예측 기간의 값으로 만든 **전략 우선순위 대리지표**이며 실제 증분 매출·이익·ROI가 아니다.
 
-팀 선언의 내부 분류는 이탈확률0.5 이상과 CLV 상위 `ceil(20%×고객 수)`를 사용한다.
-동점 CLV는 고객 ID로 정렬한다. 완전한 예측이 있는 원래 cohort에서 한 번 계산하며
-profile별 후보·예산에 따라 순위를 다시 매기지 않는다. 이12개 내부 분류는 최종6개 업무
-세그먼트와 별개다. `build_decisions(..., profile=profile)`은 기존 업무 대상·금액·예산 조건에
-해당 profile의 gate를 추가한다. 따라서 효과 비교는 같은 입력·비용·설정으로 해야 한다.
+명시적 `eligibility`를 주면 전체 키에 대한 `eligible`과 `exclusion_reason`이 필요하다. 모델값 누락을 정상적인 제외 사유로 대체하지 않는다. `SegmentationResult`는 `customers`, `excluded`, `summary`, `metadata`를 제공한다. summary는 빈 segment도 포함한 12개 구간의 고객 수·비율, 평균 예측값·점수, 점수 합계를 담는다.
+
+`export_segments(result, csv_path)`는 고객 CSV와 같은 stem의 `_summary.csv`, `_excluded.csv`, `_metadata.json`을 기록하며 기존 파일을 덮어쓰지 않는다. `plot_segments(result, dataset_id, as_of_at)`는 선택한 cohort의 Figure를 반환한다.
+
+## 4. Prediction Adapter
+
+### Retention
+
+`adapt_retention_predictions(predictions, features, *, expected_policy_condition="observed_experiment_mix")`는 Retention 공개 API 형태의 DataFrame을 받는다. 모델 패키지나 학습 라이브러리를 import하지 않는다.
+
+- `target="visit"`, `definition_id="future_no_session_28d_active28d"`, `horizon_days=28`을 검증한다.
+- `status="scored"`만 정상 확률로 변환한다. `not_signed_up_at_cutoff`, `no_recent_session`은 원래 NULL 확률과 사유를 `excluded` 감사 DataFrame에 보존한다.
+- Feature와 모든 입력 고객, dataset·snapshot·UTC 기준 시각·raw SHA·Feature 버전·통화·단위를 대조한다. snapshot 불일치를 보정하지 않는다.
+- `RetentionPredictionResult`는 `features`, `batch`, `excluded`, `producer_metadata`, 입력·예측·제외 고객 수를 제공한다. 전원 제외 시 `batch=None`이므로 입력 통합을 호출하지 않는다. 빈 원본 입력은 거절한다.
+- 정책 조건은 생산자 메타데이터에 보존한다. `observed_experiment_mix`는 무쿠폰 조건의 이탈 확률이 아니다. 다른 조건은 호출자의 명시적 기대값과 일치해야 한다.
+
+### Uplift
+
+`adapt_uplift_predictions(model, features, metadata, *, input_cutoff_at, eligibility=None)`는 호출자가 제공한 `model.predict(X)`를 사용한다. 실제 모델 파일을 찾거나 다른 브랜치 코드를 복사하지 않는다.
+
+`UpliftModelMetadata`에는 모델 버전, `feature_names`, 목표 정의, `target`, 기간, Treatment·Control, 정책 조건, 학습 출처 버전, Feature 버전, 통화·단위를 명시한다. `model_artifact_sha256`은 선택 사항이다. 이는 선언 검증이며 학습 자료나 실제 번들의 진위를 증명하지 않는다.
+
+모델에는 KIT39 중 F25~F27 쿠폰 이력 Feature를 제외한 정확한 36개 `UPLIFT_FEATURES`를 정해진 순서로 전달한다. 고객 식별자·Treatment·미래 Y는 전달하지 않는다. 정상 NULL을 보존하고 고유한 index로 고객 대응을 검증한다. 반환 index의 초기화·재정렬·누락·중복과 입력 변조를 거절한다.
+
+반환 컬럼은 순서대로 `p0`, `p1`, `uplift_score`다. 유한한 확률과 `uplift_score = p1 - p0`를 검사하며, 차이 계산에는 코드의 기계정밀도 수준 오차만 허용한다. 음수 Uplift를 자르거나 잘못된 값을 보정하지 않는다. 정의는 `purchase_occurrence`, 28일, `coupon_assignment` 대 `no_coupon_assignment`이다. 쿠폰 사용 확률이나 CLV 증가액이 아니다.
+
+`UpliftPredictionResult`도 batch·대상 Feature·제외 감사·생산자 메타데이터를 반환한다. 제외는 명시적 eligibility로만 결정한다. 예측 누락은 오류다. 두 Adapter의 `producer_metadata`와 `excluded`는 별도로 보존해야 한다. `PredictionMetadata`에 없는 정책·학습 출처가 `integrate_inputs()`로 자동 전달되지는 않는다. 모델별 적격 모집단이 다르면 감사 정보를 유지하면서 사용할 모집단을 명시적으로 합의해야 한다.
+
+## 5. Retention Strategy
+
+`build_retention_strategy(segmentation, eligibility, coupons, redemptions, cost_inputs, cost_metadata, *, dataset_id, as_of_at, currency, amount_unit, history_context, history_policy, policies=None)`는 한 cohort를 평가한다. 원래 segment·점수·순위와 제외 고객을 보존한다.
+
+- `SegmentPolicy`와 `default_segment_policies()`는 12개 segment를 지원한다. 기본 개발 정책은 엄격한 양수 Uplift 후보 중심이며 실제 사업 효과를 확정하지 않는다.
+- `HistoryPolicy`의 미사용 쿠폰 차단, 기존 사용 고객 차단, 최소 재발송 간격은 호출자가 명시한다. `HistoryContext`는 dataset·raw SHA, 관측 종료 시각, 출처·버전·인지 시각을 선언한다. 이력이 없다는 것과 완전한 빈 이력이 확인됐다는 것은 다르다.
+- eligibility는 `CONTEXT_COLUMNS`와 `business_eligible`, `business_reason`, `history_complete`를 사용한다. 이력이 불충분하면 설정에 따라 unknown/exclude/error로 처리한다.
+- 현재 시뮬레이터 기본 적격 기간과 쿠폰 유효기간은 28일이다. 과거 Feature의 30일 집계 창과 구분한다. 이력의 쿠폰 만료·사용·중복·고객 연결을 검사하고 기준 시각 전에 관측 가능한 기록을 사용한다.
+- `planned_sent_at`은 `decision_at + send_delay`인 계획 시각이다. 실제 `sent_at`이 아니다. 지연 발송은 적격성 재검증이 필요하다고 표시한다.
+
+비용 입력은 후보별로 다음 식에 필요한 값을 명시한다.
+
+```text
+expected_cost = send_cost + redemption_probability * expected_discount_if_redeemed
+```
+
+`cost_inputs`에는 `CONTEXT_COLUMNS`, 위 세 값, `source_id`, `source_version`, `source_as_of_at`이 필요하다. 비용은 정확한 Decimal 연산으로 계산하며 임의의 사용률·평균 할인액·0 비용으로 대체하지 않는다. Uplift를 사용 확률로 변환하지 않는다. `CostMetadata(definition_id, version, decimal_places, as_of_at)`에 비용 정의·정밀도·버전을 선언한다.
+
+`RetentionResult`의 `evaluation`과 `cost_estimates`는 감사·계산 결과다. Budget에는 `budget_inputs`, `costs`, `cost_metadata`를 전달한다. 정책 후보는 최종 발송 대상과 다르다.
+
+`audit_observed_coupon_order(items, *, purchase_at, as_of_at, actual_discount_minor, actual_paid_minor)`는 과거 주문의 최고 단가 품목 한 unit에 10% 할인하는 회계를 검사한다. 동률이면 line 번호로 결정하고 minor 단위 반올림 규칙을 적용한다. `paid_minor`는 이미 할인 후 결제액이므로 할인액을 다시 차감하지 않는다. 실제 할인 감사와 미래 예상 비용은 별개다.
+
+## 6. Budget Optimization와 Hybrid
+
+`optimize_budget(segmentation, costs, budget, cost_metadata, *, dataset_id, as_of_at, config=None, algorithm="both", hybrid_config=None)`는 `Budget(amount, currency, amount_unit)` 안에서 이진 선정값을 구한다.
+
+```text
+maximize sum(priority_score[i] * selected[i])
+subject to sum(expected_cost[i] * selected[i]) <= budget
+selected[i] in {0, 1}
+```
+
+Budget 비용표의 필수 `COST_COLUMNS`는 `dataset_id`, `customer_id`, `as_of_at`, `snapshot_id`, `raw_database_sha256`, `currency`, `amount_unit`, `expected_cost`다. 단위·출처·snapshot·고객 집합을 검증하며 비용은 외부 명시값이다. 누락·중복·음수·비유한 비용과 음수 예산을 거절한다. 비용 정밀도는 최대 9자리다. Decimal → 정수 tick → 양수 활성 비용의 GCD 축소를 사용하고, 예산 우변은 정수 나눗셈으로 내린다. 이 변환은 이진 실행 가능 집합을 보존한다. 최종 비용은 원래 Decimal 값으로 재합산하고 예산 초과 해를 거절한다. 지원 계수 범위 밖의 입력도 거절한다.
+
+| algorithm | 동작·해석 |
+| --- | --- |
+| `greedy` | 양수 점수·0 비용은 선정, 비양수 점수는 제외. 점수/비용 내림차순, 점수 내림차순, ID 오름차순. 예산에 안 들어가는 고객은 건너뛴다. 전역 최적성 보장 없음 |
+| `milp` | SciPy `milp()` / HiGHS. 이진성·최종 Decimal 비용 검증 후 결과 반환 |
+| `both` (기본) | 같은 준비 입력으로 Greedy를 먼저 보존한 뒤 MILP 실행·비교. 실패한 MILP를 Greedy로 위장하지 않음 |
+| `hybrid` | Greedy → 정확한 인증 → 필요 시 제한된 Local Improvement → 재인증 → 명시된 선택적 backend → 최종 검증 |
+
+`SolverConfig` 기본값은 `time_limit=10`, `mip_rel_gap=0`, `binary_tolerance=1e-7`, `allow_unproven=False`, `presolve=True`다. `time_limit`은 전체 Python API의 실행시간 상한이 아니다. Presolve 선택만으로 최적해나 속도를 보장하지 않는다.
+
+`BudgetComparison.results`에는 알고리즘별 `AllocationResult(decisions, summary)`가 들어가며 `comparison`, `metadata`를 함께 제공한다. 유효해 여부, 선정 고객 수·점수 합계·예상 총비용·잔여 예산·예산 준수·실행시간·솔버 상태/gap을 확인한다. MILP의 `optimal_numeric`은 수치 솔버 검사 결과이고 `limit_feasible`, `gap_feasible`, `feasible_uncertified`, 해 없음·오류·무효해와 구분한다. 미확정 MILP는 기본적으로 계획 승인되지 않는다. `allow_unproven=True`는 명시적 정책 변경이다.
+
+### 정확한 품질 인증
+
+`prepare_quality_problem()`, `fractional_upper_bound()`, `certify_selection()`은 원래 비용과 실제 이진64 Priority Score를 정확한 Fraction으로 표현한다. 십진수로 반올림한 다른 목적함수로 바꾸지 않는다. L은 실행 가능한 선택의 점수, U는 Fractional Knapsack 완화의 유효 상한이다.
+
+```text
+L <= OPT <= U
+(U - L) / U <= epsilon  =>  L >= (1 - epsilon) * OPT
+```
+
+U가 0인 경우는 코드의 별도 0 오차 처리에 따른다. 이 인증은 해당 입력의 대리 점수 품질 보장이며 실제 사업 성과 보장이나 모든 입력에 대한 시간 보장이 아니다. L=U일 때만 정확한 최적성 증명이 된다. 수치 솔버의 primal/dual bound·MIP gap과 이 정확한 인증을 혼동하지 않는다.
+
+`HybridConfig()` 기본 epsilon은 `"0.0001"`(0.01%), Local Improvement는 pool 32·최대 2 pass·탐색 0.5초, `backend=None`이다. 개선은 제한된 1:1·1:2 교환이며 최적해를 보장하지 않는다. 결과 상태는 `proven_optimal`, `epsilon_certified`, `feasible_uncertified`, `unavailable`로 구분한다. `metadata["hybrid"]`에 인증, 선정 출처, 개선량, 시도·시간과 선택적 솔버 진단을 남긴다.
+
+Hybrid의 `accepted_for_planning`은 인증 성공과 무관하게 **False**다. Greedy 기준선의 승인 필드나 MILP 수치 승인도 실제 쿠폰 발송 권한을 뜻하지 않는다.
+
+선택적 `HybridConfig(backend="highspy")`는 인증 미달일 때만 추가 솔버를 사용한다. 현재 실행기는 Windows Job Object를 이용한다. 부모 프로세스가 검증된 최상 해를 보존하고, 자식의 순서 fingerprint·이진성·정확한 비용·점수를 다시 검사한다. 낮거나 동점인 해, timeout·crash·무효 응답은 기존 해를 대체하지 않는다. 초기해 제출과 실제 수락은 구분해 기록한다. 외부 timeout도 준비·인증·정리 전체를 포함한 API 상한은 아니다.
+
+## 7. What-if와 사후 Budget Quality
+
+`run_what_if(segmentation, costs, base_budget, cost_metadata, *, dataset_id, as_of_at, config=None, algorithm="both", scenarios=None, hybrid_config=None, backend_time_budget=None)`는 같은 입력 모집단·점수·비용을 고정하고 예산만 변경한다. 기본은 `budget_050`, `budget_100`, `budget_200`(50%·100%·200%)이며 각 시나리오는 독립적으로 배분·예산 검증·Hybrid 인증한다. 기존 정책 후보나 점수를 다시 계산하지 않는다.
+
+`WhatIfResult`는 `summary`, `decisions`, `comparisons`, `metadata`, 시나리오별 `results`를 제공한다. 추가 backend 시간 예산은 전체 What-if API의 wall-clock 제한과 다르다. 인증 실패와 솔버 실패, 유효해와 계획 승인 여부를 별도로 해석한다.
+
+`export_what_if(result, output_dir)`는 요약 CSV·고객별 CSV·메타데이터 JSON을 기록하며 기존 출력을 덮어쓰지 않는다. `plot_what_if(result)`는 Figure를 반환한다. 금액·정확한 분수·시각의 JSON 표현과 CSV의 ID 문자열을 읽는 소비자는 출력 스키마를 보존해야 한다.
+
+`certify_budget_result(segmentation, costs, budget, cost_metadata, comparison, *, dataset_id, as_of_at, epsilon="0.0001")`는 기존 결과의 **Greedy** 선택을 원래 입력과 대조해 사후 인증한다. `certify_what_if_result(..., result, ...)`는 이를 시나리오별로 수행한다. Greedy 결과가 없는 MILP-only 또는 Hybrid-only 결과를 임의로 대체 인증하지 않는다. 원래 비교 결과나 승인 상태도 변경하지 않는다. Hybrid 자체의 인증은 해당 결과 메타데이터에서 읽는다.
+
+## 8. 실행 가능한 합성 데이터 예시
+
+저장소 루트에서 아래 Python 블록을 **순서대로 같은 프로세스**에서 실행한다. `PYTHONPATH`에 `simulator/src`가 필요하다. 모델 파일과 테스트 fixture를 import하지 않는다. 모든 예측·학습 출처·비용·완전한 빈 이력은 예제용 선언이다. 실제 Feature Store는 `load_feature_store(path)`로 읽어야 하며, 아래 메모리 자료는 manifest/Parquet 검증 사례가 아니다.
+
+### 입력과 Adapter → Segmentation
 
 ```python
-from final_strategy import build_strategy_profiles, build_decisions
-profiles = build_strategy_profiles(**declared_profile_thresholds)
-profile = next(p for p in profiles.policies if p.policy_id == "H4-R")
-result = build_decisions(features, predictions, config, profile=profile)
+from decimal import Decimal
+from pathlib import Path
+from uuid import uuid4
+import numpy as np
+import pandas as pd
+from simulate.v4.features import EXPANDED_FEATURES
+from final_strategy.inputs import PredictionBatch, integrate_inputs
+from final_strategy.validation import CONTEXT_COLUMNS, PredictionMetadata
+from final_strategy.retention_prediction_adapter import adapt_retention_predictions
+from final_strategy.uplift_prediction_adapter import (
+    UPLIFT_FEATURES, UpliftModelMetadata, adapt_uplift_predictions,
+)
+from final_strategy.segmentation import segment_customers, export_segments, plot_segments
+
+t0 = pd.Timestamp("2024-03-03T15:00:00Z")
+rows = []
+for customer in ("001", "NA", "003", "004"):
+    row = dict.fromkeys(EXPANDED_FEATURES, 0.0)
+    row.update(customer_id=customer, dataset_id="readme-dummy", as_of_at=t0,
+               reference_week="2024-03-04", snapshot_id=f"dummy-opaque::{customer}",
+               currency="SOURCE_UNSPECIFIED", amount_unit="0.01",
+               raw_database_sha256="a" * 64, source_model_sha256="b" * 64,
+               feature_set_version="kit32-v1",
+               behavior_feature_set_version="behavior_review_cart_v3",
+               expanded_feature_set_version="kit39-review-cart-v3")
+    row["mean_net_order_value_30d"] = np.nan
+    rows.append(row)
+features = pd.DataFrame(rows)
+
+predictions = features[["customer_id", "dataset_id", "snapshot_id", "as_of_at",
+                        "raw_database_sha256", "currency", "amount_unit",
+                        "expanded_feature_set_version"]].copy()
+predictions = predictions.assign(
+    churn_probability=[0.8, 0.2, 0.7, np.nan],
+    status=["scored", "scored", "scored", "no_recent_session"],
+    model_version="dummy-retention-v1", target="visit", horizon_days=28,
+    definition_id="future_no_session_28d_active28d",
+    policy_condition="observed_experiment_mix",
+)
+retention = adapt_retention_predictions(predictions, features)
+assert retention.scored_customer_count + retention.unscored_customer_count == 4
+assert retention.batch is not None
+
+class DummyUpliftModel:
+    def predict(self, X):
+        # Three scored customers, in the exact input order; no trained model.
+        p0 = np.array([0.2, 0.5, 0.4])
+        p1 = np.array([0.4, 0.45, 0.4])
+        return pd.DataFrame({"p0": p0, "p1": p1, "uplift_score": p1 - p0},
+                            index=X.index.copy())
+
+declaration = UpliftModelMetadata(
+    model_version="dummy-uplift-v1", feature_names=UPLIFT_FEATURES,
+    target_definition_id="dummy_purchase_28d_coupon_assignment",
+    target="purchase_occurrence", horizon_days=28,
+    treatment="coupon_assignment", control="no_coupon_assignment",
+    policy_condition="dummy_10pct_coupon_assignment_vs_no_assignment",
+    training_source_version="dummy-no-training", feature_set_version="kit39-review-cart-v3",
+    currency="SOURCE_UNSPECIFIED", amount_unit="0.01",
+)
+uplift = adapt_uplift_predictions(DummyUpliftModel(), retention.features, declaration,
+                                  input_cutoff_at=t0)
+clv = uplift.features[list(CONTEXT_COLUMNS)].copy()
+clv["input_cutoff_at"] = t0
+clv["prediction_end_at"] = t0 + pd.Timedelta(weeks=52)
+clv["predicted_clv_12m"] = [100.0, 200.0, 50.0]
+inputs = integrate_inputs(uplift.features, {
+    "churn": retention.batch, "uplift": uplift.batch,
+    "clv": PredictionBatch(clv, PredictionMetadata(
+        "dummy-clv-v1", "dummy_future_paid_52w", 52, "weeks", "nonnegative_amount")),
+})
+segments = segment_customers(inputs)
+audit = {"retention_excluded": retention.excluded, "uplift_excluded": uplift.excluded,
+         "retention_producer": retention.producer_metadata,
+         "uplift_producer": uplift.producer_metadata}
+assert len(segments.customers) == 3 and len(audit["retention_excluded"]) == 1
+assert segments.summary.customer_count.sum() == 3
 ```
 
-CLI에서는 `--profile-declarations profiles.json --profile H4-R`을 함께 지정한다.
-JSON 키는 `version`, `threshold_source`, `common`, `risk_high`, `risk_low`, `high_value`,
-`standard_value`, `h4_r`이며 마지막 값은 a/b/c/d 객체다. 선언·지문은 metadata에,
-고객별 내부 분류·gate는 `graph_data/human_profile.csv`에 저장한다.
-
-기존 `PredictionBatch(frame, metadata, producer_metadata)`와 DataFrame을 반환하는
-`integrate_inputs` 계약은 유지한다. 원격의 score 단독 `IntegratedInputs`·solver/search API는
-이 어댑터의 입력이 아니다. 예측 기간·출처가 검증된 구매 p0/p1을 제공해야 하며,
-이탈확률이나 uplift score만으로 구매확률을 만들지 않는다. 팀 선언에 필요한 타입만
-`profile_contract`에 두며, 새 학습기·solver를 실행하지 않는다.
+### 명시적 후보·비용 → Budget·What-if
 
 ```python
-from final_strategy import PredictionBatch, DecisionConfig, load_feature_store, build_decisions, write_outputs
+from final_strategy.retention_strategy import (
+    COUPON_COLUMNS, REDEMPTION_COLUMNS, HistoryContext, HistoryPolicy,
+    build_retention_strategy,
+)
+from final_strategy.budget import Budget, CostMetadata, optimize_budget
+from final_strategy.hybrid import HybridConfig
+from final_strategy.what_if import run_what_if, export_what_if, plot_what_if
+from final_strategy.budget_quality_integration import (
+    certify_budget_result, certify_what_if_result,
+)
 
-features = load_feature_store("DATA/features")
-predictions = {
-    "churn": PredictionBatch(retention.frame, retention.metadata, retention.producer_metadata),
-    "clv": PredictionBatch(clv.frame, clv.metadata, clv.producer_metadata),
-    "uplift": PredictionBatch(purchase.frame, purchase.metadata, purchase.producer_metadata),
-    "gross_4w": PredictionBatch(clv.gross_4w, clv.gross_4w_metadata, clv.producer_metadata),
-}
-# 경계값·발송비·기대 할인액은 사업에서 사전에 정한 명시적 설정이다.
-config = DecisionConfig(**CONFIG)
-result = build_decisions(features, predictions, config)
-write_outputs(result, "NEW_OUTPUT", qini=held_out_qini, strategy=held_out_strategy)
+eligible = segments.customers[list(CONTEXT_COLUMNS)].copy()
+eligible = eligible.assign(business_eligible=True, business_reason=None, history_complete=True)
+# Only this synthetic example declares a complete, empty coupon history.
+coupons = pd.DataFrame(columns=COUPON_COLUMNS)
+redemptions = pd.DataFrame(columns=REDEMPTION_COLUMNS)
+declared_costs = segments.customers.loc[
+    segments.customers.uplift_score.gt(0), list(CONTEXT_COLUMNS)
+].copy()
+declared_costs = declared_costs.assign(
+    send_cost="2", redemption_probability="0.25", expected_discount_if_redeemed="10",
+    source_id="dummy-cost", source_version="v1", source_as_of_at=t0,
+)
+cost_metadata = CostMetadata("dummy-send-plus-redemption", "v1", 3, t0)
+strategy = build_retention_strategy(
+    segments, eligible, coupons, redemptions, declared_costs, cost_metadata,
+    dataset_id="readme-dummy", as_of_at=t0, currency="SOURCE_UNSPECIFIED", amount_unit="0.01",
+    history_context=HistoryContext("readme-dummy", "a" * 64, t0, "dummy-history", "v1", t0),
+    history_policy=HistoryPolicy(False, False, pd.Timedelta(0)),
+)
+assert strategy.costs.expected_cost.tolist() == [Decimal("4.50")]
+budget = Budget(Decimal("10"), "SOURCE_UNSPECIFIED", "0.01")
+args = (strategy.budget_inputs, strategy.costs, budget, strategy.cost_metadata)
+context = dict(dataset_id="readme-dummy", as_of_at=t0)
+comparison = optimize_budget(*args, **context, algorithm="both")
+hybrid = optimize_budget(*args, **context, algorithm="hybrid", hybrid_config=HybridConfig())
+scenarios = run_what_if(*args, **context, algorithm="both")
+certificate = certify_budget_result(*args, comparison, **context)
+scenario_certificates = certify_what_if_result(*args, scenarios, **context)
+for allocation in [*comparison.results.values(), *hybrid.results.values()]:
+    assert allocation.summary["has_valid_solution"]
+    assert allocation.summary["total_expected_cost"] <= budget.amount
+assert not hybrid.results["hybrid"].summary["accepted_for_planning"]
+
+output = Path(".venv/verification") / ("readme-example-" + uuid4().hex)
+export_segments(segments, output / "segments_6plus.csv")
+export_what_if(scenarios, output / "what_if")
+plot_segments(segments, **context).savefig(output / "segments.png")
+plot_what_if(scenarios).savefig(output / "what_if.png")
+print(comparison.comparison)
+print(scenarios.summary)
+print("Synthetic outputs:", output.resolve())
 ```
 
-없는 `gross_4w` batch는 dict에서 빼면 된다. 예산 계산은 unavailable이고 다른 예측은 유지된다.
-CLI는 기존 모델 파일을 새로 학습하지 않고 파일 handoff를 결합한다.
+이 예시는 scored 모집단만의 통합을 보여준다. 제외 고객의 최종 마케팅 정책을 확정하지 않으며, 감사 정보를 버리지 않는다. 실제 데이터에서는 비용 근거, 모델별 모집단, 정책 조건과 학습·추론 출처를 먼저 확보해야 한다.
 
-```sh
-PYTHONPATH=simulator/src:. python -m final_strategy --features DATA/features \
-  --predictions prediction_batches.json --config decision_config.json --output NEW_OUTPUT
-PYTHONPATH=simulator/src:. python -m pytest -q final_strategy/tests
+## 9. 환경, 테스트 및 검증 범위
+
+[simulator/pyproject.toml](../simulator/pyproject.toml)은 Python >=3.10, NumPy·pandas·SciPy·PyArrow 등을 선언한다. 테스트에 pytest, 시각화에 Matplotlib이 필요하다. 기존 가상환경을 우선 사용한다.
+
+Budget은 `scipy.optimize.milp`를 최상위 import하므로 **SciPy >=1.9**가 필요하다. 시뮬레이터의 선언 하한 `scipy>=1.7.3`만으로는 충분하지 않다. Greedy만 호출해도 Budget 모듈 import에 이 조건이 적용된다. 실제 확인 환경은 Python 3.12.10, SciPy 1.18.1이다.
+
+[requirements-highspy.txt](requirements-highspy.txt)의 `highspy==1.16.0`은 선택적 Windows backend용이다. 기본 Greedy·SciPy MILP·backend 없는 Hybrid에는 설치할 필요가 없다. highspy 자체의 지원 OS와 이 모듈의 Windows 전용 외부 실행기를 구분한다. Linux 등에서 기본 코드 import와 선택적 backend 실행 지원은 별개이며 현재 검증 기록은 Windows 기준이다.
+
+저장소 루트의 PowerShell에서 실행한다. 고유한 pytest 임시 경로와 Matplotlib 설정 경로를 사용하고 로그·JUnit·durations를 남긴다. publisher 테스트를 제외하지 않는다.
+
+```powershell
+$python = (Resolve-Path '.venv/Scripts/python.exe').Path
+$env:PYTHONPATH = (Resolve-Path 'simulator/src').Path
+$env:PYTHONDONTWRITEBYTECODE = '1'
+$run = Join-Path (Resolve-Path '.venv').Path ('verification/final-strategy-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $run | Out-Null
+$env:MPLCONFIGDIR = Join-Path $run 'mplconfig'
+$baseTemp = Join-Path $run 'pytest-temp'
+$junit = Join-Path $run 'results.xml'
+& $python -B -m pytest -c simulator/pyproject.toml final_strategy/tests `
+    --basetemp="$baseTemp" -q -ra -p no:cacheprovider `
+    --durations=20 --junitxml="$junit" 2>&1 |
+    Tee-Object -FilePath (Join-Path $run 'pytest.log')
+if ($LASTEXITCODE -ne 0) { throw "pytest failed: $LASTEXITCODE" }
 ```
 
-`prediction_batches.json`은 역할별 `frame`(CSV/Parquet 경로), `metadata` 5항목,
-선택적 `producer_metadata`를 담는다. 최종 10열과 별개로 `customer_identity.parquet`,
-`availability.csv`, `segment_summary.csv`, `budget_summary.json`, `budget_what_if.csv`,
-`graph_data/`, `graphs/`, 체크섬 `manifest.json`을 저장한다. 기존 출력은 덮어쓰지 않는다.
-다중 모델 Qini는 `--qini-outcomes factual.parquet --qini-predictions qini_batches.json`으로
-지정하며 JSON 키를 역할 대신 모델명으로 둔다. 전략 결과는 `--strategy-outcomes`로 지정하고
-두 평가의 무작위 배정·동결·독립 표본 선언은 `--evaluation-metadata` JSON으로 제공한다.
+테스트 대상에는 입력·Segmentation·두 Adapter·Retention Strategy·Budget·Hybrid·품질 인증·What-if·외부 프로세스 검증이 포함된다.
 
-`decision_config.json`의 작은 계약 검증 예시는 아래와 같다. 금액은 위에 선언한 단위이며
-이 숫자를 실무 임계값·추정 할인 비용으로 채택한다는 의미는 아니다.
+직전 공개 준비의 독립 스냅샷 검증(2026-11-19, Windows, 9차 Commit 대상 코드)은 **850 collected / 845 passed / 5 skipped / 0 failed / 0 errors**, 143.78초였다. publisher 7개는 통과했다. 5 skip은 기본 환경에 highspy가 없어서 건너뛴 선택적 실제 솔버 테스트이며 highspy 실행 성공 기록이 아니다. 31,016 warnings에는 NumPy Timedelta 변환 관련 DeprecationWarning과 pandas dtype 관련 FutureWarning의 반복이 포함된다. 경고를 숨겨서 해결된 것으로 취급하지 않는다.
 
-```json
-{
-  "budget": 60, "send_cost": 10, "expected_discount_per_send": 20,
-  "currency": "SOURCE_UNSPECIFIED", "amount_unit": "0.01",
-  "high_value_threshold": 100, "churn_threshold": 0.5,
-  "uplift_tolerance": 0.05, "baseline_purchase_threshold": 0.5,
-  "new_history_days": 91,
-  "eligible_segments": ["newly_observed", "high_value_persuadable", "low_value_persuadable"]
-}
+위 수치는 기존 실행 기록이며 README를 편집할 때마다 전체 회귀를 재실행했다는 뜻이 아니다. 독립 fixture, 실제 시뮬레이터 publisher, 모의 모델과 솔버 경계 검증을 포함하지만 실제 Retention·Uplift·CLV 학습 모델의 end-to-end 실행은 아니다. 과거 대규모 실험 시간은 호출 경로·설정이 달라 현재 API의 성능 보장으로 기재하지 않는다.
+
+향후 실제 데이터 연동에는 Retention 학습 bundle과 실행 상태, Uplift bundle 및 36개 Feature의 수치 호환성, CLV 출력 Adapter와 52주·출처·회계 계약, 동일한 v5 raw/Feature Store가 필요하다. 세 모델을 연결한 최종 실행, 사업 적격 조건·비용 근거·ROI 정의, 팀 main 통합 후 전체 회귀는 별도로 검증한다.
+
+## 주간 생산자 입력 통합
+
+기존 전략 엔진은 `final_strategy.inputs.integrate_inputs()`에서 세 배치를 받아
+`IntegratedInputs`를 반환한다. PR #11의 부분 역할 결합은
+`final_strategy.weekly_inputs.join_weekly_predictions()`에서 DataFrame을 반환한다.
+PR의 기존 CLI·6개 업무군·그래프 사용법은 [주간 파이프라인 문서](weekly_handoff.md)에 보존했다.
+기존 CLI 옵션은 6개 업무군 선택 방식을 유지한다. 정식 H 프로필·Budget 실행은 아래의 명시적 엔진 모드로 사용할 수 있다.
+
+주간 소매 Feature Store는 39개 열 이름을 유지하며 최근 28일, 변화량 28+28일,
+방문 간격 91일을 사용한다. 서울 월요일 00:00과 Manifest의 전체 시간 명세를 검사한다.
+`final_strategy.inputs.load_feature_store()`는 Parquet SHA를 대조하며, 인접 원장이 있으면
+원장 파일 SHA도 대조한다. 기존 v3 입력은 기존 30/60/90일 계약으로 읽는다.
+
+```python
+from final_strategy.weekly_prediction_adapter import adapt_weekly_predictions
+from final_strategy.inputs import load_feature_store
+
+# 각 인수는 해당 생산자의 predict_for_strategy()가 반환한 객체다.
+handoff = adapt_weekly_predictions(load_feature_store(feature_directory),
+                                   retention=retention_result, uplift=uplift_result, clv=clv_result)
 ```
+
+모델을 직접 호출할 때는 같은 모듈의 `predict_weekly_inputs()`에 Feature 디렉터리,
+Retention 번들, 원장 데이터셋, 저장 Uplift 모델, CLV 모델 디렉터리를 전달한다.
+이 경로는 Control-only CLV를 요구한다. 계산된 배치의 혼합 조건 CLV는
+`allow_mixed_clv_for_development=True`인 개발 검증에서만 명시적으로 사용할 수 있다.
+`roster`는 최초 전체 고객의 상태·p0/p1·52주 CLV·선택적 4주 금액을 보존한다.
+`excluded`는 원래 Retention 제외 사유를 담고, `integrated`는 채점 고객의 기존
+전략 입력이다(전원 제외 시 None). `producer_metadata`와 `prediction_metadata`는 원래
+선언을 보존한다. 학습 고객·정책 조건의 선언과 원장 파일의 독립 체크섬 검증은
+증거 수준이 다르며, 이 단계에서는 정책 발송을 승인하지 않는다.
+
+
+### 전략 엔진으로 주간 계획 출력하기
+
+`final_strategy.weekly_planning.build_strategy_decisions()`에 위 handoff, 정식
+`PolicyCandidate`, `ReportingConfig`, `Budget`, 사업 적격표, 쿠폰 및 사용 이력,
+`HistoryContext`, `HistoryPolicy`와 알고리즘을 전달한다. 비용은
+`estimate_coupon_costs()`의 반환값을 `cost_estimate`로 전달하거나,
+28일 요청당 명시적 시나리오를 `cost_inputs`와 `cost_metadata`로 전달한다.
+각 고객의 발송 요청비와 요청당 사용 확률 × 사용 조건부 할인액을 합산한다.
+실패 요청을 포함한 분모와 시점이 확인되어야 한다. 비용 산출 보류 시 결과에 사유가 남고,
+선언 비용표에서 후보 행이 누락되거나 출처·정밀도가 다르면 검증 오류가 발생한다.
+
+```powershell
+python -m final_strategy --features features --predictions batches.json --config reporting.json `
+  --profile-declarations profiles.json --profile H2 --engine-plan plan.json --output decisions
+```
+
+`--features`는 정식 Feature Store 디렉터리다. UTF-8 `batches.json`의
+`churn`, `uplift`, `clv` 항목에 생산자의 `frame`, `metadata`, `producer_metadata`를
+넣고 `clv.audit`에 학습 역할 감사 Parquet 또는 공식 CLV 저장 함수가 만든 `*_audit.csv` 경로를 지정한다. 공식 CSV는 같은 디렉터리의 `*_metadata.json`에 기록된 파일 체크섬과 대조한다. 학습된 4주 금액이 있으면
+별도 `gross_4w` 항목도 제공한다. 고객 ID·결측값을 보존하는 Parquet 사용을 권장한다.
+배치 경로는 배치 JSON 기준이다. `reporting.json`은 `high_value_threshold`,
+`churn_threshold`, `uplift_tolerance`, `new_history_days`, `baseline_purchase_threshold`
+다섯 필드를 받는다. 이 기준은 업무 분류와 그래프에만 쓰인다.
+
+`plan.json`에는 다음 필드를 명시한다.
+
+| 필드 | 내용 |
+| --- | --- |
+| `budget`, `algorithm` | Budget의 amount·currency·amount_unit 및 greedy/milp/hybrid 중 하나. 정확한 금액은 십진 문자열로 전달 |
+| `eligibility`, `coupons`, `redemptions` | Retention Strategy의 기존 열 계약을 따르는 Parquet. 빈 이력도 스키마를 유지 |
+| `history_context`, `history_policy` | 같은 이름의 기존 dataclass 필드를 가진 JSON 객체 |
+| `retention_policy` | 생산자가 선언한 이탈 예측 정책 조건 |
+| `cost_inputs`, `cost_metadata` | 고객별 명시적 비용 Parquet 경로와 CostMetadata 객체. 비용 근거가 없으면 계획 보류 |
+| `solver_config`, `hybrid_config` | 필요한 경우 기존 솔버 설정 |
+
+계획 입력 Parquet 경로는 계획 JSON 기준이다. 원래 명부 전체 또는 채점 고객에
+대해 입력할 수 있으며, 채점 고객의 적격 행과 후보 비용 행이 필요하다.
+`decision_audit.csv`에는 최초 고객별 12군 `segment_id`, 6개 `business_segment`,
+`response_group`, 계획 상태·비용·선정·지문을 기록한다. `customers.csv`의 10개 열은
+기존 형식을 유지한다. `send`는 계획 결정이며 유효하지 않은 후보 선택은 NULL이다.
+`expected_cost`는 해당 PolicyRun의 비용이고, `declared_expected_cost`는 제외 고객도 포함하는 원천 비용이다.
+`metadata.json`에는 시나리오별 솔버·품질 근거와 최초/분석 고객 수가 들어간다.
+`manifest.json`의 complete는 파일 작성 완료를 가리킨다.
+
+기준 계획은 100% What-if 할당을 그대로 사용한다. Budget은 Uplift × 52주 CLV로
+선정한다. 4주 경제성은 두 행동에서 조건부 구매금액이 같다는 가정 아래 선정 고객의
+예상 증분 매출에서 요청비·예상 할인을 한 번 차감한다. 4주 금액이 없으면 경제성만
+보류한다. 기준시각 이후로 발송이 계획된 고객에게도 같은 시각의 4주 효과를 대입하지 않는다. 예상 비용이 0이면 ROI는 NULL이다. 승인 상태는 Budget에서 전달되며 실제
+발송 권한은 항상 false다.
+
+통합 CLI에서 관측 결과를 제공하면 `--strategy-assignments` 또는 `--qini-assignments`로
+해당 최초 ITT 배정 원장도 제공한다. 고객·원장·시각·배정 및 4주 관측 완료를 확인한다.
+실현 비용에는 실제 발송·할인 기록이 필요하다. A 대비 보고와 Qini는 별도 파일에
+저장하며, 기존 D2−B/D2−C 확증 분석, 고정 로그 IPS, 민감도·Pareto 결과와 분리한다.
+실제 독립 평가 자료가 없으면 해당 그래프에 unavailable이 표시된다.
+
+기존 상세 결과 객체는 `write_outputs(..., comparison=..., sensitivity=...)`에 전달할 수 있다. 데이터셋·시각·원장·단위를 대조한 뒤 Pareto·IPS를 포함한 `policy_comparison.json`과 `policy_sensitivity.json`을 개별 보존한다. 각 결과의 모집단·시나리오·근거와 판정은 해당 파일의 감사 기록을 따른다.

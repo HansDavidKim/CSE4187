@@ -1,0 +1,4 @@
+# Optional C-2 backend; do not install for MILP/Greedy/C-1-only use.
+# Validated: Python 3.12, Windows AMD64. MIT license and bundled third-party notices.
+# NumPy is already a project dependency. highspy does not require OR-Tools/SCIP.
+highspy==1.16.0

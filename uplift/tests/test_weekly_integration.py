@@ -117,7 +117,7 @@ def test_actual_learners_save_reload_and_strategy_handoff_without_future_files(t
     pd.testing.assert_frame_equal(before.frame, after.frame)
     assert before.frame.customer_id.tolist() == [f"u{i:02}" for i in range(16)]
     assert (before.frame.prediction_end_at-before.frame.input_cutoff_at).eq(pd.Timedelta(weeks=4)).all()
-    from final_strategy.inputs import PredictionBatch, integrate_inputs
+    from final_strategy.weekly_inputs import PredictionBatch, join_weekly_predictions as integrate_inputs
     joined = integrate_inputs(load_features(target), {"uplift": PredictionBatch(
         before.frame, before.metadata, before.producer_metadata)})
     np.testing.assert_allclose(joined.p1-joined.p0, joined.uplift_score)

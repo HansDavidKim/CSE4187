@@ -1,5 +1,6 @@
 """Small engineering fixtures verify contracts; they are not model-performance evidence."""
 from dataclasses import asdict, replace
+from decimal import Decimal
 import hashlib
 import json
 import sys
@@ -171,6 +172,8 @@ def test_qini_multiple_models_and_random_targeting_reference(fixture):
     for _,rows in result["frame"].groupby("model"):
         assert rows.iloc[0].cumulative_gain==0
         np.testing.assert_allclose(rows.random_targeting_gain,rows.fraction*rows.iloc[-1].cumulative_gain)
+    # Score blocks of sizes 1,2,3,1,1; their IPW gain increments are 1/4,-1/4,1/4,1/4,0.
+    assert result["qini_coefficients"]["fixture-first"] == -3 / 64
     assert result["qini_coefficients"]["fixture-other"] == 0.
     constant=result["frame"].loc[result["frame"].model.eq("fixture-other")]
     assert len(constant)==2
@@ -198,6 +201,8 @@ def strategy_factual():
             purchased=int(i<purchases);sent=int(name!="A")
             rows.append(dict(dataset_id="strategy-fixture",customer_id=f"{name}{i}",as_of_at=at,assigned_at=at,
                 outcome_end_at=at+pd.Timedelta(weeks=4),observation_end_at=at+pd.Timedelta(weeks=52),strategy_group=name,
+                snapshot_id=f"{name}{i}:t0",raw_database_sha256="a"*64,assignment_probability=1/3,
+                outcome_observed=True,is_censored=False,actual_sent=bool(sent),
                 purchased_28d=purchased,churn=int(i>=20-churns),gross_revenue_minor=1000*purchased,
                 discount_minor=100*purchased*sent,send_cost_minor=100*sent,currency="SOURCE_UNSPECIFIED",amount_unit="0.01"))
     _,meta=factual(pd.DataFrame({"dataset_id":["x"]*8,"customer_id":list("abcdefgh"),"as_of_at":at}))
@@ -207,9 +212,14 @@ def strategy_factual():
     return pd.DataFrame(rows),meta
 
 
+def assigned_roster(obs):
+    return obs[["dataset_id", "customer_id", "as_of_at", "snapshot_id", "raw_database_sha256",
+                "assigned_at", "strategy_group", "assignment_probability"]].copy()
+
+
 def test_strategy_factual_groups_ci_holm_costs_and_baseline():
     obs,metadata=strategy_factual()
-    result=strategy_evaluation(obs,metadata)
+    result=strategy_evaluation(obs,metadata,assignments=assigned_roster(obs))
     assert result["status"]=="available" and result["baseline"]=="A"
     frame=result["frame"].set_index("strategy_group")
     assert frame.customers.tolist()==[20,20,20]
@@ -236,7 +246,8 @@ def test_paid_and_net_revenue_are_not_discounted_twice_or_aliased_as_gross():
     obs["net_revenue_minor"]=obs.paid_revenue_minor
     obs["net_after_marketing_minor"]=obs.net_revenue_minor-obs.send_cost_minor
     metadata.update(strategy_groups=["A","B"],primary_metric="net_revenue_per_customer")
-    result=strategy_evaluation(obs,metadata,primary_metric="net_revenue_per_customer")["frame"].set_index("strategy_group")
+    obs["assignment_probability"] = .5
+    result=strategy_evaluation(obs,metadata,primary_metric="net_revenue_per_customer",assignments=assigned_roster(obs))["frame"].set_index("strategy_group")
     assert result.loc["A","net_revenue_per_customer"]==80
     assert result.loc["B","net_revenue_per_customer"]==89
     assert obs.groupby("strategy_group").gross_revenue_minor.mean().diff().loc["B"]==20
@@ -256,6 +267,69 @@ def test_paid_and_net_revenue_are_not_discounted_twice_or_aliased_as_gross():
     no_purchase.loc[index,["purchased_28d","gross_revenue_minor","discount_minor","paid_revenue_minor","net_revenue_minor","net_after_marketing_minor"]]=[0,0,0,0,0,-1]
     checked=strategy_evaluation(no_purchase,metadata)["frame"].set_index("strategy_group")
     assert checked.loc["B","net_revenue_per_customer"]==pytest.approx((19*89-1)/20)
+
+
+def test_strategy_requires_original_itt_and_complete_followup():
+    obs, meta = strategy_factual()
+    original = assigned_roster(obs)
+    # B0 is a failed send; A0 was never targeted. Both remain in the original population.
+    obs.loc[obs.customer_id.eq("B0"), ["actual_sent", "send_cost_minor"]] = [False, 0]
+    assert strategy_evaluation(obs, meta, assignments=original)["status"] == "available"
+    for absent in (["B0"], ["A0"], [f"B{i}" for i in range(10)]):
+        with pytest.raises(ValueError, match="original assignment"):
+            strategy_evaluation(obs.loc[~obs.customer_id.isin(absent)], meta, assignments=original)
+    for column, value in (("strategy_group", "A"), ("assignment_probability", .9)):
+        changed = obs.copy()
+        changed.loc[changed.customer_id.eq("B0"), column] = value
+        with pytest.raises(ValueError, match="original assignment"):
+            strategy_evaluation(changed, meta, assignments=original)
+    with pytest.raises(ValueError, match="Duplicate"):
+        strategy_evaluation(obs, meta, assignments=pd.concat([original, original.iloc[:1]]))
+    with pytest.raises(ValueError, match="probability"):
+        strategy_evaluation(obs, meta, assignments=original.assign(assignment_probability=1))
+    for rows, roster in ((obs, None), (obs.assign(is_censored=True, outcome_observed=False), original),
+                         (obs.assign(outcome_observed=False), original), (obs.assign(is_censored=True), original),
+                         (obs.drop(columns="outcome_observed"), original)):
+        result = strategy_evaluation(rows, meta, assignments=roster)
+        assert result["status"] == "descriptive_only"
+        assert result["frame"][["roi", "p_value", "difference_ci95_lower"]].isna().all().all()
+    with pytest.raises(ValueError, match="boolean"):
+        strategy_evaluation(obs.assign(outcome_observed="True"), meta, assignments=original)
+
+
+@pytest.mark.parametrize("invalid", [Decimal(".5"), True, np.inf, np.nan, -1])
+def test_realized_minor_rejects_invalid_charge(invalid):
+    obs, meta = strategy_factual()
+    obs["send_cost_minor"] = obs.send_cost_minor.astype(object)
+    obs.loc[0, "send_cost_minor"] = invalid
+    with pytest.raises(ValueError, match="minor"):
+        strategy_evaluation(obs, meta, assignments=assigned_roster(obs))
+
+
+def test_accounting_preserves_minor_above_float_and_int64_limits():
+    obs, meta = strategy_factual()
+    obs["purchased_28d"] = 1
+    obs["gross_revenue_minor"] = np.int64(2**62)
+    obs["discount_minor"] = 0
+    obs["paid_minor"] = [Decimal(2**62)] * len(obs)
+    result = strategy_evaluation(obs, meta, assignments=assigned_roster(obs))
+    assert result["status"] == "available"
+    obs.loc[0, "paid_minor"] += 1
+    with pytest.raises(ValueError, match="contradicts"):
+        strategy_evaluation(obs, meta, assignments=assigned_roster(obs))
+    obs["gross_revenue_minor"] = np.int64(2**53)
+    obs["paid_minor"] = np.int64(2**53 + 1)
+    with pytest.raises(ValueError, match="contradicts"):
+        strategy_evaluation(obs, meta, assignments=assigned_roster(obs))
+    obs = obs.drop(columns="paid_minor")
+    obs["send_cost_minor"] = np.int64(2**62)
+    obs["actual_sent"] = True
+    table = strategy_evaluation(obs, meta, assignments=assigned_roster(obs))["frame"]
+    assert table.cost.tolist() == [20 * 2**62] * 3 and table.roi.isna().all()
+    obs.loc[obs.strategy_group.ne("A"), "send_cost_minor"] = 0
+    assert strategy_evaluation(obs, meta, assignments=assigned_roster(obs))["frame"].roi.isna().all()
+    with pytest.raises(ValueError, match="positive charge"):
+        strategy_evaluation(obs.assign(actual_sent=False), meta, assignments=assigned_roster(obs))
 
 
 def test_nonrandom_strategy_and_missing_money_do_not_get_invented_roi_or_p():
@@ -327,11 +401,13 @@ def test_cli_reads_checksummed_features_relative_batches_and_factual_evaluation(
     obs.to_csv(tmp_path/"qini.csv",index=False)
     strategy,metadata=strategy_factual()
     strategy.to_csv(tmp_path/"strategy.csv",index=False)
+    assigned_roster(strategy).to_csv(tmp_path/"assignments.csv",index=False)
     (tmp_path/"evaluation.json").write_text(json.dumps(metadata))
     output=tmp_path/"decisions"
     arguments=["final_strategy","--features",str(source),"--predictions",str(tmp_path/"batches.json"),
         "--config",str(tmp_path/"config.json"),"--qini-outcomes",str(tmp_path/"qini.csv"),
         "--qini-predictions",str(tmp_path/"qini_models.json"),"--strategy-outcomes",str(tmp_path/"strategy.csv"),
+        "--strategy-assignments",str(tmp_path/"assignments.csv"),
         "--evaluation-metadata",str(tmp_path/"evaluation.json"),"--output",str(output)]
     if human_profile:
         declarations=dict(version="fixture",threshold_source="synthetic",common=".2",risk_high=".1",risk_low=".3",
@@ -342,6 +418,7 @@ def test_cli_reads_checksummed_features_relative_batches_and_factual_evaluation(
     main()
     assert pd.read_csv(output/"customers.csv").columns.tolist()==CUSTOMER_COLUMNS
     assert json.loads((output/"budget_summary.json").read_text())["send_count"]==2
+    assert json.loads((output/"graph_data/strategy_status.json").read_text())["status"] == "available"
     if human_profile:
         assert json.loads((output/"metadata.json").read_text())["human_strategy_profile"]["policy_id"]=="H1"
         assert (output/"graph_data/human_profile.csv").is_file()
