@@ -1,12 +1,17 @@
 """Held-out factual Qini and independent randomized strategy-group comparisons."""
 import math
+from decimal import Decimal, InvalidOperation
+from fractions import Fraction
+
+from .experiment_validation import _flag, _sha
 
 import numpy as np
 import pandas as pd
+from scipy.integrate import trapezoid
 from scipy.stats import binomtest, fisher_exact, norm, t as student_t
 
-from .inputs import integrate_inputs
-from .validation import KEYS, keys, numeric, require, utc
+from .weekly_inputs import join_weekly_predictions
+from .weekly_validation import KEYS, keys, numeric, require, utc
 
 QINI_COLUMNS = ["model", "fraction", "cumulative_gain", "random_targeting_gain"]
 STRATEGY_COLUMNS = ["strategy_group", "customers", "conversion_rate", "churn_rate", "net_revenue_per_customer",
@@ -64,7 +69,7 @@ def qini_curves(observations, predictions, metadata):
     pseudo = outcome.to_numpy() * (treatment.to_numpy()/propensity.to_numpy()-(1-treatment.to_numpy())/(1-propensity.to_numpy()))
     rows, coefficients = [], {}
     for name, batch in predictions.items():
-        scored = integrate_inputs(frame, {"uplift": batch})
+        scored = join_weekly_predictions(frame, {"uplift": batch})
         if scored.uplift_score.isna().any():
             return _unavailable(f"Missing held-out uplift score for {name}")
         score = scored.uplift_score.to_numpy().round(12)
@@ -75,7 +80,7 @@ def qini_curves(observations, predictions, metadata):
         gain = np.r_[0., np.cumsum(blocks)/len(frame)]
         fraction = np.r_[0., ends/len(frame)]
         reference = fraction*gain[-1]
-        coefficients[name] = float(np.trapz(gain-reference, fraction))
+        coefficients[name] = float(trapezoid(gain-reference, fraction))
         rows.extend({"model": name, "fraction": float(x), "cumulative_gain": float(y),
                      "random_targeting_gain": float(r)} for x, y, r in zip(fraction, gain, reference))
     if not rows:
@@ -140,7 +145,80 @@ def _holm(values):
     return result
 
 
-def strategy_evaluation(observations, metadata, *, primary_metric="churn_rate"):
+def _itt_reason(frame, assignments):
+    if assignments is None:
+        return "Original strategy assignment roster was not supplied"
+    original = keys(assignments)
+    identity = [*KEYS, "snapshot_id", "raw_database_sha256", "assigned_at", "strategy_group"]
+    if not set(identity) <= set(original) & set(frame) or "assignment_probability" not in original:
+        return "Original assignment identity or strategy assignment probability is missing"
+    original["assigned_at"] = utc(original.assigned_at, "assigned_at")
+    frame["assigned_at"] = utc(frame.assigned_at, "assigned_at")
+    for table in (original, frame):
+        require(table[identity].notna().all().all(), "Missing strategy assignment identity")
+        require(table.raw_database_sha256.nunique() == 1, "Mixed assignment ledgers")
+        _sha(table.raw_database_sha256.iloc[0], "assignment ledger")
+        require(table.snapshot_id.map(lambda x: isinstance(x, str) and bool(x.strip())).all(),
+                "Invalid strategy assignment snapshot")
+    prob = original.assignment_probability
+    require(not prob.map(lambda x: isinstance(x, (bool, np.bool_))).any()
+            and pd.to_numeric(prob, errors="raise").between(0, 1, inclusive="neither").all(),
+            "Invalid strategy assignment probability")
+    if "assignment_probability" in frame:
+        identity.append("assignment_probability")
+    match = frame[identity].merge(original[identity], on=identity, how="outer",
+                                  indicator=True, validate="one_to_one")
+    require(match._merge.eq("both").all(), "Outcomes differ from the original assignment roster")
+    return None
+
+
+MONEY_FIELDS = ("gross_revenue_minor", "discount_minor", "send_cost_minor", "paid_revenue_minor",
+                "paid_minor", "net_revenue_minor", "net_after_marketing_minor")
+
+
+def _minor(value, field):
+    require(not isinstance(value, (bool, np.bool_)), f"{field} requires integer minor units")
+    try:
+        amount = Decimal(str(value))
+    except (ValueError, InvalidOperation) as error:
+        raise ValueError(f"Invalid {field}") from error
+    require(amount.is_finite() and amount == amount.to_integral_value()
+            and (field == "net_after_marketing_minor" or amount >= 0),
+            f"{field} requires finite integer minor units with valid sign")
+    return int(amount)
+
+
+def _accounting(frame, observed):
+    # Parse before pandas arithmetic to avoid int64 overflow and float rounding.
+    for field in MONEY_FIELDS:
+        if field in frame:
+            amounts = [None if pd.isna(v) and not complete else _minor(v, field)
+                       for v, complete in zip(frame[field], observed)]
+            frame[field] = pd.Series(amounts, index=frame.index, dtype=object)
+    if "send_cost_minor" in frame and "actual_sent" in frame:
+        sent = frame.actual_sent.map(lambda value: _flag(value, "actual_sent"))
+        require(not any(x is not None and x > 0 for x in frame.loc[~sent, "send_cost_minor"]),
+                "unsupported positive charge without a successful send")
+    if not set(MONEY_FIELDS[:3]) <= set(frame):
+        return False
+    for row in frame.loc[observed].itertuples():
+        paid = row.gross_revenue_minor - row.discount_minor
+        require(paid >= 0, "Discount exceeds factual gross revenue")
+        for field in MONEY_FIELDS[3:]:
+            expected = paid - row.send_cost_minor if field == "net_after_marketing_minor" else paid
+            if field in frame:
+                require(getattr(row, field) == expected,
+                        f"Factual {field} contradicts gross, discount or send cost; paid/net cannot substitute for gross")
+        require(pd.isna(row.purchased_28d) or row.purchased_28d != 0 or row.gross_revenue_minor == 0,
+                "Factual 4-week gross revenue contradicts no purchase")
+    require({"currency", "amount_unit"} <= set(frame)
+            and frame.currency.notna().all() and frame.amount_unit.notna().all()
+            and frame.currency.nunique() == frame.amount_unit.nunique() == 1,
+            "Factual financial units must be explicit and consistent")
+    return bool(observed.all() and "actual_sent" in frame)
+
+
+def strategy_evaluation(observations, metadata, *, primary_metric="churn_rate", assignments=None):
     """Describe assigned groups; causal ROI, CI and p-values need a registered held-out RCT."""
     require(primary_metric in ("churn_rate", "conversion_rate", "net_revenue_per_customer"), "Unknown primary metric")
     baseline = "A"
@@ -150,7 +228,19 @@ def strategy_evaluation(observations, metadata, *, primary_metric="churn_rate"):
     require(all(isinstance(group, str) and bool(group) for group in planned)
             and len(planned) == len(set(planned)) and set(frame.strategy_group) <= set(planned)
             and baseline in planned, "Strategy group family must explicitly include baseline A")
-    reason = _evaluation_reason(frame, metadata)
+    roster_reason = _itt_reason(frame, assignments)
+    reason = _evaluation_reason(frame, metadata) or roster_reason
+    observed = pd.Series(True, index=frame.index)
+    if "outcome_observed" in frame:
+        observed &= frame.outcome_observed.map(lambda x: _flag(x, "outcome_observed"))
+    else:
+        reason = reason or "Outcome completion flags were not supplied"
+    if "is_censored" in frame:
+        observed &= ~frame.is_censored.map(lambda x: _flag(x, "is_censored"))
+    if "censoring_reason" in frame:
+        observed &= frame.censoring_reason.isna()
+    if not observed.all():
+        reason = reason or "Censored or incomplete strategy outcomes"
     if metadata.get("strategy_randomized_assignment") is not True:
         reason = reason or "Customer-level strategy-group randomization was not declared; coupon randomization alone is insufficient"
     if "strategy_groups" not in metadata:
@@ -165,28 +255,10 @@ def strategy_evaluation(observations, metadata, *, primary_metric="churn_rate"):
             frame[field] = np.nan
         else:
             require(frame[field].dropna().isin([0, 1]).all(), f"{field} must be binary factual outcomes")
-    money_fields = ("gross_revenue_minor", "discount_minor", "send_cost_minor")
-    money = metadata.get("source_monetary_values_observed", True) is not False and all(field in frame for field in money_fields)
-    if money:
-        for field in money_fields:
-            frame[field] = numeric(frame[field], field)
-        money = not frame[list(money_fields)].isna().any().any()
-        if money:
-            require(frame.discount_minor.le(frame.gross_revenue_minor).all(), "Discount exceeds factual gross revenue")
-            paid = frame.gross_revenue_minor-frame.discount_minor
-            for field, expected in (("paid_revenue_minor", paid), ("paid_minor", paid),
-                                    ("net_revenue_minor", paid),
-                                    ("net_after_marketing_minor", paid-frame.send_cost_minor)):
-                if field in frame:
-                    supplied = pd.to_numeric(frame[field], errors="raise").astype(float)
-                    require(np.isfinite(supplied).all(), f"Factual {field} must be complete finite amounts")
-                    require(np.allclose(supplied, expected, rtol=0, atol=1e-8),
-                            f"Factual {field} contradicts gross, discount or send cost; paid/net cannot substitute for gross")
-            require(frame.loc[frame.purchased_28d.eq(0), "gross_revenue_minor"].eq(0).all(),
-                    "Factual 4-week gross revenue contradicts no purchase")
-            require({"currency", "amount_unit"} <= set(frame)
-                    and frame.currency.notna().all() and frame.amount_unit.notna().all()
-                    and frame.currency.nunique() == frame.amount_unit.nunique() == 1, "Factual financial units must be explicit and consistent")
+    frame.loc[~observed, ["purchased_28d", "churn"]] = np.nan
+    money = _accounting(frame, observed) if metadata.get("source_monetary_values_observed", True) is not False else False
+    if frame[["purchased_28d", "churn"]].isna().any().any():
+        reason = reason or "Incomplete factual strategy outcomes"
     frame["cost"] = frame.discount_minor+frame.send_cost_minor if money else np.nan
     frame["net"] = frame.gross_revenue_minor-frame.cost if money else np.nan
     column = {"churn_rate": "churn", "conversion_rate": "purchased_28d", "net_revenue_per_customer": "net"}[primary_metric]
@@ -200,7 +272,7 @@ def strategy_evaluation(observations, metadata, *, primary_metric="churn_rate"):
                "conversion_rate": float(part.purchased_28d.mean()) if len(part) and part.purchased_28d.notna().all() else None,
                "churn_rate": float(part.churn.mean()) if len(part) and part.churn.notna().all() else None,
                "net_revenue_per_customer": float(part.net.mean()) if money and len(part) else None,
-               "cost": float(part.cost.sum()) if money and len(part) else None,
+               "cost": sum(part.cost) if money and len(part) else None,
                "roi": None, "roi_reason": reason or ("No observed monetary outcomes" if not money else "Baseline or zero incremental cost"),
                "primary_metric": primary_metric, "primary_value": mean, "primary_ci95_lower": lo, "primary_ci95_upper": hi,
                "difference_vs_A": None, "difference_ci95_lower": None, "difference_ci95_upper": None,
@@ -212,22 +284,31 @@ def strategy_evaluation(observations, metadata, *, primary_metric="churn_rate"):
             row["test"] = "baseline reference; no test"
         if group != baseline:
             if not reason:
-                diff, dl, du, pv, test = _difference(part[column].to_numpy(float), baseline_frame[column].to_numpy(float), binary)
+                left, right = part[column], baseline_frame[column]
+                if not binary and money and len(right):
+                    # Translation leaves Welch inference invariant. Subtract in integer minor
+                    # units first so adjacent large cash amounts remain distinguishable.
+                    origin = right.iloc[0]
+                    left, right = left - origin, right - origin
+                diff, dl, du, pv, test = _difference(left.to_numpy(float), right.to_numpy(float), binary)
                 row.update(difference_vs_A=diff, difference_ci95_lower=dl, difference_ci95_upper=du, p_value=pv, test=test)
                 if pv is None:
                     row["inference_reason"] = test
             if not reason and money and len(part) and len(baseline_frame):
-                increment = float(part.cost.mean()-baseline_frame.cost.mean())
+                increment = Fraction(sum(part.cost), len(part)) - Fraction(sum(baseline_frame.cost), len(baseline_frame))
                 if increment > 0:
-                    row["roi"] = float((part.net.mean()-baseline_frame.net.mean())/increment)
+                    net_change = Fraction(sum(part.net), len(part)) - Fraction(sum(baseline_frame.net), len(baseline_frame))
+                    row["roi"] = float(net_change / increment)
                     row["roi_reason"] = None
             comparisons.append(row)
         rows.append(row)
     adjusted = _holm([row["p_value"] for row in comparisons])
     for row, value in zip(comparisons, adjusted):
         row["adjusted_p_value"] = value
+    report = pd.DataFrame(rows)
+    report["cost"] = pd.Series([row["cost"] for row in rows], dtype=object)
     return {"status": "available" if not reason else "descriptive_only", "reason": reason,
-            "frame": pd.DataFrame(rows), "baseline": baseline, "primary_metric": primary_metric,
+            "frame": report, "baseline": baseline, "primary_metric": primary_metric,
             "comparison_family": [f"{group} versus {baseline}: {primary_metric}" for group in planned if group != baseline],
             "multiple_comparison": "Holm; family includes every predeclared non-baseline group",
             "alpha": .05, "confidence_level": .95, "binary_ci_method": "Newcombe difference of Wilson intervals",

@@ -4,9 +4,11 @@ from dataclasses import asdict, replace
 from decimal import Decimal
 import json
 
-from .profile_contract import (
-    _decimal, _text, CandidateSet, PolicyCandidate, default_segment_policies, SegmentationConfig,
-)
+from .budget import _decimal, _text
+from .policy_candidates import CandidateSet
+from .policy_search import PolicyCandidate
+from .retention_strategy import default_segment_policies
+from .segmentation import SegmentationConfig
 from .validation import InputValidationError
 
 

@@ -1,6 +1,8 @@
 """Six business segments and an explicit, single-coupon 4-week planning budget."""
 from dataclasses import asdict, dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from decimal import Context, Decimal, localcontext
+from fractions import Fraction
 import json
 from pathlib import Path
 
@@ -9,8 +11,8 @@ import pandas as pd
 from clv.bundle import file_sha256
 from simulate.v4.time_spec import weekly_metadata
 
-from .inputs import integrate_inputs
-from .validation import KEYS, PROVENANCE, finite_number, keys, numeric, require
+from .weekly_inputs import join_weekly_predictions
+from .weekly_validation import KEYS, PROVENANCE, finite_number, keys, numeric, require
 
 CUSTOMER_COLUMNS = ["customer_id", "churn_prob", "p0", "p1", "uplift_score", "clv", "segment",
                     "priority_score", "send", "expected_net_value"]
@@ -59,6 +61,7 @@ class DecisionOutputs:
     what_if: pd.DataFrame
     graph_data: dict
     metadata: dict
+    decision_audit: pd.DataFrame | None = None
 
 
 def _response_group(frame, config):
@@ -121,7 +124,7 @@ def build_decisions(features, predictions, config, *, expected_discounts=None, p
     config.validate()
     missing = [name for name in ("churn", "uplift", "clv") if predictions.get(name) is None]
     require(not missing, f"Missing required prediction batches: {missing}")
-    frame = integrate_inputs(features, predictions)
+    frame = join_weekly_predictions(features, predictions)
     response = _response_group(frame, config)
     frame["segment"] = _segments(frame, response, config)
     frame["priority_score"] = frame.uplift_score.clip(lower=0) * frame.clv
@@ -139,7 +142,7 @@ def build_decisions(features, predictions, config, *, expected_discounts=None, p
         require(ordered._merge.eq("both").all(), "Expected-discount customer/cutoff differs")
         require("expected_discount_if_sent" in ordered, "Expected discount must be an unconditional cost per send")
         require({"input_cutoff_at", "prediction_end_at"} <= set(ordered), "Expected-discount estimates require time endpoints")
-        from .validation import utc
+        from .weekly_validation import utc
         require(utc(ordered.input_cutoff_at, "discount input cutoff").eq(ordered.as_of_at).all()
                 and utc(ordered.prediction_end_at, "discount prediction endpoint").eq(ordered.as_of_at+pd.Timedelta(weeks=4)).all(),
                 "Expected-discount estimates require the same preassignment cutoff and 4-week horizon")
@@ -218,6 +221,16 @@ def _jsonable(value):
         return [_jsonable(v) for v in value]
     if isinstance(value, np.generic):
         value = value.item()
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise ValueError('nonfinite monetary value')
+        return str(value)
+    if isinstance(value, Fraction):
+        return {'numerator': value.numerator, 'denominator': value.denominator}
+    if value is pd.NaT:
+        return None
+    if isinstance(value, timedelta):
+        return pd.Timedelta(value).isoformat()
     if isinstance(value, pd.Timestamp):
         return value.isoformat()
     if isinstance(value, (Path, date, datetime)):
@@ -227,20 +240,54 @@ def _jsonable(value):
     return value
 
 
-def write_outputs(result, output, *, qini=None, strategy=None):
+def _analysis_details(result, comparison, sensitivity):
+    """Preserve independently computed reports, including their own cohort and evidence."""
+    details = {}
+    if comparison is not None:
+        from .policy_comparison import PolicyComparisonResult
+        require(isinstance(comparison, PolicyComparisonResult), "expected a policy comparison result")
+        report = comparison.to_dict()
+        details["policy_comparison"] = (report, report["audit"])
+    if sensitivity is not None:
+        from .policy_sensitivity import SensitivityResult
+        require(isinstance(sensitivity, SensitivityResult), "expected a policy sensitivity result")
+        report = sensitivity.to_dict()
+        details["policy_sensitivity"] = (report, report["baseline_cost_audit"]["target"])
+    for _, source in details.values():
+        sha = source["raw_database_sha256"]
+        require(result.identity.dataset_id.eq(source["dataset_id"]).all()
+                and result.identity.as_of_at.eq(pd.Timestamp(source["as_of_at"])).all()
+                and set(result.identity.raw_database_sha256) == set(sha if isinstance(sha, list) else [sha])
+                and result.identity.currency.eq(source["currency"]).all()
+                and all(Decimal(str(u)) == Decimal(str(source["amount_unit"])) for u in result.identity.amount_unit),
+                "detailed analysis differs from the output dataset, cutoff, ledger or units")
+    return {name: report for name, (report, _) in details.items()}
+
+
+def write_outputs(result, output, *, qini=None, strategy=None, comparison=None, sensitivity=None):
     """Write the ten-column handoff, audit keys and six inspectable plot artifacts."""
     from .plots import render_plots
     from .evaluation import QINI_COLUMNS, STRATEGY_COLUMNS
     output = Path(output)
     require(not output.exists(), f"Output already exists: {output}")
+    if result.decision_audit is not None:
+        from .weekly_planning import validate_planning_output
+        with localcontext(Context(prec=200)):
+            validate_planning_output(result)
+    details = _analysis_details(result, comparison, sensitivity)
     output.mkdir(parents=True)
     result.customers.to_csv(output / "customers.csv", index=False)
+    if result.decision_audit is not None:
+        result.decision_audit.to_csv(output / "decision_audit.csv", index=False)
     result.identity.to_parquet(output / "customer_identity.parquet", index=False)
     result.availability.to_csv(output / "availability.csv", index=False)
     result.segment_summary.to_csv(output / "segment_summary.csv", index=False)
     result.what_if.to_csv(output / "budget_what_if.csv", index=False)
     for name, value in (("budget_summary", result.budget_summary), ("metadata", result.metadata)):
-        (output / f"{name}.json").write_text(json.dumps(_jsonable(value), ensure_ascii=False, indent=2, allow_nan=False)+"\n")
+        (output / f"{name}.json").write_text(json.dumps(_jsonable(value), ensure_ascii=False, indent=2, allow_nan=False)+"\n", encoding="utf-8")
+    for name, report in details.items():
+        (output / f"{name}.json").write_text(json.dumps(report, ensure_ascii=False, allow_nan=False)+"\n",
+                                            encoding="utf-8")
     data = output / "graph_data"
     data.mkdir()
     for name, frame in result.graph_data.items():
@@ -250,9 +297,9 @@ def write_outputs(result, output, *, qini=None, strategy=None):
         payload = payload or {"status": "unavailable", "reason": "No held-out randomized factual evaluation supplied",
                               "frame": pd.DataFrame(columns=QINI_COLUMNS if name=="qini" else STRATEGY_COLUMNS)}
         payload["frame"].to_csv(data / f"{name}.csv", index=False)
-        (data / f"{name}_status.json").write_text(json.dumps(_jsonable({k:v for k,v in payload.items() if k!="frame"}), indent=2)+"\n")
+        (data / f"{name}_status.json").write_text(json.dumps(_jsonable({k:v for k,v in payload.items() if k!="frame"}), indent=2, allow_nan=False)+"\n", encoding="utf-8")
     render_plots(result, output / "graphs", qini=qini, strategy=strategy)
-    files = {str(p.relative_to(output)): file_sha256(p) for p in output.rglob("*") if p.is_file()}
+    files = {p.relative_to(output).as_posix(): file_sha256(p) for p in output.rglob("*") if p.is_file()}
     (output / "manifest.json").write_text(json.dumps({"status": "complete", "customer_columns": CUSTOMER_COLUMNS,
         "customers": len(result.customers), "file_sha256": files}, ensure_ascii=False, indent=2)+"\n")
     return output
