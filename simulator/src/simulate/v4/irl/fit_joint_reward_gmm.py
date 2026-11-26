@@ -15,8 +15,10 @@ from scipy.stats import qmc
 
 from simulate.v4.irl import fit_joint_latent_shopping as joint
 from simulate.v4.irl import fit_latent_shopping as shopping
+from simulate.v4.irl import source_phases
 from simulate.v4.irl.fit_donor_prior import load_prior_source
-from simulate.v4.irl.fit_gaussian_rewards import PARAMETERS, _sha256, source_session_masks
+from simulate.v4.irl.fit_gaussian_rewards import PARAMETERS, _sha256, source_session_masks, parameter_indices
+from simulate.v4.irl.source_contract import canonical_available_actions, source_profile_id
 from simulate.v4.irl.reward_gmm import validate_gmm
 
 
@@ -30,12 +32,18 @@ CHECK_SCRAMBLES = (751, 1293)
 INITIAL_SD = (.11, .07, .07, .06, .3)
 
 
-def sobol_normal(power, seed):
-    return ndtri(qmc.Sobol(d=len(PARAMETERS), scramble=True, seed=seed).random_base2(power))
+def sobol_normal(power, seed, *, dimension=len(PARAMETERS)):
+    return ndtri(qmc.Sobol(d=dimension, scramble=True, seed=seed).random_base2(power))
 
 
-def draws(means, covariances, normal):
-    return means[:, None, :] + normal[None, :, :] @ np.linalg.cholesky(covariances).swapaxes(1, 2)
+def draws(means, covariances, normal, *, available_actions=None):
+    active = parameter_indices(available_actions)
+    if len(active) == 5:
+        return means[:, None, :] + normal[None, :, :] @ np.linalg.cholesky(covariances).swapaxes(1, 2)
+    result = np.zeros((len(means), len(normal), 5))
+    marginal = np.asarray(covariances)[:, active][:, :, active]
+    result[:, :, active] = np.asarray(means)[:, None, active] + normal[None, :, :] @ np.linalg.cholesky(marginal).swapaxes(1, 2)
+    return result
 
 
 def policy_logs(base, mask, transition, offsets):
@@ -91,22 +99,31 @@ def joint_loss(panel, sample, weights, log_policy, moments=False):
     return nll, responsibility
 
 
-def update_moments(sample, responsibility):
+def update_moments(sample, responsibility, *, available_actions=None):
     mass = responsibility.sum(axis=1)
     if not np.isfinite(mass).all() or (mass <= 0).any():
         raise ValueError("a fitted reward GMM component has no posterior mass")
-    means = np.einsum("ki,kij->kj", responsibility, sample) / mass[:, None]
-    centered = sample - means[:, None, :]
+    active = parameter_indices(available_actions)
+    values = sample if len(active) == 5 else sample[:, :, active]
+    means = np.einsum("ki,kij->kj", responsibility, values) / mass[:, None]
+    centered = values - means[:, None, :]
     covariance = np.einsum("ki,kij,kil->kjl", responsibility, centered, centered) / mass[:, None, None]
     eigenvalues, vectors = np.linalg.eigh(covariance)
     floored = (vectors * np.maximum(eigenvalues[:, None, :], EIGENVALUE_FLOOR)) @ vectors.swapaxes(1, 2)
-    return mass / mass.sum(), means, floored
+    if len(active) == 5:
+        return mass / mass.sum(), means, floored
+    embedded_mean = np.zeros((len(mass), 5))
+    embedded_mean[:, active] = means
+    embedded_covariance = np.repeat(np.diag(np.square(INITIAL_SD))[None, :, :], len(mass), axis=0)
+    embedded_covariance[:, np.asarray(active)[:, None], active] = floored
+    return mass / mass.sum(), embedded_mean, embedded_covariance
 
 
 def donor_posteriors(model, panel, parameters, base, mask, transition):
     weights, means, covariance = parameters
+    available = canonical_available_actions(model["latent_shopping"]["encoder"].get("available_actions"))
     seed = 20261117
-    sample = draws(means, covariance, sobol_normal(TRAIN_POWER + 1, seed))
+    sample = draws(means, covariance, sobol_normal(TRAIN_POWER + 1, seed, dimension=len(parameter_indices(available))), available_actions=available)
     count = sample.shape[1]
     flat = sample.reshape(-1, len(PARAMETERS))
     log_policy = policy_logs(base, mask, transition, flat)
@@ -121,7 +138,7 @@ def donor_posteriors(model, panel, parameters, base, mask, transition):
         logs += np.log(weights)[None, :] - np.log(count)
         probabilities = np.exp(logs - logsumexp(logs, axis=1, keepdims=True))
         for user, probability in zip(users[start:stop], probabilities, strict=True):
-            profile_id = sha256(f"cosmetics:{user}".encode()).hexdigest()[:16]
+            profile_id = source_profile_id(model.get("source_contract", {}).get("domain", model.get("source", {}).get("domain", "cosmetics")), str(user))
             if profile_id in profiles:
                 result[profile_id] = probability.tolist()
     if not result:
@@ -135,27 +152,76 @@ def donor_posteriors(model, panel, parameters, base, mask, transition):
     }
 
 
+def prepared_calibration_masks(sessions, activity, model, cutoff):
+    """Prepared recipes reserve outer users and all post-fit labels from selection."""
+    contract = model["source_contract"]
+    declared = contract.get("training_cutoff_at", contract.get("outer_cutoff_at"))
+    if declared is None or pd.Timestamp(declared) != cutoff:
+        raise ValueError("GMM calibration cutoff differs from its prepared source contract")
+    seed = int(model.get("seed", 42))
+    users = set(sessions.user_id) | set(activity.user_id)
+    outer = {uid for uid in users if sha256(f"{seed}:{uid}".encode()).digest()[0] < 205}
+    train = {uid for uid in outer if sha256(f"{seed}:inner:{uid}".encode()).digest()[0] < 205}
+    selection = outer - train
+    if "train_user" in activity and not activity.train_user.eq(activity.user_id.isin(outer)).all():
+        raise ValueError("GMM activity users differ from the frozen source outer split")
+    prefix = source_session_masks(sessions, model["observation_end"], cutoff=cutoff)["prefix"]
+    mature = activity.target_at.lt(cutoff)
+    masks = {"train_sessions": prefix & sessions.user_id.isin(train),
+             "selection_sessions": prefix & sessions.user_id.isin(selection),
+             "train_activity": mature & activity.user_id.isin(train),
+             "selection_activity": mature & activity.user_id.isin(selection),
+             "donor_sessions": prefix & sessions.user_id.isin(outer),
+             "donor_activity": mature & activity.user_id.isin(outer)}
+    audit = {"outer_holdout_users_excluded": len(users - outer),
+             "optimization_users": len(train), "internal_selection_users": len(selection),
+             "sessions_without_valid_pre_cutoff_support_excluded": int((~prefix).sum()),
+             "activity_not_mature_before_fit_cutoff_excluded": int((~mature).sum()),
+             "outer_holdout_and_postcutoff_labels_used_for_selection": False,
+             "scope": "conditional GMM calibration: frozen base actor/return heads used the full outer training partition, including these internal selection users"}
+    for name in ("train", "selection"):
+        ends = sessions.loc[masks[f"{name}_sessions"], "terminal_known_at"]
+        targets = activity.loc[masks[f"{name}_activity"], "target_at"]
+        audit[f"max_{name}_action_known_at"] = ends.max().isoformat() if len(ends) else None
+        audit[f"max_{name}_activity_known_at"] = targets.max().isoformat() if len(targets) else None
+    return masks, audit
+
+
 def fit_joint_reward_gmm(rows, model, return_model, *, with_donor_posteriors=False):
     latent = model["latent_shopping"]
+    available = canonical_available_actions(latent["encoder"].get("available_actions"))
     base = np.asarray(latent["common_reward"], dtype=float)
     mask = np.asarray(latent["action_mask"], dtype=bool)
     matrices = shopping.unpack_matrices(latent)
     transition = shopping.DISCOUNT * sparse.vstack(matrices, format="csr")
-    source = shopping.build_source(rows, model["observation_end"], model["seed"])
-    states, _ = shopping.encode(latent["encoder"], source["features"])
+    memory = latent["encoder"].get("lifecycle_memory")
+    kwargs = {"available_actions": available}
+    if memory is not None:
+        kwargs["lifecycle_memory"] = memory
+    source = shopping.build_source(rows, model["observation_end"], model["seed"], **kwargs)
+    states, _ = (shopping.encode(latent["encoder"], source["features"]) if memory is None else
+                 shopping.encode(latent["encoder"], source["features"], phase_ids=source_phases.phase_ids(source["records"])))
     sessions = source["sessions"]
-    masks = source_session_masks(sessions, model["observation_end"])
+    cutoff = pd.Timestamp(latent.get("source_cutoff_at", latent["return_activity"].get("cutoff_at", joint.CUTOFF)))
+    masks = source_session_masks(sessions, model["observation_end"], cutoff=cutoff)
     activity, _ = joint.build_activity_panel(rows, return_model, model["seed"])
     activity = activity.loc[activity.target_at.le(pd.Timestamp(model["observation_end"]))]
-    cutoff = pd.Timestamp(joint.CUTOFF)
-    train_users = {
-        user for user in rows.user_id.unique()
-        if sha256(f"reward-gmm:user-split:{user}".encode()).digest()[0] < 205
-    }
-    train = observations(source, states, mask, masks["prefix"] & sessions.user_id.isin(train_users),
-        activity.loc[activity.target_at.lt(cutoff) & activity.user_id.isin(train_users)])
-    validation = observations(source, states, mask, masks["later"] & ~sessions.user_id.isin(train_users),
-        activity.loc[activity["at"].ge(cutoff) & ~activity.user_id.isin(train_users)])
+    calibration_masks = calibration_audit = None
+    if "source_contract" in model:
+        calibration_masks, calibration_audit = prepared_calibration_masks(sessions, activity, model, cutoff)
+        train = observations(source, states, mask, calibration_masks["train_sessions"],
+                             activity.loc[calibration_masks["train_activity"]])
+        validation = observations(source, states, mask, calibration_masks["selection_sessions"],
+                                  activity.loc[calibration_masks["selection_activity"]])
+    else:
+        train_users = {
+            user for user in rows.user_id.unique()
+            if sha256(f"reward-gmm:user-split:{user}".encode()).digest()[0] < 205
+        }
+        train = observations(source, states, mask, masks["prefix"] & sessions.user_id.isin(train_users),
+            activity.loc[activity.target_at.lt(cutoff) & activity.user_id.isin(train_users)])
+        validation = observations(source, states, mask, masks["later"] & ~sessions.user_id.isin(train_users),
+            activity.loc[activity["at"].ge(cutoff) & ~activity.user_id.isin(train_users)])
     if np.intersect1d(train[0], validation[0]).size:
         raise ValueError("reward GMM train and validation users overlap")
 
@@ -168,12 +234,12 @@ def fit_joint_reward_gmm(rows, model, return_model, *, with_donor_posteriors=Fal
     initial_weights = discrete_weights[selected] / discrete_weights[selected].sum()
     initial_covariance = np.repeat(np.diag(np.square(INITIAL_SD))[None, :, :], COMPONENTS, axis=0)
     parameters = initial_weights, discrete_offsets[selected], initial_covariance
-    normal = sobol_normal(TRAIN_POWER, TRAIN_SCRAMBLE)
+    normal = sobol_normal(TRAIN_POWER, TRAIN_SCRAMBLE, dimension=len(parameter_indices(available)))
     trace = []
     best_nll = np.inf
     for step in range(MAX_UPDATES + 1):
         weights, means, covariance = parameters
-        sample = draws(means, covariance, normal)
+        sample = draws(means, covariance, normal, available_actions=available)
         log_policy = policy_logs(base, mask, transition, sample.reshape(-1, len(PARAMETERS)))
         train_nll, responsibilities = joint_loss(train, sample, weights, log_policy, moments=True)
         validation_nll = joint_loss(validation, sample, weights, log_policy)
@@ -183,11 +249,11 @@ def fit_joint_reward_gmm(rows, model, return_model, *, with_donor_posteriors=Fal
         if validation_nll < best_nll:
             best_iteration, best_nll, best_parameters = step, validation_nll, parameters
         if step < MAX_UPDATES:
-            parameters = update_moments(sample, responsibilities)
+            parameters = update_moments(sample, responsibilities, available_actions=available)
     weights, means, covariance = best_parameters
     checks = []
     for seed in CHECK_SCRAMBLES:
-        sample = draws(means, covariance, sobol_normal(TRAIN_POWER + 1, seed))
+        sample = draws(means, covariance, sobol_normal(TRAIN_POWER + 1, seed, dimension=len(parameter_indices(available))), available_actions=available)
         log_policy = policy_logs(base, mask, transition, sample.reshape(-1, len(PARAMETERS)))
         checks.append({"seed": seed, "nll_train": joint_loss(train, sample, weights, log_policy),
             "nll_internal_validation": joint_loss(validation, sample, weights, log_policy)})
@@ -204,17 +270,29 @@ def fit_joint_reward_gmm(rows, model, return_model, *, with_donor_posteriors=Fal
             "initialization": "three highest-mass components of the frozen discrete mixture",
             "train_scramble": TRAIN_SCRAMBLE, "points_per_component": 2**TRAIN_POWER,
             "split": "SHA256 first byte of reward-gmm:user-split:<user> below 205; fit pre-cutoff; check other users post-cutoff",
-            "cutoff_at": joint.CUTOFF, "stop_reason": "iteration_budget", "performed_updates": MAX_UPDATES,
+            "cutoff_at": cutoff.isoformat(), "stop_reason": "iteration_budget", "performed_updates": MAX_UPDATES,
             "selected_iteration": best_iteration,
             "discrete_v10_nll": baseline, "independent_quadrature_checks": checks, "trace": trace,
             "panels": {name: {"users": len(panel[0]), "action_decisions": int(panel[1].sum()),
                 "activity_windows": len(panel[3])} for name, panel in (("train", train), ("internal_validation", validation))},
         },
     }
+    if calibration_audit is not None:
+        result["fit"].update(candidate_selection="minimum conditional GMM joint NLL on source-outer-train inner-holdout users with all labels strictly before fit cutoff",
+            split="sha256(seed:user_id) outer train only; optimize inner train; select inner user holdout; both mature before fit cutoff",
+            calibration_split_audit=calibration_audit,
+            external_future_diagnostics_used_for_selection=False)
+    if available != tuple(PARAMETERS[:4]):
+        result.update(available_actions=list(available), fitted_parameter_names=[PARAMETERS[i] for i in parameter_indices(available)])
+        result["fit"]["unobserved_parameter_rule"] = "Exact Gaussian marginal over identified coordinates; unused canonical slots have zero mean and independent fixed reference variance, not fitted evidence."
     if with_donor_posteriors:
-        donor = observations(source, states, mask, masks["all"], activity)
+        donor = observations(source, states, mask,
+            calibration_masks["donor_sessions"] if calibration_masks is not None else masks["all"],
+            activity.loc[calibration_masks["donor_activity"]] if calibration_masks is not None else activity)
         result["profile_posteriors"], result["donor_posterior_fit"] = donor_posteriors(
             model, donor, best_parameters, base, mask, transition)
+        if calibration_audit is not None:
+            result["donor_posterior_fit"]["availability_rule"] = "outer training users only; valid END and activity outcomes strictly before the fitted cutoff"
     return result
 
 

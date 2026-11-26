@@ -42,6 +42,19 @@ def _pid(uid):
     return hashlib.sha256(f'cosmetics:{uid}'.encode()).hexdigest()[:16]
 
 
+def test_retail_timing_preserves_explicit_cutoff_and_domain_identity(source):
+    rows, (uid, *_) = source
+    cutoff = "2020-01-15T00:00:00+00:00"
+    model = fit_visit_timing(rows, "2019-10-01T00:00:00Z", "2020-03-01T00:00:00Z",
+                             cutoff=cutoff, domain="electronics")
+    assert model["cutoff_at"] == cutoff
+    assert pd.Timestamp(model["training"]["max_window_end_at"]) < pd.Timestamp(cutoff)
+    assert hashlib.sha256(f"electronics:{uid}".encode()).hexdigest()[:16] in model["entry_profile_banks"]
+    assert _pid(uid) not in model["entry_profile_banks"]
+    with pytest.raises(ValueError, match="identified source domain"):
+        fit_visit_timing(rows, "2019-10-01T00:00:00Z", "2020-03-01T00:00:00Z", domain="tianchi")
+
+
 def test_fit_uses_native_joint_count_time_ties_and_strict_available_training_users(source):
     rows, (a, b, c, d, heldout) = source
     model = _fit(rows)

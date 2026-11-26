@@ -3,8 +3,13 @@
 import numpy as np
 from scipy.stats import chi2
 
+from simulate.v4.irl.source_contract import canonical_available_actions
 
-def prepare_conditional_return(block, discrete_action_offsets, discrete_return_offsets):
+
+def prepare_conditional_return(block, discrete_action_offsets, discrete_return_offsets, *, available_actions=None):
+    actions = canonical_available_actions(block.get("available_actions"))
+    if available_actions is not None and actions != canonical_available_actions(available_actions):
+        raise ValueError("conditional return action support differs from its caller")
     priors = np.asarray(block["mixture_weights"], dtype=float)
     means = np.asarray(block["means"], dtype=float)
     covariances = np.asarray(block["covariances"], dtype=float)
@@ -14,18 +19,25 @@ def prepare_conditional_return(block, discrete_action_offsets, discrete_return_o
     if (priors.shape != (size,) or not size or means.shape != (size, 5)
             or covariances.shape != (size, 5, 5) or action_offsets.ndim != 2
             or action_offsets.shape[1] != 4 or not len(action_offsets)
-            or fallback_offsets.shape != (len(action_offsets),)
-            or not all(np.isfinite(a).all() for a in (priors, means, covariances, action_offsets, fallback_offsets))
+            or fallback_offsets.shape != (len(action_offsets),)):
+        raise ValueError("invalid conditional return parameters")
+    if actions != canonical_available_actions():
+        observed = [canonical_available_actions().index(action) for action in actions]
+        marginal = [*observed, 4]
+        means = means[:, marginal]
+        covariances = covariances[:, marginal][:, :, marginal]
+        action_offsets = action_offsets[:, observed]
+    if (not all(np.isfinite(a).all() for a in (priors, means, covariances, action_offsets, fallback_offsets))
             or (priors <= 0).any()):
         raise ValueError("invalid conditional return parameters")
 
     # The last diagonal of the joint Cholesky factor is the Schur standard deviation.
     factors = np.linalg.cholesky(covariances)
-    action_factors = factors[:, :4, :4]
-    centered = action_offsets[:, None, :] - means[None, :, :4]
+    action_factors = factors[:, :-1, :-1]
+    centered = action_offsets[:, None, :] - means[None, :, :-1]
     whitened = np.linalg.solve(action_factors, centered.transpose(1, 2, 0)).transpose(2, 0, 1)
-    return_means = means[None, :, 4] + np.einsum("nkd,kd->nk", whitened, factors[:, 4, :4])
-    return_scales = factors[:, 4, 4]
+    return_means = means[None, :, -1] + np.einsum("nkd,kd->nk", whitened, factors[:, -1, :-1])
+    return_scales = factors[:, -1, -1]
 
     log_determinant_half = np.log(np.diagonal(action_factors, axis1=1, axis2=2)).sum(axis=1)
     distance_squared = np.square(whitened).sum(axis=2)

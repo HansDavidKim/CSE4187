@@ -32,6 +32,20 @@ def test_sequence_training_and_train_only_scaler(kind, tmp_path):
     np.testing.assert_allclose(restored.predict_proba(x), p, atol=1e-7)
 
 
+def test_sequence_fit_preserves_a_callers_single_thread_budget(tmp_path):
+    previous = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        x = [np.ones((2, 8), dtype=np.float32) * i for i in range(1, 9)]
+        model = SequenceModel(hidden=8, batch_size=4).fit(x, np.array([0, 1] * 4), epochs=1)
+        assert torch.get_num_threads() == 1
+        path = tmp_path / "single-thread.pt"
+        model.save(path)
+        np.testing.assert_allclose(SequenceModel.load(path).predict_proba(x), model.predict_proba(x), atol=1e-7)
+    finally:
+        torch.set_num_threads(previous)
+
+
 @pytest.mark.parametrize("name", ["lightgbm", "catboost", "xgboost"])
 def test_library_models_fit_with_missing_values(name):
     x = pd.DataFrame({"value": np.arange(40, dtype=float), "missing": [np.nan] * 40})

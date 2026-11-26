@@ -11,12 +11,16 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
+import tempfile
 
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
+
+from .source_contract import canonical_available_actions, source_profile_id, utc_cutoff, validate_prepared_rows
 
 ACTIONS = ("view", "cart", "remove", "purchase", "end")
 
@@ -92,6 +96,9 @@ def choice_probabilities_batch(model: dict, features: np.ndarray) -> np.ndarray:
     scale = np.asarray(block["scaler_scale"], dtype=float)
     values = (values - np.asarray(block["scaler_mean"], dtype=float)) / scale
     logits = values @ np.asarray(block["coef"], dtype=float).T + np.asarray(block["intercept"], dtype=float)
+    if "available_actions" in block:
+        supported = {*canonical_available_actions(block["available_actions"]), "end"}
+        logits[:, [index for index, action in enumerate(ACTIONS) if action not in supported]] = -np.inf
     logits -= logits.max(axis=1, keepdims=True)
     probabilities = np.exp(logits)
     probabilities /= probabilities.sum(axis=1, keepdims=True)
@@ -206,7 +213,7 @@ def prepare_source(events: pd.DataFrame) -> tuple[pd.DataFrame, list[dict], dict
 
 
 def build_records(rows: pd.DataFrame, reference_price: int, observation_end: pd.Timestamp,
-                  seed: int = 42, checkout_episodes: bool = False) -> tuple[np.ndarray, pd.DataFrame, list[dict], dict]:
+                  seed: int = 42, checkout_episodes: bool = False, *, domain="cosmetics") -> tuple[np.ndarray, pd.DataFrame, list[dict], dict]:
     records, labels, profiles = [], [], []
     audit = Counter()
     catalog_ids = set(rows.loc[rows.price_minor.notna(), "product_id"])
@@ -344,7 +351,7 @@ def build_records(rows: pd.DataFrame, reference_price: int, observation_end: pd.
                                 if int((at - first).total_seconds() // (30 * 86400)) < complete_windows)
         active_windows = len(window_counts)
         profiles.append({
-            "profile_id": hashlib.sha256(f"cosmetics:{uid}".encode()).hexdigest()[:16],
+            "profile_id": source_profile_id(domain, uid),
             "home_group": home_group, "behavior_group": home_group,
             "source_event_count": len(group), "observed_sessions": len(session_starts),
             "observed_purchase_sessions": len(purchase_sessions), "action_counts": dict(action_counts),
@@ -376,7 +383,8 @@ def build_records(rows: pd.DataFrame, reference_price: int, observation_end: pd.
     return np.asarray(records, dtype=np.float64), pd.DataFrame(labels), profiles, dict(audit)
 
 
-def _fit_choice(features: np.ndarray, labels: pd.DataFrame, cutoff: pd.Timestamp, seed: int) -> tuple[dict, dict]:
+def _fit_choice(features: np.ndarray, labels: pd.DataFrame, cutoff: pd.Timestamp, seed: int, available_actions=None) -> tuple[dict, dict]:
+    available = canonical_available_actions(available_actions)
     before = labels.target_at.lt(cutoff).to_numpy() & ~labels.is_censored.to_numpy()
     after = labels["at"].ge(cutoff).to_numpy() & ~labels.is_censored.to_numpy()
     train = labels.train_user.to_numpy() & before
@@ -399,6 +407,8 @@ def _fit_choice(features: np.ndarray, labels: pd.DataFrame, cutoff: pd.Timestamp
         coefficients[estimator.classes_] = estimator.coef_
         intercepts[estimator.classes_] = estimator.intercept_
     logits = transformed @ coefficients.T + intercepts
+    unsupported = [index for index, action in enumerate(ACTIONS) if action != "end" and action not in available]
+    logits[:, unsupported] = -np.inf
     logits -= logits.max(axis=1, keepdims=True)
     probabilities = np.exp(logits)
     probabilities /= probabilities.sum(axis=1, keepdims=True)
@@ -406,6 +416,10 @@ def _fit_choice(features: np.ndarray, labels: pd.DataFrame, cutoff: pd.Timestamp
     balanced_frequency /= balanced_frequency.sum()
     frequency = np.bincount(labels.loc[train, "action"], minlength=len(ACTIONS)) + 0.5
     frequency /= frequency.sum()
+    if unsupported:
+        for baseline in (frequency, balanced_frequency):
+            baseline[unsupported] = 0
+            baseline /= baseline.sum()
     y = labels.action.to_numpy()
     evaluation = {"cutoff_at_utc": cutoff.isoformat(),
                   "split": "train users with target available strictly before cutoff; scaler train-only; crossing/censored targets excluded",
@@ -435,37 +449,78 @@ def _fit_choice(features: np.ndarray, labels: pd.DataFrame, cutoff: pd.Timestamp
             "observed_action_share": dict(zip(ACTIONS, (np.bincount(y[mask], minlength=len(ACTIONS)) / mask.sum()).tolist())),
             "predicted_action_share": dict(zip(ACTIONS, probabilities[mask].mean(axis=0).tolist())),
         }
-    return {"type": "contextual_one_step_maxent_multinomial_logit", "actions": list(ACTIONS),
+    result = {"type": "contextual_one_step_maxent_multinomial_logit", "actions": list(ACTIONS),
             "context_names": CONTEXT_NAMES, "feature_names": FEATURE_NAMES,
             "scaler_mean": scaler.mean_.tolist(), "scaler_scale": scaler.scale_.tolist(),
             "coef": coefficients.tolist(), "intercept": intercepts.tolist(),
             "n_iter": estimator.n_iter_.tolist(), "max_iter": estimator.max_iter,
-            "regularization_C": estimator.C, "price_effect": "conditional association using last observed view as offer proxy"}, evaluation
+            "regularization_C": estimator.C, "price_effect": "conditional association using last observed view as offer proxy"}
+    if available != canonical_available_actions():
+        result["available_actions"] = list(available)
+    return result, evaluation
+
+
+def _purchase_session_gaps(rows):
+    sessions = (rows.assign(has_purchase=rows.action.eq("purchase"))
+                .groupby(["user_id", "session"], sort=False)
+                .agg(at=("at", "min"), has_purchase=("has_purchase", "max")).reset_index())
+    sessions = sessions.loc[sessions.has_purchase].sort_values(["user_id", "at"])
+    sessions["gap_seconds"] = sessions.groupby("user_id")["at"].diff().dt.total_seconds()
+    return sessions
 
 
 def fit_shopping(events: pd.DataFrame, provenance: dict | None = None, seed: int = 42,
-                 checkout_episodes: bool = False) -> dict:
-    rows, catalog, audit = prepare_source(events)
+                 checkout_episodes: bool = False, *, domain="cosmetics", cutoff_at=None,
+                 prepared=False, summary_scope="full_observation", available_actions=None) -> dict:
+    if domain not in {"cosmetics", "electronics"}:
+        raise ValueError("second-clock shopping fitting supports Cosmetics/Electronics; Tianchi requires the daily adapter")
+    if summary_scope not in {"train_only", "full_observation"}:
+        raise ValueError("summary_scope must be train_only or full_observation")
+    if prepared:
+        if cutoff_at is None:
+            raise ValueError("prepared source fitting requires an explicit cutoff_at")
+        rows = events.copy()
+        observed = validate_prepared_rows(rows, domain=domain, clock_resolution="second")
+        _, catalog, audit = prepare_source(rows)
+        if provenance is None or provenance.get("domain") != domain:
+            raise ValueError("prepared source provenance must identify its unchanged domain")
+    else:
+        rows, catalog, audit = prepare_source(events)
+        observed = tuple(action for action in canonical_available_actions() if action in set(rows.action))
     if rows.empty:
         raise ValueError("no source sessions available")
     observation_start = rows["at"].min().floor("D")
     observation_end = rows["at"].max().floor("D") + pd.Timedelta(days=1)
     span = observation_end - observation_start
-    cutoff = observation_end - min(pd.Timedelta(days=29), span / 4)
+    cutoff = (observation_end - min(pd.Timedelta(days=29), span / 4) if cutoff_at is None else utc_cutoff(cutoff_at))
+    if not observation_start < cutoff < observation_end:
+        raise ValueError("shopping cutoff must lie inside the observed source span")
+    if provenance and provenance.get("training_cutoff_at") and cutoff != utc_cutoff(provenance["training_cutoff_at"]):
+        raise ValueError("shopping cutoff differs from its prepared source contract")
+    available = canonical_available_actions(available_actions if available_actions is not None else
+                                             (observed if domain != "cosmetics" else None))
+    if not set(observed) <= set(available):
+        raise ValueError("shopping observations contain actions outside the declared source support")
     train_users = rows.user_id.map(lambda uid: hashlib.sha256(f"{seed}:{uid}".encode()).digest()[0] < 205)
     training_prices = rows.loc[train_users & rows["at"].lt(cutoff) & rows.price_minor.notna(), "price_minor"]
     if training_prices.empty:
         raise ValueError("no positive train prices available")
     reference_price = int(training_prices.median())
-    features, labels, profiles, cart_audit = build_records(rows, reference_price, observation_end, seed, checkout_episodes)
-    model, validation = _fit_choice(features, labels, cutoff, seed)
+    features, labels, profiles, cart_audit = build_records(rows, reference_price, observation_end, seed, checkout_episodes, domain=domain)
+    model, validation = _fit_choice(features, labels, cutoff, seed, available)
+    summary_decision_records = len(labels)
+    summary_rows = rows
+    if summary_scope == "train_only":
+        summary_rows = rows.loc[train_users & rows["at"].lt(cutoff)].copy()
+        _, catalog, summary_audit = prepare_source(summary_rows)
+        _, summary_labels, profiles, summary_cart_audit = build_records(summary_rows, reference_price, cutoff, seed, checkout_episodes, domain=domain)
+        summary_decision_records = len(summary_labels)
+        validation["full_observation_diagnostics"] = {**audit, **cart_audit, "users": int(rows.user_id.nunique()),
+            "sessions": int(rows.session.nunique()), "decision_records": len(labels),
+            "scope": "diagnostic only; excluded from runtime catalog, profiles and sampling summaries"}
+        audit, cart_audit = summary_audit, summary_cart_audit
     price_valid = rows.action.eq("purchase") & rows.price_minor.notna()
-    purchase_sessions = (rows.assign(has_purchase=rows.action.eq("purchase"))
-                         .groupby(["user_id", "session"], sort=False)
-                         .agg(at=("at", "min"), has_purchase=("has_purchase", "max"))
-                         .reset_index())
-    purchase_sessions = purchase_sessions.loc[purchase_sessions.has_purchase].sort_values(["user_id", "at"])
-    purchase_sessions["gap_seconds"] = purchase_sessions.groupby("user_id")["at"].diff().dt.total_seconds()
+    purchase_sessions = _purchase_session_gaps(rows)
     gap_train_users = purchase_sessions.user_id.map(lambda uid: hashlib.sha256(f"{seed}:{uid}".encode()).digest()[0] < 205)
     validation["source_reference_distributions"] = {
         "meaning": "held-out source references for generator checks, not a generated-price forecast",
@@ -498,8 +553,8 @@ def fit_shopping(events: pd.DataFrame, provenance: dict | None = None, seed: int
             groups[name].update(checkout_templates=_pooled_checkout_templates(donors),
                                 **{key: _bounded([v for p in donors for v in p[key]], 4096)
                                    for key in ("session_choice_lengths", "choice_gap_seconds")})
-    purchase_prices = rows.loc[rows.action.eq("purchase") & rows.price_minor.notna(), "price_minor"].astype(float).to_numpy()
-    source_counts = rows.action.value_counts().to_dict()
+    purchase_prices = summary_rows.loc[summary_rows.action.eq("purchase") & summary_rows.price_minor.notna(), "price_minor"].astype(float).to_numpy()
+    source_counts = summary_rows.action.value_counts().to_dict()
     artifact = {
         "schema_version": 1, "model_type": "observed_shopping_profiles_and_contextual_maxent",
         "seed": seed, "currency": "SOURCE_UNSPECIFIED", "minor_unit": "0.01",
@@ -507,13 +562,13 @@ def fit_shopping(events: pd.DataFrame, provenance: dict | None = None, seed: int
         "observation_start": observation_start.isoformat(), "observation_end": observation_end.isoformat(),
         "source": provenance or {"dataset": "explicit deterministic test fixture"},
         "source_summary": {**audit, **cart_audit, "sample_users": len(profiles),
-                           "sessions": int(rows.session.nunique()), "event_counts": {name: int(source_counts.get(name, 0)) for name in ACTIONS[:-1]},
+                           "sessions": int(summary_rows.session.nunique()), "event_counts": {name: int(source_counts.get(name, 0)) for name in ACTIONS[:-1]},
                            "session_first_action_counts": {name: sum(profile["session_first_action_counts"].get(name, 0) for profile in profiles)
                                                            for name in ACTIONS[:-1]},
                            "end_labels": "one inferred session end per observed/inactivity-split session"},
         "catalog": catalog, "choice_model": model, "profiles": profiles, "home_groups": groups,
         "distributions": {"purchase_price_minor": _quantiles(purchase_prices),
-                          "purchase_gap_seconds": _quantiles(purchase_sessions.gap_seconds.dropna()),
+                          "purchase_gap_seconds": _quantiles(_purchase_session_gaps(summary_rows).gap_seconds.dropna()),
                           **{key: _bounded([v for p in profiles for v in p[key]], 4096)
                              for key in ("session_gap_seconds", "idle_gap_seconds", "event_gap_seconds",
                                          "session_lengths", "session_start_hours", "session_counts_active_30d")}},
@@ -554,11 +609,17 @@ def fit_shopping(events: pd.DataFrame, provenance: dict | None = None, seed: int
                                        "checkout_template_items": "one source row per unit proxy; final source product is the final template item"})
         artifact["source_summary"].update(decision_event_counts={action: sum(p["decision_action_counts"].get(action, 0) for p in profiles)
                                                                for action in ACTIONS[:-1]},
-                                            decision_records=len(labels))
+                                            decision_records=summary_decision_records)
         artifact["distributions"].update(checkout_templates=_pooled_checkout_templates(profiles),
                                            **{key: _bounded([v for p in profiles for v in p[key]], 4096)
                                               for key in ("session_choice_lengths", "choice_gap_seconds")})
         artifact["limitations"].append("Simultaneous contiguous purchase rows define a checkout episode proxy; true order boundaries and quantities are unobserved. Unit source counts remain unchanged, and only internal purchase choice labels are removed.")
+    if domain != "cosmetics" or prepared or summary_scope != "full_observation" or cutoff_at is not None:
+        artifact["summary_scope"] = {"mode": summary_scope, "cutoff_at": cutoff.isoformat(),
+            "users": "hash training users only" if summary_scope == "train_only" else "all observed users; retrospective diagnostic traits",
+            "runtime_catalog_profiles_and_distributions": True}
+    if available != canonical_available_actions():
+        artifact["available_actions"] = list(available)
     return artifact
 
 
@@ -570,29 +631,57 @@ def main() -> None:
     parser.add_argument("--item-choice", action="store_true")
     parser.add_argument("--sample-modulus", type=int, default=100)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--prepared-source", type=Path)
+    parser.add_argument("--domain", choices=("cosmetics", "electronics", "tianchi"))
+    parser.add_argument("--cutoff-at")
+    parser.add_argument("--inner-cutoff-at")
+    parser.add_argument("--summary-scope", choices=("train_only", "full_observation"))
     args = parser.parse_args()
     if args.item_choice and not args.checkout_episodes:
         parser.error("--item-choice requires --checkout-episodes")
     args.output = args.output or Path("data/models/shopping_profiles_checkout_items.json" if args.item_choice else
                                     "data/models/shopping_profiles_checkout.json" if args.checkout_episodes
                                     else "data/models/shopping_profiles.json")
-    if args.checkout_episodes and args.output.exists():
-        raise FileExistsError(f"checkout candidate must use a new artifact path: {args.output}")
-    events, provenance = load_source(args.cosmetics, args.sample_modulus)
-    artifact = fit_shopping(events, provenance, args.seed, args.checkout_episodes)
+    if args.output.exists():
+        raise FileExistsError(f"candidate must use a new artifact path: {args.output}")
+    descriptor = None
+    if args.prepared_source:
+        if args.domain is None or args.cutoff_at is None:
+            parser.error("--prepared-source requires --domain and --cutoff-at")
+        from .source_contract import load_prepared_source
+        events, descriptor = load_prepared_source(args.prepared_source, domain=args.domain, cutoff_at=args.cutoff_at,
+                                                  inner_cutoff_at=args.inner_cutoff_at)
+        provenance = descriptor["source_provenance"]
+    else:
+        if args.domain not in (None, "cosmetics"):
+            parser.error("non-Cosmetics fitting requires --prepared-source")
+        events, provenance = load_source(args.cosmetics, args.sample_modulus)
+    artifact = fit_shopping(events, provenance, args.seed, args.checkout_episodes, domain=args.domain or "cosmetics",
+                            cutoff_at=args.cutoff_at, prepared=descriptor is not None,
+                            summary_scope=args.summary_scope or ("train_only" if descriptor is not None else "full_observation"),
+                            available_actions=descriptor["source_contract"]["observed_actions"] if descriptor else None)
+    if descriptor is not None:
+        artifact["source_contract"] = descriptor["source_contract"]
     artifact["source"]["fitter_sha256"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     if args.item_choice:
         from simulate.v4.simulator.item_choice import fit_item_choice
-        rows, _, _ = prepare_source(events)
+        rows = events if descriptor is not None else prepare_source(events)[0]
+        if artifact.get("summary_scope", {}).get("mode") == "train_only":
+            rows = rows.loc[rows.user_id.map(lambda uid: hashlib.sha256(f"{args.seed}:{uid}".encode()).digest()[0] < 205)
+                            & rows["at"].lt(utc_cutoff(args.cutoff_at))]
         kernel = fit_item_choice(rows, artifact)
         kernel["provenance"] = {"source_kind": "same in-memory source rows as the checkout fit; no extra coefficient fit",
                                 "base_model_content_sha256": hashlib.sha256(json.dumps(artifact, sort_keys=True).encode()).hexdigest(),
                                 "fitter_code_sha256": hashlib.sha256(Path(__file__).resolve().parents[1].joinpath("simulator/item_choice.py").read_bytes()).hexdigest()}
         artifact["item_choice"] = kernel
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = args.output.with_suffix(args.output.suffix + ".tmp")
-    temporary.write_text(json.dumps(artifact, ensure_ascii=False, separators=(",", ":"), allow_nan=False), encoding="utf-8")
-    temporary.replace(args.output)
+    with tempfile.NamedTemporaryFile(dir=args.output.parent, prefix=f".{args.output.name}-", suffix=".tmp", delete=False) as stream:
+        temporary = Path(stream.name)
+    try:
+        temporary.write_text(json.dumps(artifact, ensure_ascii=False, separators=(",", ":"), allow_nan=False), encoding="utf-8")
+        os.link(temporary, args.output)
+    finally:
+        temporary.unlink(missing_ok=True)
     print(json.dumps({"output": str(args.output), "source_summary": artifact["source_summary"],
                       "validation": artifact["validation"]}, ensure_ascii=False, indent=2))
 

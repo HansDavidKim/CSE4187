@@ -37,6 +37,9 @@
 pip install -r clv/requirements.txt      # numpy, pandas 2.x, pyarrow, scipy, xgboost, PyYAML, pytest
 ```
 
+전달 번들은 XGBoost 3.4.1로 학습했다. 같은 예측값을 재현하려면 `python -m pip install xgboost==3.4.1`을 사용한다.
+학습 버전보다 오래된 런타임은 금액을 잘못 읽을 수 있어, 세 XGBoost 모델 로더가 예측 전에 오류와 설치 명령을 낸다.
+
 pandas 3.x에서는 시뮬레이터 `fit_shopping`이 copy-on-write로 실패하므로 공용 환경은 pandas 2.x를 쓴다.
 xgboost가 없으면 두 XGBoost 모델만 `skipped`로 기록하고 나머지는 계속 실행한다.
 

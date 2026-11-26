@@ -20,6 +20,8 @@ from simulate.v4.irl.fit_shopping import load_source, prepare_source
 from simulate.v4.simulator.coupon_response import sample_redemption_delay, scale_redemption_probability
 from simulate.v4.simulator.outcomes import GENERATION_WINDOW_DAYS, experiment_window_days
 from simulate.v4.simulator.raw_store import cart_at, load_raw_dataset
+from simulate.v4.simulator.coupon_assignment import validate_coupon_assignments
+from simulate.v4.time_spec import is_weekly,WEEKLY_TIME_SPEC
 
 
 def _time(value):
@@ -331,7 +333,8 @@ def audit_sidecars(tables, metadata, labels, treatments, lifecycle=None, diagnos
         local = t0.tz_convert("Asia/Seoul")
         mismatches["not_monday_midnight_seoul"] += int(local.weekday() != 0 or local != local.normalize()) * len(group)
         mismatches["definition_id"] += int(group.definition_id.ne(definition).sum())
-        mismatches["assignment_probability"] += int(pd.to_numeric(group.assignment_probability, errors="coerce").ne(0.5).sum())
+        try:validate_coupon_assignments(group,metadata)
+        except ValueError:mismatches["assignment_probability"] += len(group)
         if "eligibility_window_days" in group:
             mismatches["eligibility_window_days"] += int(group.eligibility_window_days.ne(eligible_days).fillna(True).sum())
         history = sessions.loc[sessions.started_at.ge(t0 - pd.Timedelta(days=eligible_days)) & sessions.started_at.lt(t0)]
@@ -394,7 +397,11 @@ def audit_sidecars(tables, metadata, labels, treatments, lifecycle=None, diagnos
         if highest_unit:
             mismatches["experiment_coupon_policy_id"] += int(sent.policy_id.ne(treatment_policy).sum())
         if "future_revenue_12m" in group:
-            clv_end = t0 + pd.DateOffset(months=12)
+            if is_weekly(metadata) or 'clv_label_days' in metadata:
+                if metadata.get('clv_label_days',364)!=WEEKLY_TIME_SPEC['clv_label_days']:
+                    raise ValueError('current CLV labels require exactly52weeks')
+                clv_end = t0 + pd.Timedelta(days=WEEKLY_TIME_SPEC["clv_label_days"])
+            else:clv_end = t0 + pd.DateOffset(months=12)
             if "clv_outcome_end_at" in group:
                 mismatches["clv_outcome_end"] += int(pd.to_datetime(group.clv_outcome_end_at, utc=True).ne(clv_end).sum())
             clv = orders.loc[orders.event_at.ge(t0) & orders.event_at.lt(clv_end)].groupby("customer_id").paid_minor.sum()
@@ -405,7 +412,8 @@ def audit_sidecars(tables, metadata, labels, treatments, lifecycle=None, diagnos
             newly_sent = tables["coupons"].loc[tables["coupons"].sent_at.ge(t0) & tables["coupons"].sent_at.lt(clv_end)]
             mismatches["control_clv_new_coupon"] += int(group.loc[complete_control, "customer_id"].isin(newly_sent.customer_id).sum())
         arm_counts = {str(int(arm)): int(count) for arm, count in group.treatment.value_counts().items()}
-        mismatches["unbalanced_randomized_arms"] += abs(arm_counts.get("0", 0) - arm_counts.get("1", 0))
+        if metadata.get('coupon_assignment',{}).get('mode','auto')=='auto':
+            mismatches["unbalanced_randomized_arms"] += abs(arm_counts.get("0", 0) - arm_counts.get("1", 0))
         window_reports.append({"as_of_at": t0.isoformat(), "outcome_end_at": until.isoformat(),
                                "definition_id": definition, "outcome_window_days": outcome_days,
                                "generation_window_days": GENERATION_WINDOW_DAYS, "eligibility_window_days": eligible_days,
@@ -616,8 +624,43 @@ def _source_interactions(rows):
 
 
 def _source_sessions(rows):
-    return rows.groupby(["user_id", "session"], sort=False).agg(started_at=("at", "min"), ended_at=("at", "max")).reset_index().rename(
+    result = rows.groupby(["user_id", "session"], sort=False).agg(started_at=("at", "min"), ended_at=("at", "max")).reset_index().rename(
         columns={"user_id": "customer_id", "session": "session_id"}).assign(session_id=lambda frame: frame.session_id.astype(str))
+    result["completion_available_at"] = result.ended_at + pd.Timedelta(minutes=30)
+    return result
+
+
+def _session_completion(sessions, lower, upper, session_diagnostics=None):
+    """Keep observed visits; distinguish natural END from a censored prefix."""
+    keys = ["customer_id", "session_id"]
+    visits = sessions.loc[sessions.started_at.ge(lower) & sessions.started_at.lt(upper)].copy()
+    if session_diagnostics is not None:
+        required = [*keys, "termination_reason", "truncated_session"]
+        if not set(required) <= set(session_diagnostics):
+            raise ValueError("session diagnostics require customer/session keys, termination_reason and truncated_session")
+        diagnostics = session_diagnostics[required]
+        if (diagnostics[keys].isna().any().any() or diagnostics.duplicated(keys).any()
+                or diagnostics.termination_reason.isna().any()
+                or not diagnostics.termination_reason.map(lambda value: isinstance(value, str) and bool(value)).all()
+                or diagnostics.truncated_session.isna().any()
+                or not pd.api.types.is_bool_dtype(diagnostics.truncated_session)):
+            raise ValueError("session diagnostics require unique known keys, reasons and boolean truncation flags")
+        visits = visits.merge(diagnostics, on=keys, how="left", validate="one_to_one", indicator=True)
+        if not visits["_merge"].eq("both").all():
+            raise ValueError("session diagnostics must cover every observed visit in the scope")
+        visits.drop(columns="_merge", inplace=True)
+        natural = visits.termination_reason.isin(["causal_policy_end", "donor_length"]) & ~visits.truncated_session
+        basis = "generation_termination_reason_and_truncation"
+    elif "completion_available_at" in visits:
+        natural = visits.completion_available_at.lt(upper)
+        basis = "source_last_action_plus_30min_strictly_before_upper; inferred_session_end"
+    else:
+        natural = pd.Series(True, index=visits.index)
+        basis = "legacy_recorded_ended_at; natural_END_unverified"
+    visits["_complete"] = visits.ended_at.lt(upper) & natural
+    return visits, {"basis": basis, "observed_sessions": len(visits),
+                    "complete_sessions": int(visits._complete.sum()),
+                    "boundary_or_censored_sessions": int((~visits._complete).sum())}
 
 
 def removal_transitions(interactions, observation_end):
@@ -640,13 +683,16 @@ def removal_transitions(interactions, observation_end):
     return result
 
 
-def _metric_arrays(interactions, sessions, lower, upper):
+def _metric_arrays(interactions, sessions, lower, upper, session_diagnostics=None):
     scoped = interactions.loc[interactions.event_type.isin(["view", "cart", "remove_from_cart", "purchase"]) &
                               interactions.event_at.ge(lower) & interactions.event_at.lt(upper)]
-    complete = sessions.loc[sessions.started_at.ge(lower) & sessions.ended_at.lt(upper)].sort_values(["customer_id", "started_at"])
+    visits, completion = _session_completion(sessions, lower, upper, session_diagnostics)
+    visits = visits.sort_values(["customer_id", "started_at", "ended_at", "session_id"], kind="stable")
+    complete = visits.loc[visits._complete]
     lengths = scoped.groupby(["customer_id", "session_id"]).quantity.sum().reindex(
         pd.MultiIndex.from_frame(complete[["customer_id", "session_id"]])).fillna(0)
-    idle = complete.started_at - complete.groupby("customer_id").ended_at.shift()
+    idle = visits.started_at - visits.groupby("customer_id").ended_at.shift()
+    idle = idle.loc[visits.groupby("customer_id")._complete.shift(fill_value=False)]
     purchased = scoped.loc[scoped.event_type.eq("purchase")]
     purchase_pairs = purchased[["customer_id", "session_id", "product_id"]].drop_duplicates()
     pair_counts = purchase_pairs.groupby(["customer_id", "product_id"]).size()
@@ -664,6 +710,7 @@ def _metric_arrays(interactions, sessions, lower, upper):
               "purchased_product_diversity_per_buyer": purchased.groupby("customer_id").product_id.nunique().to_numpy()}
     summary = {"lower_inclusive": lower.isoformat(), "upper_exclusive": upper.isoformat(),
                "observed_customers": int(scoped.customer_id.nunique()), "complete_sessions": len(complete),
+               "session_completion": completion,
                "item_interaction_rows": len(scoped), "item_proxy_weight": float(total),
                "item_proxy_action_share": {str(key): float(value / total) for key, value in counts.items()} if total else {},
                "repeat_product_across_sessions": {"customer_product_pairs": len(pair_counts),
@@ -673,7 +720,7 @@ def _metric_arrays(interactions, sessions, lower, upper):
     return arrays, purchased.quantity.to_numpy(dtype=float), summary
 
 
-def compare_source(tables, metadata, artifact, source_rows):
+def compare_source(tables, metadata, artifact, source_rows, session_diagnostics=None):
     _, outcome_days = _outcome_contract(metadata)
     source = _source_interactions(source_rows)
     source_sessions = _source_sessions(source_rows)
@@ -700,7 +747,8 @@ def compare_source(tables, metadata, artifact, source_rows):
         source_arrays[name] = (arrays, weights)
     results = {}
     for name, (start, end) in generated_views.items():
-        arrays, weights, summary = _metric_arrays(generated, tables["sessions"], start, end)
+        arrays, weights, summary = _metric_arrays(generated, tables["sessions"], start, end,
+                                                 tables.get("session_diagnostics") if session_diagnostics is None else session_diagnostics)
         raw_counts = tables["events"].loc[tables["events"].event_at.ge(start) & tables["events"].event_at.lt(end)].event_type.value_counts()
         summary["canonical_business_event_counts"] = {str(key): int(value) for key, value in raw_counts.items()}
         summary["canonical_business_event_share"] = {str(key): float(value / raw_counts.sum()) for key, value in raw_counts.items()} if raw_counts.sum() else {}
@@ -726,7 +774,8 @@ def compare_source(tables, metadata, artifact, source_rows):
                 "Item-proxy comparisons replace each generated purchase header by its order-item quantities; source one-row-one-unit is an explicit proxy.",
                 "Coupon usage, search, review and CS are excluded from four-action shopping interactions, source action shares, sequences and numeric distribution metrics.",
                 "Purchased-price Wasserstein and summaries weight generated lines by quantity; KS uses unweighted item records and has no iid significance interpretation.",
-                "Session metrics require completed sessions inside the scope; event metrics use event time and half-open boundaries.",
+                "Session lengths/durations require natural END when generation diagnostics exist; legacy timestamp-only completion is explicitly unverified.",
+                "Source inferred END requires last action +30min strictly before the scope upper bound; visit/event counts retain censored observations.",
                 "Repeat products require purchases in two distinct observed sessions, not multiple units in one checkout.",
                 "Source holds five months and a deterministic ID sample; generated runs may span 24 months and select active-before-snapshot customers.",
                 "Retention calibration, experiment policy, longer followup, source cart censoring, and fixed modal catalog prices can cause real distribution differences.",
@@ -756,7 +805,7 @@ def validate_directory(data_dir: Path, model_path: Path, source_cache: Path | No
     raw_manifest = json.loads((data_dir / "raw.manifest.json").read_text())
     sidecars = {name: pd.read_parquet(data_dir / f"{name}.parquet") for name in ("labels", "treatments")}
     optional = {name: pd.read_parquet(data_dir / f"{name}.parquet") if (data_dir / f"{name}.parquet").exists() else None
-                for name in ("lifecycle", "diagnostics", "coupon_response_diagnostics")}
+                for name in ("lifecycle", "diagnostics", "coupon_response_diagnostics", "session_diagnostics")}
     model_bytes = model_path.read_bytes()
     artifact = json.loads(model_bytes)
     model_sha256 = hashlib.sha256(model_bytes).hexdigest()
@@ -821,7 +870,7 @@ def validate_directory(data_dir: Path, model_path: Path, source_cache: Path | No
             "exact_checks_passed": observations["passed"] and cart["passed"] and coupon_response["passed"],
             "source_quality": source_quality,
             "source_provenance_check": "Exact paths, file count, sizes and mtime_ns; original full-file hashes were not recorded by the fitter.",
-            "distribution_comparison": compare_source(tables, metadata, artifact, source),
+            "distribution_comparison": compare_source(tables, metadata, artifact, source, optional["session_diagnostics"]),
             "threshold_policy": "Exact record consistency only. Distribution distances have no invented acceptance threshold."}
 
 

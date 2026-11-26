@@ -60,6 +60,56 @@ def test_source_seed_is_reproducible_and_artifact_hash_is_exact(source_config, g
     assert generated.metadata["model_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def test_coupon_modes_preserve_past_and_emit_only_assigned_customers(source_config):
+    from simulate.v4.validation import audit_sidecars
+    from simulate.v4.data.weekly import build_experiment_log
+    sim = EcommerceSimulator(copy.deepcopy(source_config))
+    auto = sim.generate(n_customers=6,months=3,seed=17)
+    none = sim.generate(n_customers=6,months=3,seed=17,coupon_assignment={"mode":"none"})
+    chosen = ["U0000002","U0000005"]
+    assigned = sim.generate(n_customers=6,months=3,seed=17,
+        coupon_assignment={"mode":"assign","customer_ids":chosen})
+    t0 = pd.Timestamp(auto.metadata["as_of_at"])
+    for current in (none,assigned):
+        pd.testing.assert_frame_equal(auto.tables['customers'],current.tables['customers'])
+        # Event IDs are globally re-numbered after future simulation; compare the observed content.
+        for name,clock in [('events','event_at'),('sessions','started_at')]:
+            cols=[c for c in auto.tables[name] if c not in ('event_id','related_purchase_event_id')]
+            a=auto.tables[name].loc[auto.tables[name][clock].lt(t0),cols].reset_index(drop=True)
+            b=current.tables[name].loc[current.tables[name][clock].lt(t0),cols].reset_index(drop=True)
+            pd.testing.assert_frame_equal(a,b)
+        log=build_experiment_log(current.tables,current.metadata)
+        assert len(log)==6 and log.eligible_at_assignment.all()
+        report=audit_sidecars(current.tables,current.metadata,current.tables['labels'],current.tables['treatments'])
+        assert report['passed'],report['mismatch_counts']
+    assert none.tables['coupons'].empty
+    assert not none.tables['events'].event_type.eq('coupon_usage').any()
+    assert none.tables['treatments'].treatment.eq(0).all()
+    assert set(assigned.tables['coupons'].customer_id)==set(chosen)
+    repeat=sim.generate(n_customers=6,months=3,seed=17,coupon_assignment={"mode":"assign","ratio":.5,"seed":99})
+    same=sim.generate(n_customers=6,months=3,seed=17,coupon_assignment={"mode":"assign","count":3,"seed":99})
+    pd.testing.assert_frame_equal(repeat.tables['treatments'],same.tables['treatments'])
+
+
+def test_weekly_generation_has_exact104weeks_and_52week_clv_target(source_config,tmp_path):
+    from simulate.v4.time_spec import WEEKLY_TIME_SPEC_VERSION
+    from simulate.v4.storage import materialize_features
+    from simulate.v4.data.loader import load_clv_inputs
+    sim=EcommerceSimulator(copy.deepcopy(source_config))
+    result=sim.generate(n_customers=3,seed=17,coupon_assignment={"mode":"none"})
+    meta=result.metadata;t0=pd.Timestamp(meta['as_of_at'])
+    assert meta['time_spec']==WEEKLY_TIME_SPEC_VERSION and meta['min_customer_history_days']>=91
+    assert t0-pd.Timestamp(meta['observation_start_at'])==pd.Timedelta(weeks=52)
+    assert pd.Timestamp(meta['observation_end_at'])-t0==pd.Timedelta(weeks=52)
+    assert result.tables['labels'].clv_outcome_end_at.eq(t0+pd.Timedelta(weeks=52)).all()
+    assert result.tables['labels'].future_revenue_12m.notna().all()
+    result.save(tmp_path/'raw');materialize_features(tmp_path/'raw',tmp_path/'features')
+    keys,weekly,target=load_clv_inputs(tmp_path/'features')
+    assert len(keys)==3 and len(weekly)==39 and target.notna().all()
+    with pytest.raises(ValueError,match='weeks=104'):
+        sim.generate(n_customers=3,weeks=52,coupon_assignment={"mode":"none"})
+
+
 def test_canonical_units_utc_snapshot_eligibility_and_balanced_assignment(generated):
     tables, metadata = generated.tables, generated.metadata
     validate_raw_dataset({name: tables[name] for name in RAW_COLUMNS}, metadata)
@@ -358,6 +408,21 @@ def test_event_cap_marks_truncated_donor_length(source_config, monkeypatch):
     sessions = result.tables["session_diagnostics"]
     assert sessions.termination_reason.eq("max_events").all()
     assert sessions.truncated_session.all()
+
+
+def test_strict_event_cap_fails_before_any_eligibility_candidate_replacement(source_config, monkeypatch):
+    import simulate.v4.irl.fit_shopping as shopping
+
+    calls = []
+    def never_end(model, context):
+        calls.append(context)
+        return {action:float(action == "view") for action in shopping.ACTIONS}
+    monkeypatch.setattr(shopping,"choice_probabilities",never_end)
+    config = copy.deepcopy(source_config)
+    config["source_simulation"].update(max_events_per_session=2,fail_on_session_cap=True)
+    with pytest.raises(ValueError,match="session cap reached.*candidate is unscorable"):
+        EcommerceSimulator(config).generate(n_customers=8,months=3,seed=17)
+    assert len(calls) <= 2
 
 
 def test_window_time_cap_is_censoring_not_a_learned_end(source_config, monkeypatch, tmp_path):

@@ -66,6 +66,26 @@ def test_visit_timing_rejects_a_different_native_source(checkout_fixture, tmp_pa
         EcommerceSimulator(config).generate(months=3, customers=_customers())
 
 
+def test_conditioned_first_observed_entry_preserves_first_start_and_ties_after_late_origin(checkout_fixture,tmp_path,monkeypatch):
+    from simulate.v4.irl import fit_visit_timing as timing
+    config,model=copy.deepcopy(checkout_fixture)
+    path=tmp_path/'entry_timing.json';path.write_text(json.dumps({'source':model['source'],'type':'fixture'}))
+    config['source_simulation'].update(visit_timing_model_path=str(path))
+    monkeypatch.setattr(timing,'validate_model',lambda model:None)
+    monkeypatch.setattr(timing,'sample_session_offsets',lambda *args:([18000.,18000.,18005.],'fixture'))
+    monkeypatch.setattr(timing,'first_session_share',lambda *args:1.)
+    customers=_customers();customers['signed_up_at']=pd.Timestamp('2024-01-20T18:00:00Z')
+    with pytest.raises(ValueError,match='supplied customers must be eligible'):
+        EcommerceSimulator(config).generate(months=3,seed=17,customers=customers)
+    config['source_simulation']['source_observation_mode']='first_observed_entry_conditioned'
+    result=EcommerceSimulator(config).generate(months=3,seed=17,customers=customers)
+    for _,rows in result.tables['sessions'].groupby('customer_id'):
+        first=rows.sort_values(['started_at','session_id']).iloc[:3]
+        expected=pd.Timestamp('2024-01-20T18:00:00Z')
+        assert first.started_at.tolist()==[expected,expected,expected+pd.Timedelta(seconds=5)]
+    assert result.metadata['source_observation_mode']=='first_observed_entry_conditioned'
+
+
 def test_generation_identity_covers_customer_count_and_supplied_input(checkout_fixture):
     config, model = copy.deepcopy(checkout_fixture)
     sim = EcommerceSimulator(config)

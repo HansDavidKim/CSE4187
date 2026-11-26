@@ -12,8 +12,8 @@
 | 정답 | `[t0, t0+28일)`에 새 세션 시작이 없으면 이탈 1, 있으면 0 |
 | 입력 경계 | `t0` 이전 기록. 진행 중 세션의 미래 종료 결과는 완료 세션 통계에서 제외 |
 | 학습 입력 | 동일 실행의 공식 피처 디렉터리와 `raw.sqlite`·`raw.manifest.json` |
-| 피처 기간 | KIT39의 30일·60일·90일 정의를 사용. 예측 기간은 28일 |
-| 실험 조건 | 고객별 1:1 고정 배정. 발송군은 기준일에 10% 쿠폰 1회, 28일 유효. 대조군 미발송, 결과 구간 중 추가 발송 없음 |
+| 피처 기간 | 기본104주 자료는 최근4주·변화8주·간격13주(28/56/91일). 명시적 legacy 월간 자료는30/60/90일. 예측 기간은28일 |
+| 실험 조건 | 자동1:1 배정·전체 미발송·고객 지정/인원·비율 고정 배정을 지원. 발송군은 기준일 쿠폰1회,28일 유효, 결과 구간 추가 발송 없음 |
 | 라벨 관측 | 결과 28일을 모두 관측한 고객으로 학습·성능 평가 |
 | 시간·금액 | 시간대가 있는 기준시각을 UTC로 정규화. 금액은 원천 통화·최소 단위 유지 |
 
@@ -25,15 +25,17 @@ raw schema 5는 전체 SQLite 체크섬을 확인한 뒤 필요한 행·열을 �
 
 모든 명령은 **프로젝트 루트**에서 실행한다. 프로젝트 `.venv`의 Python을 명시한다. 의존성 범위는 [requirements.txt](requirements.txt), 현재 Windows/Python 3.12 환경의 설치 기록은 [requirements-lock.txt](requirements-lock.txt)에 있다.
 
-다음 명령은 500명·6개월 데이터를 두 seed로 생성하고, 첫 실행에서 학습한 모델을 다음 실행에 고정 적용한다. 생성은 기존 시뮬레이터의 `target` 모드·목표 이탈률 20% 설정을 사용한다. 실제 이탈률은 실행마다 측정한다.
+다음 명령은 500명·104주(과거52주·미래52주) 데이터를 두 seed로 생성하고, 첫 실행에서 학습한 모델을 다음 실행에 고정 적용한다. 기준시점은 실행마다13주씩 이동한다. 생성은 기존 시뮬레이터의 `target` 모드·목표 이탈률20% 설정을 사용한다. 실제 이탈률은 실행마다 측정한다.
 
 ```powershell
 $env:PYTHONDONTWRITEBYTECODE = '1'
 .\.venv\Scripts\python.exe -m pip check
-.\.venv\Scripts\python.exe -m retention experiment --config retention/config.yaml --output retention/artifacts/demo --customers 500 --months 6 --seeds 42 43
+.\.venv\Scripts\python.exe -m retention experiment --config retention/config.yaml --output retention/artifacts/demo --customers 500 --weeks 104 --seeds 42 43
 ```
 
 주요 결과는 `demo/model/`과 `demo/seed_43/evaluation/`에 생성된다. 기존 실험을 재실행하면 설정·원천이 일치하는 완성 데이터를 재사용한다. 설정을 바꾼 실험에는 새 출력 경로를 사용한다.
+
+기본 `--coupon-mode auto`는 기존1:1 무작위 배정을 유지한다. 전체 미발송은 `--coupon-mode none`, 별도 무작위25% 발송은 `--coupon-mode assign --coupon-ratio .25 --coupon-assignment-seed 7`이다. 비율 대신 `--coupon-count 100` 또는 `--coupon-customer-ids id1 id2`를 지정할 수 있다. 명시적 `--months`는 이전 월간 자료 재현용이다.
 
 원장만으로 배치 추론할 때는 실제 데이터셋의 기준시각을 지정한다.
 
@@ -86,10 +88,10 @@ $retentionAsOf = (Get-Content -Raw -Encoding UTF8 retention/artifacts/demo/seed_
 
 ## 5. Uplift·CLV 연결과 Python API
 
-`--integrate`를 추가하면 기존 Uplift T/X/H와 CLV 공개 API로 모델을 학습하고 새 실행의 결과를 연결한다. CLV의 미래 52주 평가를 위해 아래 예시는 24개월을 생성한다.
+`--integrate`를 추가하면 별도로 설치한 Uplift T/X/H와 CLV 공개 API로 모델을 학습하고 새 실행의 결과를 연결한다. 기본104주 자료가 CLV의 미래52주 평가 기간을 포함한다. Uplift는 기록된 실제 배정확률을 사용하며, 양쪽 군의 관측이 없는 미발송·전원발송이나 고객ID 지정 배정에는 인과 효과 학습을 허용하지 않는다. 이 경우 Retention·CLV는 각 공개 API로 실행한다.
 
 ```powershell
-.\.venv\Scripts\python.exe -m retention experiment --config retention/config.yaml --output retention/artifacts/integration_demo --customers 500 --months 24 --seeds 101 102 103 --integrate
+.\.venv\Scripts\python.exe -m retention experiment --config retention/config.yaml --output retention/artifacts/integration_demo --customers 500 --weeks 104 --seeds 101 102 103 --integrate
 ```
 
 | 파트 | 전달하는 값 |
@@ -98,7 +100,10 @@ $retentionAsOf = (Get-Content -Raw -Encoding UTF8 retention/artifacts/demo/seed_
 | Uplift | 28일 구매확률의 발송 효과. `p0`는 미발송 구매확률 |
 | CLV | 향후 52주 할인 후 실결제금액. 출력명은 `predicted_clv_12m` |
 
-`dataset_id`·`customer_id`·실제 기준시각·통화·금액 단위를 맞춰 결합한다. Retention의 `as_of_at`, Uplift의 `w0`, CLV 출력의 `reference_week`를 같은 순간으로 정규화한다. 시뮬레이터 주간 행의 `reference_week`는 그 주의 시작이다.
+`dataset_id`·`customer_id`·실제 기준시각·통화·금액 단위를 맞춰 결합한다. Retention의 `as_of_at`, Uplift의 `t0`, CLV 출력의 `reference_week`를 같은 순간으로 정규화한다. 시뮬레이터 주간 행의 `reference_week`는 그 주의 시작이다.
+Uplift는 공식 `load_feature_dataset(feature_dir, ledger=raw_dir)`로 같은 Feature Store의 공개39개 피처·4주 구매 정답·실제 배정확률을 읽고 원장 배정 설계와 체크섬을 대조한다. 주간 자료를 과거30/90일 raw 피처로 다시 계산하지 않는다.
+저장 모델은 실제 학습 창·피처 계약을 기록하고, 캐시 재사용과 예측은 공식 `predict_for_strategy` 검증을 거친다. 출처 없는 모델을 주간 모델로 해석하지 않는다. `--integrate`는104주 주간 자료만 지원하며, 명시적 legacy 월간 자료와 SQL 모델은 각 모델의 호환 API에서 별도로 사용한다.
+동결 모델의 예측은 전원 발송 자료에도 가능하지만, Control-only CLV의 성숙한 평가 고객이 없으면 CLV 평가는 unavailable로 남기며 예측을 버리지 않는다.
 
 ```python
 from pathlib import Path
@@ -117,6 +122,15 @@ report = evaluate_retention(
 ```
 
 `predict_retention()`은 파일 저장 없이 DataFrame을 반환한다. 학습 API `train_retention(config)`도 제공하며, 설정 읽기는 `retention.pipeline.read_config()`를 사용한다.
+
+전략 결합에는 `retention.api.predict_for_strategy(bundle, dataset, as_of)`를 쓴다.
+반환값의 `frame`은 같은 고객·기준시각·snapshot·원장 체크섬에 `churn_prob`,
+`input_cutoff_at`, `prediction_end_at`을 붙이고, `metadata`는4주 이탈확률의 대상·기간·모델 버전을 선언한다.
+`producer_metadata`에 관측 혼합/무발송 정책 조건과 제외 수를 기록하며 부적격 고객의 확률은 결측으로 유지한다.
+기존 `predict_retention()`의 `churn_probability` 출력 이름은 유지한다.
+
+주간 KIT39 버전과 legacy 버전은 혼용하지 않는다. `_30d`·`_90d` 열 이름은 호환용으로 유지하되,
+주간 자료의 추가 피처·시퀀스·장기 이력도28/91일을 사용하고 생성한 피처 사전에 실제 기간을 기록한다.
 
 예측에는 식별 키, `churn_probability`, `predicted_churn`, `status`, 타깃·기간·정책 조건·임계값·모델 버전이 포함된다. 부적격 고객은 확률을 비워 두고 제외 상태를 반환한다.
 

@@ -49,12 +49,22 @@ class ThompsonSampling(UCB):
 
 class LinUCB:
     def __init__(self, dimension, seed=0, exploration=1.0):
-        self.a = np.repeat(np.eye(dimension)[None], 2, axis=0)
+        self.input_dimension = dimension
+        self.a = np.repeat(np.eye(dimension + 1)[None], 2, axis=0)
         self.a_inverse = self.a.copy()
-        self.b = np.zeros((2, dimension))
+        self.b = np.zeros((2, dimension + 1))
         self.exploration = exploration
 
+    def _state(self, state):
+        state = np.asarray(state, dtype=float)
+        dimension = getattr(self, "input_dimension", self.b.shape[1])
+        if state.shape != (dimension,) or not np.isfinite(state).all():
+            raise ValueError("linear policy state has the wrong dimension or nonfinite values")
+        # Older checkpoints lack input_dimension and keep their original, bias-free matrices.
+        return np.append(state, 1.) if self.b.shape[1] == dimension + 1 else state
+
     def act(self, state, training=True):
+        state = self._state(state)
         values = []
         for action in range(2):
             inverse = self.a_inverse[action]
@@ -64,6 +74,7 @@ class LinUCB:
         return int(np.argmax(values))
 
     def update(self, state, action, reward, next_state, done):
+        state = self._state(state)
         inverse_state = self.a_inverse[action] @ state
         self.a_inverse[action] -= np.outer(inverse_state, inverse_state) / (
             1. + state @ inverse_state
@@ -78,6 +89,7 @@ class LinTS(LinUCB):
         self.rng = np.random.default_rng(seed)
 
     def act(self, state, training=True):
+        state = self._state(state)
         values = []
         for action in range(2):
             inverse = self.a_inverse[action]
@@ -96,9 +108,9 @@ def _device():
 
 
 class PPO:
-    def __init__(self, dimension, seed=0, gamma=.99, learning_rate=3e-4):
+    def __init__(self, dimension, seed=0, gamma=.99, learning_rate=3e-4, device=None):
         torch.manual_seed(seed)
-        self.device = _device()
+        self.device = _device() if device is None else torch.device(device)
         self.actor = _network(dimension, 2).to(self.device)
         self.critic = _network(dimension, 1).to(self.device)
         self.actor_inference = deepcopy(self.actor).cpu()
@@ -117,7 +129,7 @@ class PPO:
         return int(action)
 
     def update(self, state, action, reward, next_state, done):
-        self.buffer.append((*self.pending, reward / 1000, done))
+        self.buffer.append((*self.pending, reward / 1000, done, np.asarray(next_state)))
 
     def learn(self):
         if not self.buffer:
@@ -127,7 +139,11 @@ class PPO:
         old_log = torch.as_tensor([row[2] for row in self.buffer], dtype=torch.float32, device=self.device)
         rewards = [row[3] for row in self.buffer]
         dones = [row[4] for row in self.buffer]
-        returns, value = [], 0.0
+        value = 0.
+        if not dones[-1] and len(self.buffer[-1]) > 5:
+            with torch.no_grad():
+                value = float(self.critic(torch.as_tensor(self.buffer[-1][5], dtype=torch.float32, device=self.device)).item())
+        returns = []
         for reward, done in reversed(list(zip(rewards, dones))):
             value = reward + self.gamma * value * (1 - done)
             returns.append(value)
@@ -152,10 +168,12 @@ class PPO:
 
 class DiscreteSAC:
     def __init__(self, dimension, seed=0, gamma=.99, learning_rate=3e-4, alpha=.1,
-                 train_interval=8, batch_size=512):
+                 train_interval=8, batch_size=512, device=None, learning_starts=128):
+        if any(type(value) is not int or value < 1 for value in (train_interval, batch_size, learning_starts)):
+            raise ValueError("SAC update interval, batch size and learning warmup must be positive integers")
         torch.manual_seed(seed)
         self.rng = np.random.default_rng(seed)
-        self.device = _device()
+        self.device = _device() if device is None else torch.device(device)
         self.actor = _network(dimension, 2).to(self.device)
         self.actor_inference = deepcopy(self.actor).cpu()
         self.q1, self.q2 = _network(dimension, 2).to(self.device), _network(dimension, 2).to(self.device)
@@ -166,6 +184,7 @@ class DiscreteSAC:
         self.q_optimizer = torch.optim.Adam([*self.q1.parameters(), *self.q2.parameters()], lr=learning_rate)
         self.gamma, self.alpha = gamma, alpha
         self.train_interval, self.batch_size, self.steps = train_interval, batch_size, 0
+        self.learning_starts, self.gradient_steps = learning_starts, 0
         self.buffer = deque(maxlen=50_000)
 
     def act(self, state, training=True):
@@ -178,7 +197,7 @@ class DiscreteSAC:
     def update(self, state, action, reward, next_state, done):
         self.buffer.append((np.asarray(state), action, reward / 1000, np.asarray(next_state), done))
         self.steps += 1
-        if len(self.buffer) < 128 or self.steps % self.train_interval:
+        if len(self.buffer) < getattr(self, "learning_starts", 128) or self.steps % self.train_interval:
             return
         self._learn()
         if self.steps % 256 == 0:
@@ -218,9 +237,91 @@ class DiscreteSAC:
                 target_parameter.mul_(.995).add_(parameter, alpha=.005)
             for target_parameter, parameter in zip(self.target2.parameters(), self.q2.parameters()):
                 target_parameter.mul_(.995).add_(parameter, alpha=.005)
+        self.gradient_steps = getattr(self, "gradient_steps", 0) + 1
+
+
+class ProjectedTD3:
+    """TD3 with a nearest binary action (Wolpertinger k=1) projection.
+
+    Fujimoto et al.,2018, Algorithm1; Dulac-Arnold et al.,2015, §2. Actor
+    gradients use the critic's continuous action embedding; executed and target
+    actions are always0/1. This is a discrete adaptation, not vanilla TD3.
+    """
+
+    def __init__(self, dimension, seed=0, gamma=.99, learning_rate=3e-4,
+                 learning_starts=1024, train_interval=1, batch_size=256, device=None):
+        if any(type(value) is not int or value < 1 for value in (learning_starts, train_interval, batch_size)):
+            raise ValueError('TD3 optimization sizes must be positive integers')
+        torch.manual_seed(seed)
+        self.rng = np.random.default_rng(seed)
+        self.device = _device() if device is None else torch.device(device)
+        self.actor = nn.Sequential(_network(dimension, 1), nn.Sigmoid()).to(self.device)
+        self.actor_inference = deepcopy(self.actor).cpu()
+        self.q1, self.q2 = (_network(dimension+1, 1).to(self.device) for _ in range(2))
+        self.target_actor = deepcopy(self.actor)
+        self.target1, self.target2 = deepcopy(self.q1), deepcopy(self.q2)
+        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=learning_rate)
+        self.q_optimizer = torch.optim.Adam([*self.q1.parameters(), *self.q2.parameters()], lr=learning_rate)
+        self.gamma, self.learning_starts = gamma, learning_starts
+        self.train_interval, self.batch_size = train_interval, batch_size
+        self.steps, self.gradient_steps, self.actor_updates = 0, 0, 0
+        self.buffer = deque(maxlen=50_000)
+
+    def act(self, state, training=True):
+        if training and self.steps < self.learning_starts:
+            return int(self.rng.integers(2))
+        with torch.no_grad():
+            value = float(self.actor_inference(torch.as_tensor(state, dtype=torch.float32)).item())
+        if training:
+            value += float(self.rng.normal(0, .1))
+        return int(value >= .5)
+
+    def update(self, state, action, reward, next_state, done):
+        self.buffer.append((np.asarray(state), action, reward/1000, np.asarray(next_state), done))
+        self.steps += 1
+        if len(self.buffer) < self.learning_starts or self.steps % self.train_interval:
+            return
+        self._learn()
+        if self.steps % 256 == 0:
+            self.sync_policy()
+
+    def sync_policy(self):
+        self.actor_inference.load_state_dict({key: value.detach().cpu() for key, value in self.actor.state_dict().items()})
+
+    def _learn(self):
+        indices = self.rng.choice(len(self.buffer), min(self.batch_size, len(self.buffer)), replace=False)
+        rows = [self.buffer[index] for index in indices]
+        states = torch.as_tensor(np.stack([r[0] for r in rows]), dtype=torch.float32, device=self.device)
+        actions = torch.as_tensor([r[1] for r in rows], dtype=torch.float32, device=self.device)[:, None]
+        rewards = torch.as_tensor([r[2] for r in rows], dtype=torch.float32, device=self.device)[:, None]
+        next_states = torch.as_tensor(np.stack([r[3] for r in rows]), dtype=torch.float32, device=self.device)
+        dones = torch.as_tensor([r[4] for r in rows], dtype=torch.float32, device=self.device)[:, None]
+        with torch.no_grad():
+            noise = (.2*torch.randn_like(actions)).clamp(-.5, .5)
+            next_actions = ((self.target_actor(next_states)+noise).clamp(0, 1) >= .5).float()
+            inputs = torch.cat([next_states, next_actions], dim=1)
+            target = rewards+self.gamma*(1-dones)*torch.minimum(self.target1(inputs), self.target2(inputs))
+        inputs = torch.cat([states, actions], dim=1)
+        loss = (self.q1(inputs)-target).square().mean()+(self.q2(inputs)-target).square().mean()
+        self.q_optimizer.zero_grad()
+        loss.backward()
+        self.q_optimizer.step()
+        self.gradient_steps += 1
+        if self.gradient_steps % 2 == 0:
+            self.q1.requires_grad_(False)
+            actor_loss = -self.q1(torch.cat([states, self.actor(states)], dim=1)).mean()
+            self.actor_optimizer.zero_grad()
+            actor_loss.backward()
+            self.actor_optimizer.step()
+            self.q1.requires_grad_(True)
+            self.actor_updates += 1
+            with torch.no_grad():
+                for target_network, network in ((self.target1, self.q1), (self.target2, self.q2), (self.target_actor, self.actor)):
+                    for target_parameter, parameter in zip(target_network.parameters(), network.parameters()):
+                        target_parameter.mul_(.995).add_(parameter, alpha=.005)
 
 
 AGENTS = {
     "UCB": UCB, "TS": ThompsonSampling, "LinUCB": LinUCB,
-    "LinTS": LinTS, "PPO": PPO, "SAC": DiscreteSAC,
+    "LinTS": LinTS, "PPO": PPO, "SAC": DiscreteSAC, "TD3": ProjectedTD3,
 }

@@ -406,6 +406,20 @@ def fit_policy_calibration(rows, model, prior, seed=42):
 
 def load_prior_source(model, cache_path):
     """Load a matching cache or publish one from the unchanged recorded raw files."""
+    binding = model["source"].get("prepared_source_cache")
+    if binding is not None:
+        from .source_contract import load_prepared_source
+        contract = model.get("source_contract", {})
+        rows, descriptor = load_prepared_source(cache_path, domain=model["source"]["domain"],
+            cutoff_at=model["source"].get("training_cutoff_at", contract.get("training_cutoff_at", contract.get("outer_cutoff_at"))),
+            inner_cutoff_at=contract.get("inner_cutoff_at"))
+        actual = descriptor["source_provenance"]
+        if (actual["prepared_source_cache"]["sha256"] != binding["sha256"]
+                or actual["prepared_source_cache"]["manifest_sha256"] != binding.get("manifest_sha256")
+                or actual["files"] != model["source"]["files"]
+                or actual["sample_modulus"] != model["source"]["sample_modulus"]):
+            raise ValueError("prepared source differs from the fitted source contract")
+        return rows, descriptor
     from simulate.v4.irl.fit_shopping import load_source, prepare_source
     recorded = model["source"]["files"]
     if not recorded:

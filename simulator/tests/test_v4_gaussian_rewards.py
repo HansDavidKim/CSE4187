@@ -123,3 +123,49 @@ def test_tuning_clock_keeps_whole_sessions_and_purges_equal_boundary():
     assert masks["prefix"].tolist() == [True, False, False, False, False]
     assert masks["later"].tolist() == [False, False, False, True, False]
     assert masks["all"].tolist() == [True, True, True, True, False]
+
+
+def test_unobserved_remove_is_not_a_gaussian_map_observation_or_penalty():
+    matrices, mask = mdp()
+    base = np.zeros((3, 4))
+    counts = np.zeros((3, 5))
+    counts[0, [0, 1]] = [3, 2]; counts[1, [3, 4]] = [2, 1]; counts[2, 4] = 4
+    activity = pd.DataFrame(dict(base_logit=[-.3, .8], label=[0, 1]))
+    available = ["view", "cart", "purchase"]
+    theta, centre = np.zeros(5), np.zeros(5)
+    expected = gaussian.map_objective(theta, counts, activity, base, matrices, mask, centre, .5,
+                                      available_actions=available)
+    theta[2], centre[2] = 100000, -100000
+    actual = gaussian.map_objective(theta, counts, activity, base, matrices, mask, centre, .5,
+                                    available_actions=available)
+    assert actual[0] == expected[0]
+    np.testing.assert_array_equal(actual[1], expected[1])
+    fitted, _ = gaussian.fit_user_offsets(counts, activity, base, matrices, mask, centre, .5,
+                                          available_actions=available)
+    assert fitted[2] == actual[1][2] == 0
+    values = np.array([[1.] * 5, [3.] * 5])
+    reference = gaussian.weighted_gaussian_moments(values, np.eye(2), np.zeros((2, 5)), available_actions=available)
+    values[:, 2] = np.nan
+    changed = gaussian.weighted_gaussian_moments(values, np.eye(2), np.zeros((2, 5)), available_actions=available)
+    for a, b in zip(reference, changed):
+        np.testing.assert_array_equal(a, b)
+
+
+def test_electronics_gaussian_draw_marginal_ignores_unobserved_remove_distribution():
+    model, matrices = source_model()
+    model["encoder"] = {"available_actions": ["view", "cart", "purchase"]}
+    block = sidecar()
+    block.update(available_actions=["view", "cart", "purchase"],
+                 fitted_parameter_names=["view", "cart", "purchase", "return_logit"])
+    block["variances"] = [[.02] * 5] * 2
+    nuisance = deepcopy(block)
+    nuisance["means"][0][2] = 100000
+    nuisance["variances"][0][2] = 900000
+    reference = gaussian.sample_reward_policy(model, block, 0, np.random.default_rng(12), matrices)
+    actual = gaussian.sample_reward_policy(model, nuisance, 0, np.random.default_rng(12), matrices)
+    assert actual["action_offsets"][2] == 0 and not actual["policy"][:, 2].any()
+    assert actual["return_offset"] == reference["return_offset"]
+    np.testing.assert_array_equal(actual["policy"], reference["policy"])
+    gaussian.validate_gaussian(block, "a" * 64, "b" * 64, available_actions=model["encoder"]["available_actions"])
+    with pytest.raises(ValueError, match="support"):
+        gaussian.validate_gaussian(block, "a" * 64, "b" * 64, available_actions=shopping.ACTIONS[:-1])

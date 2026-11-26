@@ -33,9 +33,12 @@ def _pack(counter):
             "cumulative_frequencies": list(accumulate(frequencies)), "observed_windows": sum(frequencies)}
 
 
-def fit_visit_timing(rows, observation_start, observation_end, seed=42, cutoff=CUTOFF):
+def fit_visit_timing(rows, observation_start, observation_end, seed=42, cutoff=CUTOFF, *,
+                     domain="cosmetics"):
     """Fit empirical conditional timing only; the existing activity model supplies p30."""
     start, end, cutoff = map(_utc, (observation_start, observation_end, cutoff))
+    if domain not in {"cosmetics", "electronics"}:
+        raise ValueError("retail visit timing requires an identified source domain")
     if not start < cutoff <= end or not {"user_id", "session", "at"} <= set(rows) or rows.empty:
         raise ValueError("visit timing needs prepared source and ordered observation bounds")
     if (rows[["user_id", "session", "at"]].isna().any().any()
@@ -57,7 +60,7 @@ def fit_visit_timing(rows, observation_start, observation_end, seed=42, cutoff=C
             continue
         source_ids.add(uid)
         times = user['at'].tolist(); first = times[0]
-        profile_id = hashlib.sha256(f"cosmetics:{uid}".encode()).hexdigest()[:16]
+        profile_id = hashlib.sha256(f"{domain}:{uid}".encode()).hexdigest()[:16]
         windows = [(first.floor('D'), True), *((at, False) for at in anchors if first < at)]
         for at, entry in windows:
             until = at + pd.Timedelta(days=30)
@@ -107,6 +110,8 @@ def fit_visit_timing(rows, observation_start, observation_end, seed=42, cutoff=C
             "Equal-clock starts are retained; engine must separately enforce nonoverlapping sessions and report actor right censoring.",
             "Does not correct signup/enrollment donor-composition bias or prove long-term extrapolation."]}
     validate_model(model)
+    if domain != "cosmetics":
+        model["source_domain"] = domain
     return model
 
 
@@ -177,6 +182,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--base', type=Path, default=Path('data/models/shopping_profiles_aligned_v6.json'))
     parser.add_argument('--source-cache', type=Path, default=Path('artifacts/v4/source_sample.parquet'))
+    parser.add_argument('--cutoff-at')
+    parser.add_argument('--domain', choices=('cosmetics', 'electronics'))
     parser.add_argument('--output', type=Path, default=Path('data/models/visit_timing_v4.json'))
     parser.add_argument('--report', type=Path, default=Path('docs/audit/simulator/visit_timing_training_v4.json'))
     args = parser.parse_args()
@@ -185,7 +192,17 @@ def main():
     from simulate.v4.irl.fit_donor_prior import load_prior_source
     base = json.loads(args.base.read_text())
     rows, cache = load_prior_source(base, args.source_cache)
-    model = fit_visit_timing(rows, base['observation_start'], base['observation_end'], int(base.get('seed', 42)))
+    contract = base.get('source_contract', {})
+    declared_cutoff = contract.get('training_cutoff_at', contract.get('outer_cutoff_at', CUTOFF))
+    cutoff = args.cutoff_at or declared_cutoff
+    domain = args.domain or contract.get('domain', base.get('source', {}).get('domain', 'cosmetics'))
+    if ((args.cutoff_at and contract
+            and _utc(args.cutoff_at) != _utc(declared_cutoff))
+            or (args.domain and contract.get('domain') and args.domain != contract['domain'])
+            or contract.get('clock_resolution', 'second') != 'second'):
+        raise ValueError("retail timing arguments differ from the prepared source contract")
+    model = fit_visit_timing(rows, base['observation_start'], base['observation_end'],
+                             int(base.get('seed', 42)), cutoff, domain=domain)
     digest = lambda path: hashlib.sha256(Path(path).read_bytes()).hexdigest()
     model.update(source=base['source'], provenance={'base_path': str(args.base), 'base_sha256': digest(args.base),
         'source_cache': cache, 'source_cache_sha256': digest(args.source_cache), 'fitter_sha256': digest(__file__)})

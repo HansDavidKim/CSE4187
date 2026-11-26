@@ -245,6 +245,20 @@ def test_existing_bundle_still_predicts_and_reports_no_four_week_model(outputs, 
         load_model(HANDOFF_BUNDLE).predict(weekly, reference_week="2024-10-07", require_gross_4w=True)
 
 
+def test_xgboost_loaders_reject_runtime_older_than_recorded_training(tmp_path, monkeypatch):
+    xgboost = pytest.importorskip("xgboost")
+    monkeypatch.setattr(xgboost, "__version__", "3.0.5")
+    error = r"older.*training version 3\.4\.1.*pip install xgboost==3\.4\.1"
+    for name in ("xgboost", "xgboost_two_part"):
+        with pytest.raises(ValueError, match=error):
+            load_model(HANDOFF_BUNDLE, name)
+    # Reject before reading a booster, including the separate 4-week money loader.
+    (tmp_path / "gross_4w_meta.json").write_text(json.dumps({
+        "model": "xgboost_gross_4w", "xgboost_version": "3.4.1"}))
+    with pytest.raises(ValueError, match=error):
+        GrossXGBoost4w.load(tmp_path)
+
+
 def test_existing_bundle_strategy_batch_has_no_four_week_batch(outputs, tmp_path):
     weekly, _, _ = outputs
     model = load_model(HANDOFF_BUNDLE)

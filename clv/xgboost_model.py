@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import itertools
+import re
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,20 @@ from .schema import PREDICTOR_FEATURES, check_predictors
 
 NAME = "xgboost"
 FEATURE_DTYPE = "float64"
+
+
+def _require_xgboost_version(metadata, runtime):
+    trained = metadata.get("xgboost_version")
+    if not trained:
+        return  # Older metadata did not record a training runtime.
+    def numbers(value):
+        match = re.match(r"^(\d+)\.(\d+)(?:\.(\d+))?", str(value))
+        if match is None:
+            raise ValueError(f"Cannot verify XGBoost version {value!r}")
+        return tuple(int(part or 0) for part in match.groups())
+    if numbers(runtime) < numbers(trained):
+        raise ValueError(f"XGBoost runtime {runtime} is older than this model's training version {trained}; "
+                         f"install the matching runtime: python -m pip install xgboost=={trained}")
 
 
 def xgboost_status() -> tuple[bool, str]:
@@ -127,6 +142,7 @@ class XGBoostCLV:
         meta = read_json(directory / "xgboost_meta.json")
         if meta.get("model") != NAME:
             raise ValueError("not an XGBoost CLV model directory")
+        _require_xgboost_version(meta, xgb.__version__)
         model = cls(meta["seed"], meta["grid"], meta["fixed"], meta["selection_metric"], meta["feature_names"])
         model.model = xgb.XGBRegressor()
         model.model.load_model(directory / "xgboost_model.json")
@@ -324,6 +340,7 @@ class TwoPartXGBoostCLV:
         meta = read_json(directory / "two_part_meta.json")
         if meta.get("model") != TWO_PART_NAME:
             raise ValueError("not a two-part XGBoost CLV model directory")
+        _require_xgboost_version(meta, xgb.__version__)
         model = cls(meta["seed"], meta["classifier_grid"], meta["regressor_grid"], meta["fixed"], meta["feature_names"])
         model.classifier, model.regressor = xgb.XGBClassifier(), xgb.XGBRegressor()
         model.classifier.load_model(directory / "classifier.json")
@@ -460,6 +477,7 @@ class GrossXGBoost4w:
         meta = read_json(directory / "gross_4w_meta.json")
         if meta.get("model") != GROSS_NAME:
             raise ValueError("not a 4-week gross XGBoost model directory")
+        _require_xgboost_version(meta, xgb.__version__)
         model = cls(meta["seed"], meta["grid"], meta["fixed"], meta["feature_names"])
         model.model = xgb.XGBRegressor()
         model.model.load_model(directory / "regressor.json")

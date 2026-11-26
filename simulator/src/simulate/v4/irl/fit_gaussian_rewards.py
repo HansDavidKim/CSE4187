@@ -19,6 +19,8 @@ from scipy.special import expit
 
 from simulate.v4.irl import fit_joint_latent_shopping as joint
 from simulate.v4.irl import fit_latent_shopping as shopping
+from simulate.v4.irl import source_phases
+from simulate.v4.irl.source_contract import canonical_available_actions, source_profile_id
 
 
 TYPE = "source_map_gaussian_reward_offsets"
@@ -31,7 +33,22 @@ def _sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def validate_gaussian(block, base_sha256, return_sha256):
+def parameter_indices(available_actions=None):
+    return [PARAMETERS.index(action) for action in canonical_available_actions(available_actions)] + [4]
+
+
+def validate_parameter_support(block, available_actions=None):
+    available = canonical_available_actions(block.get("available_actions"))
+    if available_actions is not None and available != canonical_available_actions(available_actions):
+        raise ValueError("continuous reward observation support differs from its fitted actor")
+    if "available_actions" in block and block["available_actions"] != list(available):
+        raise ValueError("continuous observation support must use canonical order")
+    if (available != tuple(PARAMETERS[:4]) or "fitted_parameter_names" in block) and block.get("fitted_parameter_names") != [PARAMETERS[i] for i in parameter_indices(available)]:
+        raise ValueError("continuous reward must declare its identified parameter marginal")
+    return available
+
+
+def validate_gaussian(block, base_sha256, return_sha256, *, available_actions=None):
     """Reject stale source bindings, invalid dispersions and forecast-use claims."""
     if (not isinstance(block, dict) or type(block.get("schema_version")) is not int
             or block.get("schema_version") != 1 or block.get("type") != TYPE
@@ -61,11 +78,15 @@ def validate_gaussian(block, base_sha256, return_sha256):
             or not np.isfinite(weights).all() or (weights < 0).any()
             or not np.isclose(weights.sum(), 1)):
         raise ValueError("invalid Gaussian reward means, variances or component weights")
+    validate_parameter_support(block, available_actions)
 
 
 def sample_reward_policy(model, block, component_id, rng, matrices=None):
     """Draw once per customer, then solve that customer's frozen-dynamics policy."""
     latent = model.get("latent_shopping", model)
+    available = canonical_available_actions(latent.get("encoder", {}).get("available_actions"))
+    validate_parameter_support(block, available)
+    active = parameter_indices(available)
     if (isinstance(component_id, (bool, np.bool_)) or not isinstance(component_id, (int, np.integer))
             or not 0 <= component_id < len(latent["mixture_weights"])):
         raise ValueError("Gaussian component must be the persistent customer draw")
@@ -74,36 +95,64 @@ def sample_reward_policy(model, block, component_id, rng, matrices=None):
     if mean.shape != (5,) or variance.shape != (5,) or not np.isfinite(mean).all() or not np.isfinite(variance).all() or (variance < 0).any():
         raise ValueError("invalid Gaussian reward draw parameters")
     # A point mass preserves both the original policy and its RNG stream.
-    theta = mean.copy() if not variance.any() else rng.normal(mean, np.sqrt(variance))
-    if not variance[:4].any() and np.array_equal(theta[:4], latent["component_offsets"][component_id]):
+    if len(active) == 5:
+        theta = mean.copy() if not variance.any() else rng.normal(mean, np.sqrt(variance))
+    else:
+        theta = np.zeros(5)
+        theta[active] = mean[active] if not variance[active].any() else rng.normal(mean[active], np.sqrt(variance[active]))
+    action_active = [i for i in active if i < 4]
+    if not variance[action_active].any() and np.array_equal(theta[action_active], np.asarray(latent["component_offsets"][component_id])[action_active]):
         probability = np.asarray(latent["component_policies"][component_id], dtype=float).copy()
     else:
         matrices = shopping.unpack_matrices(latent) if matrices is None else matrices
         probability, _, _ = shopping.soft_policy(
             shopping._reward(np.asarray(latent["common_reward"]) + theta[:4]),
             matrices, np.asarray(latent["action_mask"], dtype=bool))
+    probability[~np.asarray(latent["action_mask"], dtype=bool)] = 0.
     return {"action_offsets": theta[:4], "return_offset": float(theta[4]), "policy": probability}
 
 
-def map_objective(theta, counts, activity, base, matrices, mask, centre, penalty):
-    """Exact five-dimensional MAP gradient through the soft Bellman solution."""
+def map_objective(theta, counts, activity, base, matrices, mask, centre, penalty, *, available_actions=None):
+    """Exact identified-coordinate MAP gradient through the soft Bellman solution."""
+    active = parameter_indices(available_actions)
+    theta = np.asarray(theta)
+    if len(active) != 5:
+        theta = theta.copy()
+        theta[[i for i in range(5) if i not in active]] = 0.
+    if np.asarray(counts)[~mask].any():
+        raise ValueError("Gaussian likelihood contains an unsupported action")
     reward = shopping._reward(base + theta[:4])
     likelihood, gradient, _ = shopping.policy_likelihood_gradient(reward, counts, matrices, mask)
     eta = activity.base_logit.to_numpy() + theta[4]
     labels = activity.label.to_numpy()
     difference = theta - centre
+    if len(active) != 5:
+        difference[[i for i in range(5) if i not in active]] = 0.
     loss = -likelihood - (labels * eta - np.logaddexp(0, eta)).sum()
     derivative = np.r_[-gradient[:, :4].sum(axis=0), (expit(eta) - labels).sum()]
+    if len(active) != 5:
+        derivative[[i for i in range(5) if i not in active]] = 0.
     return float(loss + penalty * difference @ difference / 2), derivative + penalty * difference
 
 
-def fit_user_offsets(counts, activity, base, matrices, mask, centre, penalty):
-    result = minimize(map_objective, np.asarray(centre, dtype=float).copy(),
-        args=(counts, activity, base, matrices, mask, centre, penalty), jac=True,
+def fit_user_offsets(counts, activity, base, matrices, mask, centre, penalty, *, available_actions=None):
+    active = parameter_indices(available_actions)
+    if len(active) == 5:
+        objective = lambda theta: map_objective(theta, counts, activity, base, matrices, mask, centre, penalty)
+    else:
+        def objective(value):
+            theta = np.zeros(5)
+            theta[active] = value
+            loss, gradient = map_objective(theta, counts, activity, base, matrices, mask, centre, penalty,
+                                          available_actions=available_actions)
+            return loss, gradient[active]
+    result = minimize(objective, np.asarray(centre, dtype=float)[active].copy(), jac=True,
         method="L-BFGS-B", options={"maxiter": 250, "gtol": 1e-6, "ftol": 1e-10})
     if not result.success or not np.isfinite(result.x).all():
         raise ValueError(f"individual Gaussian reward MAP did not converge: {result.message}")
-    return result.x, {"iterations": int(result.nit), "gradient_max_abs": float(np.abs(result.jac).max())}
+    theta = np.zeros(5)
+    theta[active] = result.x
+    return theta, {"iterations": int(result.nit), "gradient_max_abs": float(np.abs(result.jac).max())}
 
 
 def source_session_masks(sessions, observation_end, cutoff=joint.CUTOFF):
@@ -115,14 +164,15 @@ def source_session_masks(sessions, observation_end, cutoff=joint.CUTOFF):
             "later": valid & sessions.start_at.ge(cutoff)}
 
 
-def weighted_gaussian_moments(coefficients, responsibility, original_means):
+def weighted_gaussian_moments(coefficients, responsibility, original_means, *, available_actions=None):
     """Empirical conditional moments; no artificial within-component jitter."""
     values = np.asarray(coefficients, dtype=float)
     responsibility = np.asarray(responsibility, dtype=float)
     means = np.asarray(original_means, dtype=float).copy()
+    active = parameter_indices(available_actions)
     if (values.ndim != 2 or values.shape[1] != 5
             or responsibility.shape != (len(values), len(means)) or means.shape[1:] != (5,)
-            or not np.isfinite(values).all() or not np.isfinite(means).all()
+            or not np.isfinite(values[:, active]).all() or not np.isfinite(means).all()
             or not np.isfinite(responsibility).all() or (responsibility < 0).any()
             or not np.allclose(responsibility.sum(axis=1), 1)):
         raise ValueError("invalid MAP values or frozen component responsibilities")
@@ -131,8 +181,14 @@ def weighted_gaussian_moments(coefficients, responsibility, original_means):
     for component, mass in enumerate(masses):
         if mass >= 1e-6:
             weights = responsibility[:, component] / mass
-            means[component] = weights @ values
-            variances[component] = weights @ np.square(values - means[component])
+            if len(active) == 5:
+                means[component] = weights @ values
+                variances[component] = weights @ np.square(values - means[component])
+            else:
+                means[component, active] = weights @ values[:, active]
+                variances[component, active] = weights @ np.square(values[:, active] - means[component, active])
+    if len(active) != 5:
+        means[:, [i for i in range(5) if i not in active]] = 0.
     return means, variances, masses
 
 
@@ -155,6 +211,7 @@ def _fit_map_effects(rows, model, return_model, max_users):
     if isinstance(max_users, bool) or not isinstance(max_users, int) or max_users < 2:
         raise ValueError("Gaussian fitting requires max_users >= 2")
     latent = model["latent_shopping"]
+    available = canonical_available_actions(latent["encoder"].get("available_actions"))
     weights = np.asarray(latent["mixture_weights"])
     original = np.column_stack([latent["component_offsets"], latent["return_activity"]["component_logit_offsets"]])
     centre = weights @ original
@@ -163,9 +220,15 @@ def _fit_map_effects(rows, model, return_model, max_users):
     users = sorted(rows.user_id.astype(str).unique(),
         key=lambda user: hashlib.sha256(f"gaussian-rewards:{seed}:{user}".encode()).digest())[:max_users]
     selected = rows.loc[rows.user_id.astype(str).isin(users)].copy()
-    data = shopping.build_source(selected, model["observation_end"], seed)
-    states, fallback = shopping.encode(latent["encoder"], data["features"])
-    masks = source_session_masks(data["sessions"], model["observation_end"])
+    memory = latent["encoder"].get("lifecycle_memory")
+    kwargs = {"available_actions": available}
+    if memory is not None:
+        kwargs["lifecycle_memory"] = memory
+    data = shopping.build_source(selected, model["observation_end"], seed, **kwargs)
+    states, fallback = (shopping.encode(latent["encoder"], data["features"]) if memory is None else
+                        shopping.encode(latent["encoder"], data["features"], phase_ids=source_phases.phase_ids(data["records"])))
+    cutoff = pd.Timestamp(latent.get("source_cutoff_at", latent["return_activity"].get("cutoff_at", joint.CUTOFF)))
+    masks = source_session_masks(data["sessions"], model["observation_end"], cutoff=cutoff)
     mask = np.asarray(latent["action_mask"], dtype=bool)
     all_indices = [np.arange(row.record_start, row.record_end)
                    for row in data["sessions"].loc[masks["all"]].itertuples()]
@@ -179,7 +242,6 @@ def _fit_map_effects(rows, model, return_model, max_users):
     activity = activity.loc[activity.user_id.astype(str).isin(users)
         & activity.target_at.le(pd.Timestamp(model["observation_end"]))].copy()
     activity["user_id"] = activity.user_id.astype(str)
-    cutoff = pd.Timestamp(joint.CUTOFF)
     activity_parts = {"all": activity, "prefix": activity.loc[activity.target_at.lt(cutoff)],
                       "later": activity.loc[activity["at"].ge(cutoff)]}
     observations = {name: _observations(data, states, chosen, activity_parts[name], users, len(mask))
@@ -198,10 +260,10 @@ def _fit_map_effects(rows, model, return_model, max_users):
     for penalty in PENALTIES:
         loss, count = 0., 0
         for user in tuning_users:
-            theta, fit = fit_user_offsets(*observations["prefix"][user], base, matrices, mask, centre, penalty)
+            theta, fit = fit_user_offsets(*observations["prefix"][user], base, matrices, mask, centre, penalty, available_actions=available)
             convergence.append(fit)
             later = observations["later"][user]
-            loss += map_objective(theta, *later, base, matrices, mask, centre, 0.)[0]
+            loss += map_objective(theta, *later, base, matrices, mask, centre, 0., available_actions=available)[0]
             count += exposure(later)
         grid.append({"penalty": penalty, "later_negative_log_likelihood_per_observation": loss / count,
                      "users": len(tuning_users), "observations": count})
@@ -209,7 +271,7 @@ def _fit_map_effects(rows, model, return_model, max_users):
     penalty = min(grid, key=lambda item: item["later_negative_log_likelihood_per_observation"])["penalty"]
     coefficients = []
     for user in supported_users:
-        theta, fit = fit_user_offsets(*observations["all"][user], base, matrices, mask, centre, penalty)
+        theta, fit = fit_user_offsets(*observations["all"][user], base, matrices, mask, centre, penalty, available_actions=available)
         coefficients.append(theta);convergence.append(fit)
     report = {
         "max_users": max_users, "sampled_users": len(users), "supported_users": len(supported_users),
@@ -231,13 +293,14 @@ def fit_gaussian(rows, model, return_model, max_users=256):
     started = time.perf_counter()
     supported_users, coefficients, report = _fit_map_effects(rows, model, return_model, max_users)
     latent = model["latent_shopping"]
+    available = canonical_available_actions(latent["encoder"].get("available_actions"))
     weights = np.asarray(latent["mixture_weights"])
     original = np.column_stack([latent["component_offsets"], latent["return_activity"]["component_logit_offsets"]])
     responsibilities = [latent["profile_posteriors"].get(
-        hashlib.sha256(f"cosmetics:{user}".encode()).hexdigest()[:16], latent["mixture_weights"])
+        source_profile_id(model.get("source_contract", {}).get("domain", model.get("source", {}).get("domain", "cosmetics")), str(user)), latent["mixture_weights"])
         for user in supported_users]
-    means, variances, masses = weighted_gaussian_moments(coefficients, responsibilities, original)
-    return {"schema_version": 1, "type": TYPE, "purpose": "synthesis_only",
+    means, variances, masses = weighted_gaussian_moments(coefficients, responsibilities, original, available_actions=available)
+    result = {"schema_version": 1, "type": TYPE, "purpose": "synthesis_only",
         "parameter_names": PARAMETERS, "component_count": len(weights), "mixture_weights": weights.tolist(),
         "means": means.tolist(), "variances": variances.tolist(),
         "fit": {"scope": FIT_SCOPE, "forecast_validation_uses_gaussian": False, **report,
@@ -248,6 +311,10 @@ def fit_gaussian(rows, model, return_model, max_users=256):
             "Diagonal covariance does not preserve within-component action/return correlations.",
             "Full-source user coefficients and donor responsibilities are synthesis traits, never live/heldout forecasting predictors.",
             "The frozen parent's forecast scores do not validate the Gaussian model; tuning scores only select MAP shrinkage."]}
+    if available != tuple(PARAMETERS[:4]):
+        result.update(available_actions=list(available), fitted_parameter_names=[PARAMETERS[i] for i in parameter_indices(available)])
+        result["fit"]["unobserved_parameter_rule"] = "MAP and Gaussian moments use identified coordinates only; other canonical slots are unused zero references, never observations."
+    return result
 
 
 def main():

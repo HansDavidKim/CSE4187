@@ -107,20 +107,35 @@ def _histogram(rows):
     return np.asarray(values), weights / weights.sum()
 
 
-def prepare_population(population, products, rng):
+def compile_population_catalog(products):
+    """Reuse the deterministic price index and assortment bounds across resets."""
+    if not products:
+        raise ValueError("population needs an active catalog")
+    by_price = sorted((row["unit_price_minor"], str(row["product_id"])) for row in products)
+    prices, ids = map(np.asarray, zip(*by_price))
+    prices.setflags(write=False)
+    ids.setflags(write=False)
+    return prices, ids, {}
+
+
+def prepare_population(population, products, rng, *, catalog_index=None):
     """Reuse the engine's checkout and item samplers with generated supports."""
     if population.get("schema_version") != 1 or not products or not population.get("home_groups"):
         raise ValueError("population needs an active catalog and calibrated home groups")
-    by_price = sorted((row["unit_price_minor"], str(row["product_id"])) for row in products)
-    product_prices, ids = map(np.asarray, zip(*by_price))
+    product_prices, ids, bounds = (compile_population_catalog(products)
+        if catalog_index is None else catalog_index)
 
     def assortment(size, price):
         size = min(size, len(ids))
-        lower, upper = np.searchsorted(product_prices, [price / 1.5, price * 1.5])
-        if upper - lower < size:
-            center = int(np.searchsorted(product_prices, price))
-            lower = max(0, min(center - size // 2, len(ids) - size))
-            upper = lower + size
+        key = size, price
+        if key not in bounds:
+            lower, upper = np.searchsorted(product_prices, [price / 1.5, price * 1.5])
+            if upper - lower < size:
+                center = int(np.searchsorted(product_prices, price))
+                lower = max(0, min(center - size // 2, len(ids) - size))
+                upper = lower + size
+            bounds[key] = lower, upper
+        lower, upper = bounds[key]
         return ids[lower + rng.choice(upper - lower, size=size, replace=False)].tolist()
 
     templates = []
