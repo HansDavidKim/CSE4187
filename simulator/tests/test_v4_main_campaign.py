@@ -13,6 +13,7 @@ from simulate.v4.irl.fit_return import FEATURE_NAMES
 from simulate.v4.irl.return_state import make_model
 from simulate.v4.simulator import main_campaign as main
 from simulate.v4.simulator.raw_store import RAW_COLUMNS, validate_raw_dataset
+from test_v4_checkout_simulator import cart_fulfillment
 
 
 @pytest.fixture
@@ -79,6 +80,105 @@ def factory(tmp_path, monkeypatch):
 def oracle(env):
     values=build_features(env.tables,as_of_at=env.now).iloc[0][list(EXPANDED_FEATURES)].to_numpy(float)
     np.testing.assert_allclose(env._features(),values,equal_nan=True)
+
+
+@pytest.mark.parametrize("held,quantity,source,remaining", [
+    ({"A": 2, "B": 1}, 1, "cart", {"A": 1, "B": 1}),
+    ({"A": 1, "B": 1}, 2, "mixed", {"B": 1}),
+    ({"B": 1}, 1, "buy_now", {"B": 1}),
+])
+def test_checkout_uses_held_sku_and_preserves_unbought_cart(factory, monkeypatch, held, quantity, source, remaining):
+    from simulate.v4.simulator.raw_store import cart_at
+    from uplift.common.features import build_features as uplift_features
+    def edit(model):
+        model["catalog"] += [{"product_id": "template", "category_id": "a", "unit_price_minor": 1009},
+                             {"product_id": "B", "category_id": "b", "unit_price_minor": 5000}]
+        model["profiles"][0]["checkout_templates"] = [{
+            "items": [{"product_id": "template", "quantity": quantity}], "observed_count": 1}]
+    env = factory(horizon_days=7, edit=edit)
+    env.reset(17)
+    monkeypatch.setattr(env, "_plan", lambda: None)
+    at = env.now
+    env._start_session(at, env.episode_end)
+    session = env._active
+    tick = 0
+    for pid, count in held.items():
+        monkeypatch.setattr(env, "_item", lambda *args, selected=pid: selected)
+        for _ in range(count):
+            session["planned"] = (at + pd.Timedelta(seconds=tick), "cart", 1.)
+            env._emit_action()
+            tick += 1
+    bought_at = at + pd.Timedelta(seconds=tick)
+    session["planned"] = (bought_at, "purchase", 1.)
+    env._emit_action()
+    env._close_session("causal_policy_end")
+    env.now = bought_at + pd.Timedelta(minutes=31)
+    tables = env.tables
+    assert tables["orders"].iloc[-1].checkout_source == source
+    purchased = tables["order_items"].groupby("product_id").quantity.sum().to_dict()
+    assert sum(purchased.values()) == quantity
+    assert purchased.get("A", 0) == min(held.get("A", 0), quantity)
+    assert dict(+env.state["cart"]) == cart_at(tables, env.uid, env.now) == remaining
+    assert not tables["events"].event_type.eq("remove_from_cart").any()
+    validate_raw_dataset({name: tables[name] for name in RAW_COLUMNS}, env.records["_metadata"])
+    kit = build_features(tables, as_of_at=env.now).iloc[0]
+    peer = uplift_features(tables, pd.DataFrame({"customer_id": [env.uid], "t0": [env.now]}), env.origin).iloc[0]
+    for feature in ("cart_qty_current", "cart_sku_current", "cart_gross_value_current"):
+        assert kit[feature] == peer[feature]
+    oracle(env)
+    # An actual later remove action still changes the held inventory by one unit.
+    env._start_session(env.now, env.episode_end)
+    monkeypatch.setattr(env, "_item", lambda *args: "B")
+    env._active["planned"] = (env.now, "remove", 0.)
+    env._emit_action()
+    env.now += pd.Timedelta(nanoseconds=1)
+    remaining = {pid: count for pid, count in remaining.items() if pid != "B"}
+    assert dict(+env.state["cart"]) == cart_at(env.tables, env.uid, env.now) == remaining
+    assert env.records["events"][-1]["event_type"] == "remove_from_cart"
+
+
+def test_checkout_fitted_cart_quota_balances_actual_prices_without_clearing_stock(factory, monkeypatch, cart_fulfillment):
+    from simulate.v4.irl.fit_checkout_spending import TYPE
+    from simulate.v4.simulator import population_profiles
+    from simulate.v4.simulator.raw_store import cart_at
+    def edit(model):
+        model["catalog"] += [dict(product_id=pid, category_id="fixture", unit_price_minor=price)
+                             for pid, price in (("target", 600), ("cheap", 500), ("dear", 700))]
+        model["profiles"][0]["checkout_templates"] = [{
+            "items": [{"product_id": "target", "quantity": 4}], "observed_count": 1}]
+    env = factory(horizon_days=7, edit=edit)
+    env.reset(17)
+    preference = np.log([4., 600.]).tolist()
+    env.population = {"checkout_spending": {"schema_version": 1, "type": TYPE, "mean": preference,
+        "between_covariance": [[0., 0.], [0., 0.]], "within_covariance": [[1., 0.], [0., 1.]],
+        "cart_fulfillment": cart_fulfillment}}
+    env.profile["checkout_spending_preference"] = preference
+    monkeypatch.setattr(env, "_plan", lambda: None)
+    at = env.now
+    env._start_session(at, env.episode_end)
+    session = env._active
+    for tick, pid in enumerate(["cheap"] * 4 + ["dear"] * 2):
+        monkeypatch.setattr(env, "_item", lambda *args, selected=pid: selected)
+        session["planned"] = (at + pd.Timedelta(seconds=tick), "cart", 1.)
+        env._emit_action()
+    allocate, calls = population_profiles._budgeted_cart_units, []
+    def budgeted(*args):
+        calls.append(True)
+        return allocate(*args)
+    monkeypatch.setattr(population_profiles, "_budgeted_cart_units", budgeted)
+    session["planned"] = (at + pd.Timedelta(seconds=6), "purchase", 1.)
+    env._emit_action()
+    env._close_session("causal_policy_end")
+    env.now = at + pd.Timedelta(minutes=31)
+    tables = env.tables
+    assert calls == [True]
+    assert tables["orders"].iloc[-1].checkout_source == "cart"
+    assert tables["orders"].iloc[-1].gross_minor == tables["orders"].iloc[-1].paid_minor == 2400
+    assert tables["order_items"].groupby("product_id").quantity.sum().to_dict() == {"cheap": 2, "dear": 2}
+    assert dict(+env.state["cart"]) == cart_at(tables, env.uid, env.now) == {"cheap": 2}
+    assert not tables["events"].event_type.eq("remove_from_cart").any()
+    validate_raw_dataset({name: tables[name] for name in RAW_COLUMNS}, env.records["_metadata"])
+    oracle(env)
 
 
 def test_native_banks_and_raw_history_identical_for_whole_weekly_daily_advances(factory,monkeypatch):

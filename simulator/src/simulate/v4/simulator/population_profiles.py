@@ -1,5 +1,6 @@
 """Generate products, assortments and customer traits from population counts."""
 from collections import Counter, defaultdict
+import math
 
 import numpy as np
 
@@ -168,6 +169,9 @@ def prepare_population(population, products, rng, *, catalog_index=None):
                         "checkout_templates": templates}
         sizes, size_weights = _histogram(group["assortment_size_counts"])
         prices, price_weights = _histogram(group["preferred_price_counts"])
+        if spending is not None and spending.get("assortment_price_copula") is not None:
+            order = np.argsort(prices)
+            prices, price_weights = prices[order], price_weights[order]
         components = np.asarray(group["component_probabilities"], dtype=float)
         if (components.ndim != 1 or not len(components) or not np.isfinite(components).all()
                 or (components < 0).any() or not np.isclose(components.sum(), 1)
@@ -181,7 +185,16 @@ def prepare_population(population, products, rng, *, catalog_index=None):
         group = population["home_groups"][name]
         sizes, size_weights, prices, price_weights, components = parameters[name]
         size = int(rng.choice(sizes, p=size_weights))
-        price = int(rng.choice(prices, p=price_weights))
+        preference = None
+        copula = spending.get("assortment_price_copula") if spending is not None else None
+        if copula is not None:
+            preference = rng.multivariate_normal(spending["mean"], spending["between_covariance"], check_valid="raise").tolist()
+            standard_price = (preference[1] - spending["mean"][1]) / math.sqrt(spending["between_covariance"][1][1])
+            rho = copula["rho"]
+            price_rank = .5 * (1 + math.erf((rho * standard_price + math.sqrt(1 - rho ** 2) * rng.normal()) / math.sqrt(2)))
+            price = int(prices[min(len(prices) - 1, np.searchsorted(price_weights.cumsum(), price_rank, side="right"))])
+        else:
+            price = int(rng.choice(prices, p=price_weights))
         favorites = assortment(size, price)
         if len(favorites) > 1:
             head = max(1 / len(favorites), group["leading_preference_share"])
@@ -193,26 +206,106 @@ def prepare_population(population, products, rng, *, catalog_index=None):
                 "checkout_preference_share": group["checkout_preference_share"],
                 "component_probabilities": components}
         if spending is not None:
-            profile["checkout_spending_preference"] = rng.multivariate_normal(
+            profile["checkout_spending_preference"] = preference if preference is not None else rng.multivariate_normal(
                 spending["mean"], spending["between_covariance"], check_valid="raise").tolist()
         return profile
 
     return groups, draw_profile
 
 
-def align_checkout_basket(basket, profile, products_by_id, rng):
-    """Reuse preferred SKUs while preserving the selected checkout price."""
-    share = profile["checkout_preference_share"]
-    if not share:
-        return basket
+def _budgeted_cart_units(reserved, held, direct, quota, products, units, lower, upper):
+    """Maximize feasible held units inside the sampled checkout's total price bin."""
+    from scipy.optimize import Bounds, LinearConstraint, milp
+
+    held_ids = sorted(pid for pid, qty in held.items() if qty > 0)
+    direct_ids = sorted(pid for pid, qty in direct.items() if qty > 0)
+    ids = held_ids + direct_ids
+    capacities = np.asarray([held[pid] for pid in held_ids] + [direct[pid] for pid in direct_ids])
+    prices = np.asarray([products[pid]["unit_price_minor"] for pid in ids])
+    held_flags = np.asarray([1] * len(held_ids) + [0] * len(direct_ids))
+    reserved_amount = sum(products[pid]["unit_price_minor"] * qty for pid, qty in reserved.items())
+    remaining = units - sum(reserved.values())
+    solution = milp(-held_flags.astype(float), integrality=np.ones(len(ids)), bounds=Bounds(0, capacities),
+        constraints=LinearConstraint(np.vstack([np.ones(len(ids)), prices, held_flags]),
+            [remaining, lower - reserved_amount, 0], [remaining, upper - reserved_amount, quota]))
+    if not solution.success or solution.x is None or not np.isfinite(solution.x).all():
+        raise ValueError("cart allocation could not verify a feasible checkout budget")
+    quantities = np.rint(solution.x).astype(np.int64)
+    if (np.any(np.abs(solution.x - quantities) > 1e-6) or np.any(quantities < 0)
+            or np.any(quantities > capacities) or quantities.sum() != remaining
+            or not lower <= reserved_amount + int(prices @ quantities) <= upper
+            or int(held_flags @ quantities) > quota):
+        raise ValueError("cart allocation violates checkout quantities or budget")
+    result = Counter(reserved)
+    for pid, quantity in zip(held_ids, quantities[:len(held_ids)]):
+        result[pid] += int(quantity)
+    rest = Counter({pid: int(quantity) for pid, quantity in zip(direct_ids, quantities[len(held_ids):]) if quantity})
+    return result, rest
+
+
+def align_checkout_basket(basket, profile, products_by_id, rng, *, cart=None, cart_fulfillment=None):
+    """Fill checkout quantities from the observed cart-route prior and actual stock."""
+    held = {sku: quantity for sku, quantity in (cart or {}).items() if quantity > 0}
+    held_by_price = defaultdict(list)
+    share = profile.get("checkout_preference_share", 0)
     favorites_by_price = defaultdict(list)
-    for sku in reversed(profile["product_weights"]):
-        if sku not in basket:
+    for sku in reversed(profile.get("product_weights", {})):
+        if sku not in basket and (cart_fulfillment is None or not (cart or {}).get(sku, 0)):
             favorites_by_price[products_by_id[sku]["unit_price_minor"]].append(sku)
-    result = {}
+    result = Counter()
+    if cart_fulfillment is not None and held:
+        units = sum(basket.values())
+        target_price = sum(products_by_id[sku]["unit_price_minor"] * qty for sku, qty in basket.items()) / units
+        rows = cart_fulfillment["fraction_counts"]
+        weights = np.asarray([count for _, _, count in rows], dtype=float)
+        numerator, denominator, _ = rows[int(rng.choice(len(rows), p=weights / weights.sum()))]
+        capacity = min(sum(held.values()), units)
+        quotient, remainder = divmod(numerator * capacity, denominator)
+        quota = quotient + int(bool(remainder) and rng.random() < remainder / denominator)
+        direct = Counter(basket)
+        for sku, quantity in basket.items():
+            matched = min(held.get(sku, 0), quantity)
+            result[sku] += matched
+            held[sku] = held.get(sku, 0) - matched
+            direct[sku] -= matched
+        needed = max(0, quota - sum(result.values()))
+        reserved, original_direct, extra_quota = result.copy(), direct.copy(), needed
+        for sku in sorted(held, key=lambda pid: (abs(products_by_id[pid]["unit_price_minor"] - target_price), pid)):
+            quantity = min(held[sku], needed)
+            while quantity:
+                replaced = min((pid for pid, count in direct.items() if count),
+                    key=lambda pid: (abs(products_by_id[pid]["unit_price_minor"] - products_by_id[sku]["unit_price_minor"]), pid))
+                consumed = min(quantity, direct[replaced])
+                result[sku] += consumed
+                direct[replaced] -= consumed
+                quantity -= consumed
+                needed -= consumed
+            if not needed:
+                break
+        price, width = _price_band(target_price)
+        lower, upper = price * units, (price + width) * units - 1
+        amount = sum(products_by_id[pid]["unit_price_minor"] * qty for pid, qty in (result + direct).items())
+        if not lower <= amount <= upper:
+            result, direct = _budgeted_cart_units(reserved, held, original_direct, extra_quota,
+                products_by_id, units, lower, upper)
+        basket = {sku: quantity for sku, quantity in direct.items() if quantity}
+    else:
+        for sku in held:
+            held_by_price[_price_band(products_by_id[sku]["unit_price_minor"])[0]].append(sku)
     for sku, quantity in basket.items():
-        favorites = favorites_by_price.get(products_by_id[sku]["unit_price_minor"])
-        if favorites and rng.random() < share:
-            sku = favorites.pop()
-        result[sku] = quantity
-    return result
+        price = products_by_id[sku]["unit_price_minor"]
+        candidates = sorted(held_by_price[_price_band(price)[0]],
+            key=lambda candidate: (abs(products_by_id[candidate]["unit_price_minor"] - price), candidate != sku, candidate))
+        for candidate in candidates:
+            consumed = min(held[candidate], quantity)
+            result[candidate] += consumed
+            held[candidate] -= consumed
+            quantity -= consumed
+            if not quantity:
+                break
+        if quantity:
+            favorites = favorites_by_price.get(price)
+            if favorites and share and rng.random() < share:
+                sku = favorites.pop()
+            result[sku] += quantity
+    return {sku: quantity for sku, quantity in result.items() if quantity > 0}

@@ -27,6 +27,7 @@ from .lifecycle import build_observed_lifecycle
 from .item_choice import item_probabilities
 from .coupon_response import sample_coupon_response, validate_response_model
 from .coupon_assignment import resolve_coupon_assignment, assign_coupons
+from .population_profiles import align_checkout_basket
 from ..time_spec import WEEKLY_TIME_SPEC, weekly_calendar, weekly_metadata
 
 LOGGER = logging.getLogger(__name__)
@@ -158,7 +159,7 @@ class EcommerceSimulator:
         runtime_paths = {"engine": Path(__file__),
                          "session_observations": Path(__file__).parents[1] / "session_observations.py",
                          **{name: Path(__file__).with_name(f"{name}.py")
-                            for name in ("lifecycle", "item_choice", "outcomes", "raw_store", "coupon_response", "coupon_assignment")},
+                            for name in ("lifecycle", "item_choice", "outcomes", "raw_store", "coupon_response", "coupon_assignment", "population_profiles")},
                          **{name: Path(__file__).parents[1] / "irl" / f"{name}.py"
                             for name in ("fit_shopping", "fit_return")}}
         runtime_hashes = {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in runtime_paths.items()}
@@ -930,8 +931,8 @@ class EcommerceSimulator:
                     elif action == "purchase":
                         if checkout_episodes:
                             basket = checkout_basket(profile, state)
-                            if population is not None:
-                                basket = population_profiles.align_checkout_basket(basket, profile, products_by_id, rng)
+                            basket = align_checkout_basket(basket, profile, products_by_id, rng, cart=state["cart"],
+                                cart_fulfillment=checkout_spending.get("cart_fulfillment") if checkout_spending else None)
                             held_units = sum(min(state["cart"][pid], quantity) for pid, quantity in basket.items())
                             interaction_units = sum(basket.values())
                             source = "cart" if held_units == interaction_units else "mixed" if held_units else "buy_now"
@@ -1375,6 +1376,8 @@ class EcommerceSimulator:
             "checkout_generation": ({"type": checkout_spending["type"], "schema_version": checkout_spending["schema_version"],
                 "fit": checkout_spending["fit"], "preference_clock": "one private draw per synthetic customer, fixed across all purchases",
                 "pool": "source-supported joint size/price frequencies times conditional/marginal Gaussian density ratio",
+                "cart_fulfillment": checkout_spending.get("cart_fulfillment"),
+                "cart_budget": "sampled total units and aggregate mean-price bin; maximize feasible held units up to the observed routing target",
                 "replaces": "last-price transition kernel; no independent size draw", "causal_effect_identified": False}
                 if checkout_spending is not None else {"type": checkout_kernel["type"], "loc": checkout_kernel["loc"],
                 "scale": checkout_kernel["scale"], "training_transitions": checkout_kernel["training_transitions"],
@@ -1394,9 +1397,9 @@ class EcommerceSimulator:
                 ("prices are fixed by the supplied product catalog" if product_input is not None
                  else "synthetic SKU prices are sampled from aggregate price bins" if population is not None
                  else "fixed product price is positive observed source mode"),
-                ("initial cart empty; generated checkout baskets consume matching held units and preserve the rest"
+                ("initial cart empty; generated checkouts prefer held goods within calibrated quantity and price targets; unpurchased units remain"
                  if population is not None else
-                 "initial cart empty; observed checkout templates consume matching held units and preserve the rest; rows are unit proxies, not verified source quantities"
+                 "initial cart empty; observed checkout quantities prefer held SKUs in the same price bin; unpurchased units remain; rows are unit proxies, not verified source quantities"
                  if checkout_episodes else "initial cart empty; additions one unit; cart purchases checkout the whole basket"), "first observed event is not an actual source signup",
                 "signup is supplied or structural uniform sampling, not verified source signup; lifecycle ENTRY/HOME/EXIT uses observed sessions and elapsed 28-day inactivity only",
                 ("30d activity windows and retention calibration alter absolute source visit rates" if target is not None

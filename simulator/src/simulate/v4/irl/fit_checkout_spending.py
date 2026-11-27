@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
+from fractions import Fraction
 import hashlib
 import json
 from pathlib import Path
@@ -28,6 +30,28 @@ def validate_spending_model(model):
         eigenvalues = np.linalg.eigvalsh(covariance)
         if eigenvalues.min() < -1e-12 * max(1, abs(covariance).max()) or (positive and eigenvalues.min() <= 0):
             raise ValueError("checkout spending within covariance must be positive definite; between must be nonnegative")
+    copula = model.get("assortment_price_copula")
+    if copula is not None:
+        rho = copula.get("rho") if isinstance(copula, dict) else None
+        if (not isinstance(copula, dict) or copula.get("type") != "source_gaussian_rank_preferred_checkout_price"
+                or isinstance(rho, bool) or not isinstance(rho, (int, float)) or not np.isfinite(rho) or abs(rho) > 1
+                or model["between_covariance"][1][1] <= 0):
+            raise ValueError("assortment price copula needs a finite correlation and varying checkout price preference")
+    fulfillment = model.get("cart_fulfillment")
+    if fulfillment is not None:
+        fractions = fulfillment.get("fraction_counts") if isinstance(fulfillment, dict) else None
+        if (not isinstance(fulfillment, dict) or fulfillment.get("type") != "source_observed_checkout_cart_fraction"
+                or not isinstance(fractions, list) or not fractions):
+            raise ValueError("cart fulfillment needs observed capacity fractions")
+        seen = set()
+        for row in fractions:
+            if (not isinstance(row, list) or len(row) != 3 or any(type(value) is not int for value in row)
+                    or not 0 <= row[0] <= row[1] or row[1] <= 0 or row[2] <= 0):
+                raise ValueError("cart fulfillment fractions need integer 0<=numerator<=denominator and positive counts")
+            fraction = Fraction(row[0], row[1])
+            if fraction in seen:
+                raise ValueError("cart fulfillment fractions must be unique")
+            seen.add(fraction)
 
 
 def spending_pool_weights(model, sourceweights, units, unitprices, preference):
@@ -63,7 +87,7 @@ def _log_density(value, mean, covariance):
                    + difference @ np.linalg.solve(covariance, difference))
 
 
-def fit_spending_model(episodes, cutoff, seed=42):
+def fit_spending_model(episodes, cutoff, seed=42, *, purchase_rows=None):
     """Method-of-moments random intercept; source users and future targets stay held out."""
     cutoff = pd.Timestamp(cutoff)
     if pd.isna(cutoff) or cutoff.tzinfo is None:
@@ -120,7 +144,87 @@ def fit_spending_model(episodes, cutoff, seed=42):
         "persistent_nll": float(np.mean(losses, axis=0)[0]) if losses else None,
         "independent_nll": float(np.mean(losses, axis=0)[1]) if losses else None}
         for name, losses in validation.items()}
+    if purchase_rows is not None:
+        model["assortment_price_copula"] = fit_assortment_price_copula(episodes, purchase_rows, cutoff, seed)
+        fulfillment = fit_cart_fulfillment(purchase_rows, cutoff, seed)
+        if fulfillment is not None:
+            model["cart_fulfillment"] = fulfillment
+        validate_spending_model(model)
     return model
+
+
+def fit_assortment_price_copula(episodes, rows, cutoff, seed=42):
+    """Couple existing price marginals using training-user purchase ranks only."""
+    cutoff = pd.Timestamp(cutoff)
+    training_user = lambda uid: hashlib.sha256(f"{seed}:{uid}".encode()).digest()[0] < 205
+    purchases = rows.loc[rows.action.eq("purchase") & rows["at"].lt(cutoff)
+        & rows.user_id.map(training_user) & rows.price_minor.gt(0)]
+    preferred = purchases.groupby("user_id").price_minor.quantile(.5, interpolation="lower").rename("preferred")
+    checkouts = episodes.loc[episodes.catalog_supported & episodes["at"].lt(cutoff)
+        & episodes.user_id.map(training_user)]
+    average = checkouts.groupby("user_id").unit_mean_price_minor.mean().rename("checkout")
+    paired = pd.concat([preferred, average], axis=1, join="inner")
+    correlation = paired.preferred.corr(paired.checkout, method="spearman")
+    if len(paired) < 3 or not np.isfinite(correlation):
+        raise ValueError("assortment price coupling requires varying purchase prices from multiple training users")
+    return {"type": "source_gaussian_rank_preferred_checkout_price", "rho": float(2 * np.sin(np.pi * correlation / 6)),
+            "source_spearman": float(correlation), "training_users": len(paired), "training_purchase_rows": len(purchases),
+            "training_checkout_episodes": len(checkouts),
+            "preferred_price": "lower median observed purchase unit price per customer",
+            "checkout_price": "mean fixed-catalog checkout unit-mean price per customer",
+            "marginals": "existing home-group preferred-price histogram and persistent checkout Gaussian unchanged",
+            "limitation": "observed customer-average price ranks approximate latent budget ranks; not an identified causal link"}
+
+
+def fit_cart_fulfillment(rows, cutoff, seed=42):
+    """Replay observed SKU units; empty initial source inventory is only a lower bound."""
+    cutoff = pd.Timestamp(cutoff)
+    selected = rows.loc[rows["at"].lt(cutoff) & rows.user_id.map(
+        lambda uid: hashlib.sha256(f"{seed}:{uid}".encode()).digest()[0] < 205)]
+    order = ["user_id", "at"] + (["source_event_id"] if "source_event_id" in selected else [])
+    fractions, audit = Counter(), Counter()
+    for _, history in selected.sort_values(order, kind="stable").groupby("user_id", sort=False):
+        cart = Counter()
+        active, before, units, matched = None, 0, 0, 0
+
+        def finish():
+            if units:
+                audit["training_checkouts"] += 1
+                audit["purchase_unit_proxies"] += units
+                audit["matched_cart_unit_proxies"] += matched
+                capacity = min(before, units)
+                if capacity:
+                    fractions[Fraction(matched, capacity)] += 1
+                    audit["checkouts_with_known_cart_capacity"] += 1
+                    audit["known_cart_capacity_unit_proxies"] += capacity
+
+        for row in history.itertuples(index=False):
+            key = (row.session, row.at) if row.action == "purchase" else None
+            if key is None or key != active:
+                finish()
+                active, before, units, matched = key, sum(cart.values()), 0, 0
+            product = str(row.product_id)
+            if row.action == "cart":
+                cart[product] += 1
+            elif row.action == "remove":
+                if not cart[product]:
+                    audit["remove_rows_without_known_unit"] += 1
+                cart[product] -= min(cart[product], 1)
+            elif row.action == "purchase":
+                units += 1
+                held = min(cart[product], 1)
+                matched += held
+                cart[product] -= held
+        finish()
+    if not fractions:
+        return None
+    return {"type": "source_observed_checkout_cart_fraction",
+            "fraction_counts": [[value.numerator, value.denominator, count] for value, count in sorted(fractions.items())],
+            "fit": dict(audit), "fraction": "matched observed SKU units / min(known cart units before checkout, checkout units)",
+            "source_units": "one action row is a unit proxy; contiguous same-user/session/timestamp purchases form one checkout",
+            "inventory": "unknown initial cart; replay observed adds and clip unmatched removals without fabricating units",
+            "empty_cart": "no fraction observation when cart capacity is zero",
+            "limitations": "Observed source cart is a lower bound; no cart lifetime, TTL, or causal abandonment rate is identified."}
 
 
 if __name__ == "__main__":
@@ -140,7 +244,7 @@ if __name__ == "__main__":
     cutoff = source.get("source_contract", {}).get("training_cutoff_at",
         source.get("source", {}).get("training_cutoff_at", source.get("validation", {}).get("cutoff_at_utc")))
     result = fit_spending_model(build_checkout_episodes(rows, source["catalog"]),
-        cutoff, source["seed"])
+        cutoff, source["seed"], purchase_rows=rows)
     result["source"] = {"model_sha256": hashlib.sha256(content).hexdigest(), "prepared_cache": descriptor}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x") as stream:

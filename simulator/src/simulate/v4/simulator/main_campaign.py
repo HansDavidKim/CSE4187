@@ -679,9 +679,10 @@ class MainCampaignEnv:
 
     def _purchase(self, at, session):
         basket=self._basket()
-        if self.population is not None:
-            from .population_profiles import align_checkout_basket
-            basket=align_checkout_basket(basket,self.profile,self.products,self.rng)
+        from .population_profiles import align_checkout_basket
+        spending=(self.population or {}).get("checkout_spending") or {}
+        basket=align_checkout_basket(basket,self.profile,self.products,self.rng,cart=self.state["cart"],
+            cart_fulfillment=spending.get("cart_fulfillment"))
         units=sum(basket.values());state=self.state
         held=sum(min(state["cart"][pid],qty) for pid,qty in basket.items())
         source="cart" if held==units else "mixed" if held else "buy_now"
