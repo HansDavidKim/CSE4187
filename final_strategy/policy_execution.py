@@ -39,7 +39,7 @@ CLV_INPUT_COLUMNS = ("customer_id", "as_of_at", "snapshot_id", "reference_week",
                      "views", "session_seconds")
 OUTCOME_FIELDS = ("dataset_id", "snapshot_id", "as_of_at", "assigned_at", "treatment", "assignment_probability",
                   "coupon_action", "decision_action", "requested_coupon_id", "actual_sent", "coupon_id",
-                  "sent_at", "expires_at", "execution_status", "failure_reason", "redeemed_in_outcome",
+                  "sent_at", "expires_at", "discount_rate", "execution_status", "failure_reason", "redeemed_in_outcome",
                   "outcome_redemption_discount_cost_minor", "send_cost_minor", "factual_no_order",
                   "factual_no_session", "factual_outcome_net_revenue_minor", "outcome_end_at",
                   "outcome_observed", "is_censored", "label_known_at", "currency", "amount_unit")
@@ -215,8 +215,13 @@ def _generate(root, config, count, seed, assignment):
                                                           coupon_assignment=assignment)
     result.save(root / "dataset")
     del result
+    materialize_features(root / "dataset", root / "features")
+    return _read_generation(root, count, seed, assignment)
+
+
+def _read_generation(root, count, seed, assignment):
+    """Read and verify an existing simulator publication without regenerating it."""
     directory = root / "features"
-    materialize_features(root / "dataset", directory)
     features = load_feature_store(directory)
     manifest = _json(directory / "manifest.json")
     require(features.attrs["feature_store_evidence"]["raw_file_verified"]
@@ -276,7 +281,7 @@ def _verify_origins(baseline, replay, selected):
             and after["treated_count"] == len(selected), "replay assignment differs from execution origins")
 
 
-def _outcomes(log, audit, origin, selected, source_log):
+def _outcomes(log, audit, origin, selected, source_log, *, include_discount_rate=False):
     key = "customer_id"
     require(not log[key].duplicated().any() and set(log[key]) == set(audit[key]), "outcome roster mismatch")
     log = log.set_index(key).sort_index()
@@ -321,11 +326,18 @@ def _outcomes(log, audit, origin, selected, source_log):
     fields = list(OUTCOME_FIELDS)
     source = source_log.set_index(key, verify_integrity=True).sort_index()
     _same("experiment log versus raw ledger and sidecars", source[fields], log[fields])
+    if not include_discount_rate:
+        fields.remove("discount_rate")
     return log[fields].join(plan[["selected", "row_state", "model_exclusion_reason", "planned_sent_at"]]).reset_index()
 
 
 def _verify_artifacts(root, receipt, outcome):
     _plan_manifest(root / "plan", receipt["plan_manifest_sha256"])
+    _verify_execution_artifacts(root, receipt)
+    require(file_sha256(outcome) == receipt["outcomes_sha256"], "changed outcomes.parquet")
+
+
+def _verify_execution_artifacts(root, receipt):
     for name in ("baseline", "replay"):
         origin = receipt[name]
         run = root / name
@@ -351,7 +363,6 @@ def _verify_artifacts(root, receipt, outcome):
             require(file_sha256(file) == generation["sidecar_sha256"][source], f"changed {name}/dataset/{file.name}")
     _verify_origins(receipt["baseline"], receipt["replay"], receipt["selected_ids"])
     require(_fingerprint(receipt["selected_ids"]) == receipt["request_sha256"], "changed request roster")
-    require(file_sha256(outcome) == receipt["outcomes_sha256"], "changed outcomes.parquet")
 
 
 def verify_replay_receipt(output):
@@ -364,6 +375,24 @@ def verify_replay_receipt(output):
             "no successful replay receipt")
     _verify_artifacts(root, receipt, root / "outcomes.parquet")
     return receipt
+
+
+def _compare_replay(baseline, replay, selected, past, other, features, after,
+                    history, after_history, inputs, replay_inputs):
+    _verify_origins(baseline, replay, selected)
+    for field in inputs:
+        require(inputs[field] == replay_inputs[field], f"generation input differs: {field}")
+    for name, frame in past.items():
+        _same(name, frame, other[name])
+    for name, first, second, keys in (
+        ("features", features, after, ["customer_id"]),
+        ("clv_history", history, after_history, ["customer_id", "reference_week"]),
+    ):
+        origins = ["dataset_id", "raw_database_sha256"]
+        _same(name, first.drop(columns=origins, errors="ignore").set_index(keys).sort_index(),
+              second.drop(columns=origins, errors="ignore").set_index(keys).sort_index())
+    return dict(public_pre_state="verified", pre_cutoff_rows={key: len(value) for key, value in past.items()},
+                feature_rows=len(features), clv_history_rows=len(history))
 
 
 def run_policy_replay(output, *, prepare_inputs, seed, n_customers, mode, config=POPULATION_CONFIG):
@@ -412,19 +441,8 @@ def run_policy_replay(output, *, prepare_inputs, seed, n_customers, mode, config
             root / "replay", settings, n_customers, seed, {"mode": "assign", "customer_ids": selected})
         receipt["replay"] = replay
         stage = "public_pre_state"
-        _verify_origins(baseline, replay, selected)
-        for field in inputs:
-            require(inputs[field] == replay_inputs[field], f"generation input differs: {field}")
-        for name, frame in past.items():
-            _same(name, frame, other[name])
-        for name, first, second, keys in (
-            ("features", features, after, ["customer_id"]),
-            ("clv_history", history, after_history, ["customer_id", "reference_week"]),
-        ):
-            _same(name, first.drop(columns=["dataset_id", "raw_database_sha256"], errors="ignore").set_index(keys).sort_index(),
-                  second.drop(columns=["dataset_id", "raw_database_sha256"], errors="ignore").set_index(keys).sort_index())
-        receipt.update(public_pre_state="verified", pre_cutoff_rows={k: len(v) for k, v in past.items()},
-                       feature_rows=len(features), clv_history_rows=len(history))
+        receipt.update(_compare_replay(baseline, replay, selected, past, other, features, after,
+                                       history, after_history, inputs, replay_inputs))
         stage = "outcomes"
         outcomes = _outcomes(log, plan.decision_audit, replay, selected, source_log)
         path = root / "outcomes.parquet"

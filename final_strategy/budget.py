@@ -249,10 +249,20 @@ def _prepare(segmentation, costs, cost_metadata, budget, dataset_id, as_of_at):
     if any(not math.isclose(a, b, rel_tol=1e-12, abs_tol=0) for a, b in zip(joined.priority_score, expected_scores)):
         raise InputValidationError("budget.priority_score: differs from uplift_score * predicted_clv_12m")
     validated_at = perf_counter()
+    return _prepare_allocation(
+        joined, excluded, amount, places, budget_ticks, cost_metadata, cost_clock,
+        dataset_id, point, currency, unit, metadata, preparation_started, validated_at,
+        objective_column="priority_score")
+
+
+def _prepare_allocation(joined, excluded, amount, places, budget_ticks, cost_metadata, cost_clock,
+                        dataset_id, point, currency, unit, metadata, preparation_started, validated_at,
+                        *, objective_column):
+    """Scale costs and objective coefficients after caller-side input validation."""
     declared_costs = [_decimal(value, "expected_cost") for value in joined.expected_cost]
     ticks = [_ticks(value, places, "expected_cost") for value in declared_costs]
     joined["expected_cost"] = declared_costs
-    scores = joined.priority_score.to_numpy(dtype=float, copy=True)
+    scores = joined[objective_column].to_numpy(dtype=float, copy=True)
     customer_ids = joined.customer_id.to_numpy(copy=True)
     active = [i for i, (value, tick) in enumerate(zip(scores, ticks)) if value > 0 and 0 < tick <= budget_ticks]
     free = [i for i, (value, tick) in enumerate(zip(scores, ticks)) if value > 0 and tick == 0]
@@ -270,7 +280,7 @@ def _prepare(segmentation, costs, cost_metadata, budget, dataset_id, as_of_at):
     scale = float(active_scores.max()) if len(active_scores) else 1.0
     objectives = active_scores / scale
     if len(objectives) and min(objectives) < MIN_OBJECTIVE_COEFFICIENT:
-        raise InputValidationError("budget.priority_score: unsupported objective coefficient dynamic range")
+        raise InputValidationError(f"budget.{objective_column}: unsupported objective coefficient dynamic range")
     _score_sum(scores[scores > 0])
     return {"rows": joined, "excluded": excluded.sort_values("customer_id", kind="stable").reset_index(drop=True),
             "preparation_timings": {"input_validation_seconds": validated_at-preparation_started,

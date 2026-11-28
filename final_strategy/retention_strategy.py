@@ -251,6 +251,32 @@ def _price_cost_inputs(estimates, cost_metadata, point):
     return estimates
 
 
+def _coupon_eligibility(d, customer_id, cp, rd, interval, point, history_policy):
+    if not isinstance(d.history_complete, (bool, np.bool_)):
+        _fail("history_complete must be explicit bool")
+    business = d.business_eligible
+    if pd.notna(business) and not isinstance(business, (bool, np.bool_)):
+        _fail("business_eligible must be bool or NULL")
+    if business is True or isinstance(business, np.bool_) and business:
+        if pd.notna(d.business_reason): _fail("eligible business row cannot have exclusion reason")
+        eligible, reason = True, None
+    else:
+        engine._text(d.business_reason, "business_reason")
+        eligible, reason = (False if pd.notna(business) else pd.NA), d.business_reason
+    personal = cp.loc[cp.customer_id.eq(customer_id)]
+    used = set(rd.loc[rd.customer_id.eq(customer_id), "coupon_id"])
+    active_unused = personal.expires_at.gt(point) & ~personal.coupon_id.isin(used)
+    if eligible is True:
+        if not d.history_complete:
+            if history_policy.incomplete_history == "error": _fail("incomplete history")
+            eligible = False if history_policy.incomplete_history == "exclude" else pd.NA
+            reason = "history_incomplete"
+        elif history_policy.block_active_unused and active_unused.any(): eligible, reason = False, "active_unused_coupon"
+        elif history_policy.block_previously_redeemed and used: eligible, reason = False, "previously_redeemed"
+        elif len(personal) and point - personal.sent_at.max() < interval: eligible, reason = False, "minimum_send_interval"
+    return eligible, reason, business, personal, used, active_unused
+
+
 def _build_retention_strategy(segmentation, eligibility, coupons, redemptions, cost_inputs, cost_metadata, *,
                               dataset_id, as_of_at, currency, amount_unit, history_context, history_policy,
                               policies, common_cost_inputs=False):
@@ -285,28 +311,8 @@ def _build_retention_strategy(segmentation, eligibility, coupons, redemptions, c
         if isinstance(uplift, (bool, np.bool_)) or not np.isfinite(uplift) or not -1 <= uplift <= 1:
             _fail("invalid uplift")
         d = declared.loc[row.customer_id]
-        if not isinstance(d.history_complete, (bool, np.bool_)):
-            _fail("history_complete must be explicit bool")
-        business = d.business_eligible
-        if pd.notna(business) and not isinstance(business, (bool, np.bool_)):
-            _fail("business_eligible must be bool or NULL")
-        if business is True or isinstance(business, np.bool_) and business:
-            if pd.notna(d.business_reason): _fail("eligible business row cannot have exclusion reason")
-            eligible, reason = True, None
-        else:
-            engine._text(d.business_reason, "business_reason")
-            eligible, reason = (False if pd.notna(business) else pd.NA), d.business_reason
-        personal = cp.loc[cp.customer_id.eq(row.customer_id)]
-        used = set(rd.loc[rd.customer_id.eq(row.customer_id), "coupon_id"])
-        active_unused = personal.expires_at.gt(point) & ~personal.coupon_id.isin(used)
-        if eligible is True:
-            if not d.history_complete:
-                if history_policy.incomplete_history == "error": _fail("incomplete history")
-                eligible = False if history_policy.incomplete_history == "exclude" else pd.NA
-                reason = "history_incomplete"
-            elif history_policy.block_active_unused and active_unused.any(): eligible, reason = False, "active_unused_coupon"
-            elif history_policy.block_previously_redeemed and used: eligible, reason = False, "previously_redeemed"
-            elif len(personal) and point - personal.sent_at.max() < interval: eligible, reason = False, "minimum_send_interval"
+        eligible, reason, business, personal, used, active_unused = _coupon_eligibility(
+            d, row.customer_id, cp, rd, interval, point, history_policy)
         policy_candidate = rule.allow_candidate and Decimal(str(uplift)) > engine._decimal(rule.min_uplift, "min_uplift")
         candidate = eligible is True and policy_candidate
         policy_reason = None if policy_candidate else rule.exclusion_reason if not rule.allow_candidate else "uplift_not_above_threshold"

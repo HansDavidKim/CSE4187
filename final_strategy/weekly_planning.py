@@ -101,10 +101,42 @@ def validate_planning_output(result):
         require(value == summary[field], f"customer economics differ from budget summary: {field}")
 
 
+def _cost_declarations(first, cost_estimate, cost_inputs, cost_metadata):
+    evidence = None
+    if cost_estimate is not None:
+        require(isinstance(cost_estimate, CostEstimate) and cost_inputs is None and cost_metadata is None,
+                "supply either an estimate or declared costs")
+        evidence = cost_estimate.audit
+        require(cost_estimate.status in ("complete", "withheld") and evidence.get("status") == cost_estimate.status
+                and evidence.get("population_definition") == "all coupon requests including failures",
+                "cost estimate request denominator or status mismatch")
+        target = evidence["target"]
+        require(all(target[k] == first[k] for k in ("dataset_id", "raw_database_sha256", "currency"))
+                and pd.Timestamp(target["as_of_at"]) == first.as_of_at
+                and Decimal(str(target["amount_unit"])) == Decimal(str(first.amount_unit)),
+                "cost estimate target mismatch")
+        cost_metadata = cost_estimate.cost_metadata
+        if cost_estimate.status == "complete":
+            cost_inputs = cost_estimate.cost_inputs
+    return cost_inputs, cost_metadata, evidence
+
+
 def build_strategy_decisions(handoff, profile, reporting, budget, *, algorithm, eligibility,
                              coupons, redemptions, history_context, history_policy,
                              cost_estimate=None, cost_inputs=None, cost_metadata=None,
                              solver_config=None, hybrid_config=None):
+    """Plan one declared profile; costs are per request over the planning window."""
+    return _build_strategy_decisions(
+        handoff, profile, reporting, budget, algorithm=algorithm, eligibility=eligibility,
+        coupons=coupons, redemptions=redemptions, history_context=history_context,
+        history_policy=history_policy, cost_estimate=cost_estimate, cost_inputs=cost_inputs,
+        cost_metadata=cost_metadata, solver_config=solver_config, hybrid_config=hybrid_config)
+
+
+def _build_strategy_decisions(handoff, profile, reporting, budget, *, algorithm, eligibility,
+                             coupons, redemptions, history_context, history_policy,
+                             cost_estimate=None, cost_inputs=None, cost_metadata=None,
+                             solver_config=None, hybrid_config=None, segmentation=None):
     """Plan one declared profile; costs are per request over the planning window."""
     with localcontext(Context(prec=200)):
         require(isinstance(profile, PolicyCandidate) and isinstance(reporting, ReportingConfig)
@@ -119,22 +151,8 @@ def build_strategy_decisions(handoff, profile, reporting, budget, *, algorithm, 
         require(roster.currency.eq(budget.currency).all() and
                 all(_decimal(unit, "unit", positive=True) == _decimal(budget.amount_unit, "budget unit", positive=True)
                     for unit in roster.amount_unit), "budget units differ from roster")
-        evidence = None
-        if cost_estimate is not None:
-            require(isinstance(cost_estimate, CostEstimate) and cost_inputs is None and cost_metadata is None,
-                    "supply either an estimate or declared costs")
-            evidence = cost_estimate.audit
-            require(cost_estimate.status in ("complete", "withheld") and evidence.get("status") == cost_estimate.status
-                    and evidence.get("population_definition") == "all coupon requests including failures",
-                    "cost estimate request denominator or status mismatch")
-            target = evidence["target"]
-            require(all(target[k] == first[k] for k in ("dataset_id", "raw_database_sha256", "currency"))
-                    and pd.Timestamp(target["as_of_at"]) == first.as_of_at
-                    and Decimal(str(target["amount_unit"])) == Decimal(str(first.amount_unit)),
-                    "cost estimate target mismatch")
-            cost_metadata = cost_estimate.cost_metadata
-            if cost_estimate.status == "complete":
-                cost_inputs = cost_estimate.cost_inputs
+        cost_inputs, cost_metadata, evidence = _cost_declarations(
+            first, cost_estimate, cost_inputs, cost_metadata)
         runs = {}
         prices = None
         reason = None
@@ -149,7 +167,8 @@ def build_strategy_decisions(handoff, profile, reporting, budget, *, algorithm, 
             declared = _scope(cost_inputs, COST_INPUT_COLUMNS, roster, "cost_inputs")
             costs = declared.loc[declared.customer_id.isin(scored.customer_id)]
             strategy = _build_retention_strategy(
-                segment_customers(handoff.integrated, profile.segmentation), eligible, coupons, redemptions,
+                segment_customers(handoff.integrated, profile.segmentation) if segmentation is None else segmentation,
+                eligible, coupons, redemptions,
                 costs, cost_metadata, dataset_id=first.dataset_id, as_of_at=first.as_of_at,
                 currency=budget.currency, amount_unit=budget.amount_unit, policies=profile.policies,
                 history_context=history_context, history_policy=history_policy, common_cost_inputs=True)
